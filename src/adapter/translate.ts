@@ -65,13 +65,46 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
   return contents
 }
 
-/** Recursively remove `enumDescriptions` from tool schemas (upstream rejects with 400). */
-function stripEnumDescriptions(schema: unknown): unknown {
+/**
+ * The Antigravity backend parses tool `parameters` as a strict protobuf
+ * schema and rejects ANY unknown keyword with 400 (verified empirically:
+ * `$schema`, `propertyNames`, `pattern`, `minLength`, ... each fail in turn).
+ * Denylisting is whack-a-mole, so keep only the keywords the upstream
+ * accepts. Container shapes are handled distinctly: `properties` is a
+ * name->schema map (keys preserved), `items`/`additionalProperties` are
+ * nested schemas, `required`/`enum` are plain arrays.
+ */
+const AGY_SCHEMA_ALLOWLIST = new Set([
+  'type', 'format', 'title', 'description', 'nullable',
+  'items', 'enum', 'default', 'properties', 'required', 'additionalProperties',
+])
+const AGY_SCHEMA_MAP_KEYS = new Set(['properties'])
+const AGY_SCHEMA_NESTED_KEYS = new Set(['items', 'additionalProperties'])
+const AGY_SCHEMA_LIST_KEYS = new Set(['required', 'enum'])
+
+function sanitizeToolSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema
-  if (Array.isArray(schema)) return schema.map((entry) => stripEnumDescriptions(entry))
+  if (Array.isArray(schema)) return schema.map((entry) => sanitizeToolSchema(entry))
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
-    if (key !== 'enumDescriptions') result[key] = stripEnumDescriptions(value)
+    if (!AGY_SCHEMA_ALLOWLIST.has(key)) continue
+    if (AGY_SCHEMA_MAP_KEYS.has(key)) {
+      const map: Record<string, unknown> = {}
+      for (const [name, child] of Object.entries(value as Record<string, unknown>)) {
+        map[name] = sanitizeToolSchema(child)
+      }
+      result[key] = map
+      continue
+    }
+    if (AGY_SCHEMA_NESTED_KEYS.has(key)) {
+      result[key] = sanitizeToolSchema(value)
+      continue
+    }
+    if (AGY_SCHEMA_LIST_KEYS.has(key)) {
+      result[key] = value
+      continue
+    }
+    result[key] = value
   }
   return result
 }
@@ -96,11 +129,22 @@ function blockToParts(block: ContentBlock, toolNames: Map<string, string>): AgyP
     case 'reasoning':
       return [{ thought: true, text: block.text }]
     case 'tool-call': {
-      let args: unknown = block.arguments
-      try {
-        args = JSON.parse(block.arguments) as unknown
-      } catch {
-        // raw string args fall through (backend tolerates both)
+      // Upstream parses functionCall.args as google.protobuf.Struct and
+      // rejects a raw string with 400. Guarantee an object: parse the string
+      // form, fall back to {} when it is truncated/malformed (the failure
+      // mode for long multi-turn histories).
+      let args: unknown = {}
+      if (typeof block.arguments === 'object' && block.arguments !== null && !Array.isArray(block.arguments)) {
+        args = block.arguments
+      } else if (typeof block.arguments === 'string') {
+        try {
+          const parsed: unknown = JSON.parse(block.arguments)
+          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+            args = parsed
+          }
+        } catch {
+          // truncated/malformed JSON -> empty object
+        }
       }
       // Antigravity rejects functionCall parts without a thoughtSignature
       // (400). Replay the signature captured for this tool call id on the
@@ -143,7 +187,7 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
     functionDeclarations: tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
-      parameters: stripEnumDescriptions(tool.parameters),
+      parameters: sanitizeToolSchema(tool.parameters),
     })),
   }]
 }

@@ -95,6 +95,69 @@ describe('translate', () => {
     })
   })
 
+  it('keeps only allowlisted keywords in tool schemas (upstream 400)', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [{
+          name: 't1',
+          description: 'd1',
+          parameters: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            $id: 't1',
+            type: 'object',
+            title: 'T1',
+            description: 'd1',
+            propertyNames: { pattern: '^[a-z]+$' },
+            properties: {
+              name: { type: 'string', pattern: '^[a-z]+$', minLength: 1, maxLength: 10, enumDescriptions: ['a'] },
+              count: { type: 'integer', minimum: 0, maximum: 100 },
+              tags: { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1, uniqueItems: true },
+              mode: { type: 'string', enum: ['fast', 'slow'], enumDescriptions: ['f', 's'] },
+            },
+            required: ['name'],
+            additionalProperties: false,
+            minProperties: 1,
+          },
+        }],
+      }),
+      {},
+    )
+    expect(body.request.tools).toEqual([{
+      functionDeclarations: [{
+        name: 't1',
+        description: 'd1',
+        parameters: {
+          type: 'object',
+          title: 'T1',
+          description: 'd1',
+          properties: {
+            name: { type: 'string' },
+            count: { type: 'integer' },
+            tags: { type: 'array', items: { type: 'string' } },
+            mode: { type: 'string', enum: ['fast', 'slow'] },
+          },
+          required: ['name'],
+          additionalProperties: false,
+        },
+      }],
+    }])
+  })
+
+  it('falls back to empty args object when tool-call arguments are malformed', () => {
+    const messages = [
+      { id: 'a', role: 'assistant' as const, content: [
+        { type: 'tool-call' as const, id: 'call-1', name: 'web_search', arguments: '{"localPath":"/home/user/' },
+        { type: 'tool-call' as const, id: 'call-2', name: 'read_file', arguments: { path: '/x' } },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages }), {})
+    const parts = body.request.contents[0]!.parts
+    expect(parts).toEqual([
+      { thoughtSignature: 'skip_thought_signature_validator', functionCall: { id: 'call-1', name: 'web_search', args: {} } },
+      { thoughtSignature: 'skip_thought_signature_validator', functionCall: { id: 'call-2', name: 'read_file', args: { path: '/x' } } },
+    ])
+  })
+
   it('strips trailing model turns for Claude models only', () => {
     const messages = [
       { id: 'a', role: 'assistant' as const, content: [{ type: 'text' as const, text: 'answer' }] },
