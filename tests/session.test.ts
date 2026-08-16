@@ -198,6 +198,64 @@ describe('AgySessionManager', () => {
     expect(s3?.auth.access).toBe('at-1')
   })
 
+  it('pre-emptively refreshes within the skew and serves the cached token meanwhile', async () => {
+    let refreshCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        refreshCalls++
+        await new Promise((r) => setTimeout(r, 50)) // slow endpoint: proves no blocking
+        return new Response(JSON.stringify({ access_token: 'at-' + refreshCalls, expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: {} }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+    const store = new InMemoryAccountStore(storage([account('a@b.c')]))
+    const sessions = new AgySessionManager({ store })
+
+    const first = await sessions.getSession()
+    expect(first!.auth.access).toBe('at-1')
+
+    // 100s before expiry: still valid, but inside the 120s refresh skew.
+    vi.setSystemTime(Date.now() + 3500 * 1000)
+    const second = await sessions.getSession()
+    expect(second!.auth.access).toBe('at-1') // served from cache while the background refresh runs
+    await vi.waitFor(() => expect(refreshCalls).toBe(2))
+    await new Promise((r) => setTimeout(r, 80)) // let the slowed background refresh finish
+    const third = await sessions.getSession()
+    expect(third!.auth.access).toBe('at-2')
+    vi.useRealTimers()
+  })
+
+  it('retains the last good token when a pre-emptive refresh fails', async () => {
+    let failRefresh = false
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        if (failRefresh) throw new TypeError('fetch failed')
+        return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: {} }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+    const store = new InMemoryAccountStore(storage([account('a@b.c')]))
+    const sessions = new AgySessionManager({ store })
+
+    const first = await sessions.getSession()
+    expect(first!.auth.access).toBe('at-1')
+
+    failRefresh = true
+    vi.setSystemTime(Date.now() + 3500 * 1000)
+    const second = await sessions.getSession()
+    // The background refresh failed, but the still-valid token stays servable.
+    expect(second!.auth.access).toBe('at-1')
+    vi.useRealTimers()
+  })
+
 describe('usage-driven selection', () => {
   afterEach(() => vi.unstubAllGlobals())
 

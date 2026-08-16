@@ -90,6 +90,8 @@ export class AgySessionManager {
 
   /** Bound for one quota poll so selection never stalls on a hung endpoint. */
   private static readonly QUOTA_FETCH_TIMEOUT_MS = 3_000
+  /** Refresh the token this far ahead of expiry so a request never blocks on the token endpoint. */
+  private static readonly REFRESH_SKEW_MS = 2 * 60 * 1000
 
   /**
    * Session affinity (time-window approximation): DSH exposes no conversation
@@ -109,15 +111,13 @@ export class AgySessionManager {
     return account.email ?? `idx-${account.refresh}`
   }
 
-  /** Resolve a usable access token for the account, refreshing when expired. */
-  private async accessTokenFor(account: ManagedAccount): Promise<OAuthAuthDetails | undefined> {
-    const key = this.accountKey(account)
-    const cached = this.tokenCache.get(key)
-    const now = Date.now()
-    if (cached && !accessTokenExpired({ access: cached.access, expires: cached.expires, refresh: account.refresh })) {
-      return { access: cached.access, expires: cached.expires, refresh: account.refresh }
-    }
-
+  /**
+   * Refresh the account's access token (single-flight per account). A transient
+   * refresh failure keeps the cached token in place (retain-last-good): the old
+   * token stays valid until its own expiry and a later request retries the
+   * refresh. Only `invalid_grant` drops the cache.
+   */
+  private refreshToken(key: string, account: ManagedAccount, cached?: TokenCacheEntry): Promise<OAuthAuthDetails | undefined> {
     const inFlight = this.refreshInFlight.get(key)
     if (inFlight) return inFlight
 
@@ -133,15 +133,32 @@ export class AgySessionManager {
         this.tokenCache.delete(key)
         return undefined
       }
+      // Transient failure: the cached token (when present) remains servable.
       return undefined
     })()
 
     this.refreshInFlight.set(key, refreshing)
-    try {
-      return await refreshing
-    } finally {
-      this.refreshInFlight.delete(key)
+    refreshing.then(
+      () => this.refreshInFlight.delete(key),
+      () => this.refreshInFlight.delete(key),
+    )
+    return refreshing
+  }
+
+  /** Resolve a usable access token for the account, pre-emptively refreshing near expiry. */
+  private async accessTokenFor(account: ManagedAccount): Promise<OAuthAuthDetails | undefined> {
+    const key = this.accountKey(account)
+    const cached = this.tokenCache.get(key)
+    const now = Date.now()
+    if (cached && !accessTokenExpired({ access: cached.access, expires: cached.expires, refresh: account.refresh })) {
+      // Pre-emptive refresh within the skew: serve the still-valid token and
+      // refresh in the background (OMP-style refresh skew).
+      if (cached.expires <= now + AgySessionManager.REFRESH_SKEW_MS) {
+        void this.refreshToken(key, account, cached)
+      }
+      return { access: cached.access, expires: cached.expires, refresh: account.refresh }
     }
+    return this.refreshToken(key, account, cached)
   }
 
   /**
