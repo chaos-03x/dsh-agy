@@ -19,6 +19,16 @@ import {
 } from '../src/runtime/fingerprint.ts'
 import { deriveAntigravitySessionId, generateAntigravityRequestId, generateAntigravitySessionId } from '../src/runtime/identity.ts'
 import { resolveAntigravityVersion } from '../src/runtime/version.ts'
+import {
+  FAMILY_UNKNOWN,
+  familyKeyOf,
+  ingestFamilyQuotas,
+  isFamilyDrained,
+  isQuotaStale,
+  modelFamilyOf,
+  rankPoolCandidates,
+  requiredDrainFor,
+} from '../src/runtime/quota.ts'
 import type { ManagedAccount } from '../src/types.ts'
 
 function account(): ManagedAccount {
@@ -140,6 +150,35 @@ describe('rotation state machine', () => {
     const acc5 = account()
     const d5 = decideRotation('network-error', acc5, 5)
     expect(d5.backoffMs).toBeGreaterThan(d0.backoffMs)
+  })
+
+  it('cools daily quota until the real reset time (capped at 24h)', () => {
+    const before = Date.now()
+    const acc = account()
+    const decision = decideRotation('rate-limit', acc, 0, undefined, 'quota_exhausted', new Date(before + 2 * 60 * 60 * 1000).toISOString())
+    expect(decision.action).toBe('cool')
+    expect(acc.coolingDownUntil!).toBeGreaterThanOrEqual(before + 2 * 60 * 60 * 1000 - 1000)
+    expect(acc.coolingDownUntil!).toBeLessThan(before + 2 * 60 * 60 * 1000 + 5000)
+
+    const far = account()
+    decideRotation('rate-limit', far, 0, undefined, 'quota_exhausted', new Date(before + 48 * 60 * 60 * 1000).toISOString())
+    expect(far.coolingDownUntil! - before).toBeLessThan(24 * 60 * 60 * 1000 + 5000)
+  })
+
+  it('cools per-minute limits until the real reset (capped at 30min), ignoring past resets', () => {
+    const before = Date.now()
+    const acc = account()
+    decideRotation('rate-limit', acc, 0, undefined, 'rate_limited', new Date(before + 10 * 60 * 1000).toISOString())
+    expect(acc.coolingDownUntil!).toBeGreaterThanOrEqual(before + 10 * 60 * 1000 - 1000)
+    expect(acc.coolingDownUntil!).toBeLessThan(before + 10 * 60 * 1000 + 5000)
+
+    const far = account()
+    decideRotation('rate-limit', far, 0, undefined, 'rate_limited', new Date(before + 2 * 60 * 60 * 1000).toISOString())
+    expect(far.coolingDownUntil! - before).toBeLessThan(30 * 60 * 1000 + 5000)
+
+    const past = account()
+    decideRotation('rate-limit', past, 0, undefined, 'rate_limited', new Date(before - 60 * 1000).toISOString())
+    expect(past.coolingDownUntil! - before).toBe(5 * 60 * 1000)
   })
 
   it('picks the next eligible account round-robin', () => {
@@ -279,5 +318,135 @@ describe('version resolver', () => {
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
     const version = await resolveAntigravityVersion(fetchImpl)
     expect(version).toMatch(/^\d+\.\d+\.\d+$/)
+  })
+})
+
+describe('quota family mapping', () => {
+  it('maps model ids to backend counter families', () => {
+    expect(modelFamilyOf('gemini-3.5-flash')).toBe('google')
+    expect(modelFamilyOf('gemma-3-27b')).toBe('google')
+    expect(modelFamilyOf('claude-sonnet-4-6')).toBe('anthropic')
+    expect(modelFamilyOf('gpt-oss-120b-medium')).toBe('openai')
+    expect(modelFamilyOf('openai/gpt-5.1')).toBe('openai')
+    expect(modelFamilyOf('some-custom-model')).toBeUndefined()
+    expect(modelFamilyOf(undefined)).toBeUndefined()
+    expect(familyKeyOf('some-custom-model')).toBe(FAMILY_UNKNOWN)
+  })
+})
+
+describe('family quota ingestion', () => {
+  it('aggregates per-model quotaInfo into the most-pressured family record', () => {
+    const ingested = ingestFamilyQuotas({
+      models: {
+        'gemini-a': { quotaInfo: { remainingFraction: 0.2, resetTime: '2099-01-01T00:00:00Z' } },
+        'gemini-b': { quotaInfo: { remainingFraction: 0.05, resetTime: '2098-01-01T00:00:00Z' } },
+        'claude-x': { quotaInfo: { remainingFraction: 0.5 } },
+        'weird-1': { quotaInfo: { remainingFraction: 0.9 } },
+        'no-quota-model': {},
+      },
+    })
+    expect(ingested).toEqual({
+      google: { remainingFraction: 0.05, resetTime: '2098-01-01T00:00:00Z', modelCount: 2 },
+      anthropic: { remainingFraction: 0.5, modelCount: 1 },
+      unknown: { remainingFraction: 0.9, modelCount: 1 },
+    })
+  })
+
+  it('keeps family entries separate and drops models without quota info', () => {
+    expect(ingestFamilyQuotas({ models: { 'claude-a': { quotaInfo: { remainingFraction: 0.1 } } } })).toEqual({
+      anthropic: { remainingFraction: 0.1, modelCount: 1 },
+    })
+    expect(ingestFamilyQuotas({})).toEqual({})
+    expect(ingestFamilyQuotas({ models: undefined })).toEqual({})
+  })
+})
+
+describe('family quota helpers', () => {
+  function withQuota(quota: Record<string, { remainingFraction?: number; resetTime?: string }>, updatedAt = Date.now()): ManagedAccount {
+    const acc = account()
+    acc.cachedQuota = quota
+    acc.cachedQuotaUpdatedAt = updatedAt
+    return acc
+  }
+
+  it('detects drained families below the soft threshold, ignoring past resets', () => {
+    const acc = withQuota({ google: { remainingFraction: 0.05 } })
+    expect(isFamilyDrained(acc, 'google')).toBe(true)
+    expect(isFamilyDrained(acc, 'anthropic')).toBe(false)
+    const resetting = withQuota({ google: { remainingFraction: 0.05, resetTime: '2000-01-01T00:00:00Z' } })
+    expect(isFamilyDrained(resetting, 'google')).toBe(false)
+    expect(isFamilyDrained(account())).toBe(false)
+  })
+
+  it('flags stale caches by health-based TTL', () => {
+    expect(isQuotaStale(account())).toBe(true)
+    expect(isQuotaStale(withQuota({ google: { remainingFraction: 0.9 } }))).toBe(false)
+    const stale = withQuota({ google: { remainingFraction: 0.9 } }, Date.now() - 20 * 60 * 1000)
+    expect(isQuotaStale(stale)).toBe(true)
+    const drainedTtl = withQuota({ google: { remainingFraction: 0.05 } }, Date.now() - 2 * 60 * 1000)
+    expect(isQuotaStale(drainedTtl)).toBe(true)
+  })
+
+  it('computes required-drain from headroom and reset proximity', () => {
+    expect(requiredDrainFor(undefined)).toBe(0)
+    expect(requiredDrainFor({ remainingFraction: 0 })).toBe(0)
+    const day = requiredDrainFor({ remainingFraction: 0.5 })
+    expect(day).toBeCloseTo(0.5 / 24, 4)
+    const hour = requiredDrainFor({ remainingFraction: 0.5, resetTime: new Date(Date.now() + 60 * 60 * 1000).toISOString() })
+    expect(hour).toBeCloseTo(0.5 / 1, 2)
+  })
+})
+
+describe('pool candidate ranking', () => {
+  function entry(index: number, quota?: { remainingFraction?: number; resetTime?: string }, extra: Partial<ManagedAccount> = {}) {
+    const acc: ManagedAccount = { email: `a${index}@x`, refresh: `rt-${index}|p`, addedAt: 0, lastUsed: 0 }
+    if (quota) {
+      acc.cachedQuota = { google: quota }
+      acc.cachedQuotaUpdatedAt = Date.now()
+    }
+    return { account: { ...acc, ...extra }, index }
+  }
+
+  it('orders unblocked before hot before unmeasured before blocked, by drain then usage', () => {
+    const twoHours = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+    const entries = [
+      entry(0, { remainingFraction: 0.9, resetTime: twoHours }), // headroom 0.9 → drain 0.45
+      entry(1, { remainingFraction: 0.5, resetTime: twoHours }), // headroom 0.5 → drain 0.25
+      entry(2), // unmeasured
+      entry(3, { remainingFraction: 0.1 }), // hot (used 0.9 ≥ 0.85)
+      entry(4, undefined, { coolingDownUntil: Date.now() + 60_000 }), // blocked
+    ]
+    const ranked = rankPoolCandidates(entries, 'gemini-3.5-flash')
+    expect(ranked.map((c) => c.index)).toEqual([0, 1, 2, 3, 4])
+  })
+
+  it('blocks exhausted families until their reset and sorts blocked by unblock time', () => {
+    const reset = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString()
+    const entries = [
+      entry(0, { remainingFraction: 0, resetTime: reset }),
+      entry(1, undefined, { coolingDownUntil: Date.now() + 60 * 60 * 1000 }),
+      entry(2, undefined, { coolingDownUntil: Date.now() + 30 * 60 * 1000 }),
+    ]
+    const ranked = rankPoolCandidates(entries, 'gemini-3.5-flash')
+    expect(ranked.map((c) => c.index)).toEqual([2, 1, 0])
+    expect(ranked[2]!.blockedUntil).toBeGreaterThan(Date.now() + 2 * 60 * 60 * 1000)
+  })
+
+  it('keeps the rotation-order bias when nobody is measured', () => {
+    const entries = [entry(0), entry(1), entry(2)]
+    const ranked = rankPoolCandidates(entries, undefined, Date.now(), 1)
+    expect(ranked.map((c) => c.index)).toEqual([1, 2, 0])
+  })
+
+  it('ranks per family, so a pressured anthropic family does not affect gemini picks', () => {
+    const anthropic = entry(0)
+    anthropic.account.cachedQuota = { anthropic: { remainingFraction: 0.02 }, google: { remainingFraction: 0.9 } }
+    anthropic.account.cachedQuotaUpdatedAt = Date.now()
+    const googleHeavy = entry(1)
+    googleHeavy.account.cachedQuota = { google: { remainingFraction: 0.3 } }
+    googleHeavy.account.cachedQuotaUpdatedAt = Date.now()
+    const ranked = rankPoolCandidates([anthropic, googleHeavy], 'gemini-3.5-flash')
+    // For gemini: entry 0 has more headroom (0.9) than entry 1 (0.3) → ranked first.
+    expect(ranked.map((c) => c.index)).toEqual([0, 1])
   })
 })

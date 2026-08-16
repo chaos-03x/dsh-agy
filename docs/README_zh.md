@@ -13,7 +13,7 @@ OAuth 认证、多账号池 + 自动 429 轮换、设备指纹伪装，以及 CL
 
 - **OAuth 登录**: 通过浏览器 OAuth 回调一键登录，支持 headless 粘贴 URL 模式与远程粘贴凭据 blob 通道。
 - **双管理入口**: web 和 cli 任选其一，核心功能一致。
-- **多账号池**: 加密账号存储、限流自动轮换、分级退避冷却、每账号设备指纹。
+- **多账号池**: 加密账号存储、用量感知选号（模型族配额 + OMP 对齐排名）、限流自动轮换、冷却到真实 reset 时间、每账号设备指纹。
 - **配额仪表盘**: 仅在 DSH Web 启动时有效，在你的 dsh web 地址后添加 `/agy` 访问：登录、账号管理、每模型配额条、模型测试、
   凭据导出/导入、指纹管理。
 - **CLI**: `dsh-agy login|status|import|verify|logout`，独立于 harness 运行。
@@ -113,8 +113,8 @@ rm -f ~/.dsh/agy-fingerprint-data.json   # 仅当创建过覆盖文件
 | 分类 | 行为 |
 |---|---|
 | `soft_rate_limit`（Retry-After < 3s） | 同账号立即重试，不冷却 |
-| `rate_limited` | 5 分钟冷却 + 切换到下一账号（单账号时冷却后重试同号） |
-| `quota_exhausted`（"quota reached"/"individual quota"/RESOURCE_EXHAUSTED…） | 24 小时冷却——当天不再尝试调用该账号 |
+| `rate_limited` | 冷却到服务端上报的 reset 时间（上限 30 分钟，无上报时 5 分钟）+ 切换到下一账号（单账号时冷却后重试同号） |
+| `quota_exhausted`（"quota reached"/"individual quota"/RESOURCE_EXHAUSTED…） | 冷却到服务端上报的 reset 时间（上限 24 小时）——到点前不再尝试调用该账号 |
 | `unknown` | 指数退避 |
 
 401/403 → 账号吊销（标记需重新认证）。成功重置失败计数。

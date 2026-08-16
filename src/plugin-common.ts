@@ -72,7 +72,7 @@ export async function createAgyRuntime(ctx: Context): Promise<{
   const store = new JsonAccountStore({ file: `${dshHome}/agy-accounts.json`, codec })
   const sessions = new AgySessionManager({ store })
   const adapter = new AgyAdapter({
-    getSession: () => sessions.getSession(),
+    getSession: (model) => sessions.getSession(model),
     reportFailure: (kind, session, info) => sessions.reportFailure(kind, session, info),
     markSuccess: (session) => sessions.markSuccess(session),
   })

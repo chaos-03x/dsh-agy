@@ -46,7 +46,8 @@
 | `oauth/blob` | `encode/decode(blob)` | 前缀校验、provider 绑定防重放 | 纯单元 |
 | `store/accounts` | `load() / save(acc) / mutate(fn)` | 加密、proper-lockfile、迁移链、去重、0600 | **in-memory fake**（第二个 adapter，正当的 seam） |
 | `runtime/classify` | `classify(error) → Kind` | 429/403/网络错误解析、Retry-After、resetTime | fixture |
-| `runtime/rotation` | `onFailure(acc, kind) → Action` | 冷却、backoff 分级、activeIndex 切换、指纹再生触发 | 状态机单元测试 |
+| `runtime/rotation` | `onFailure(acc, kind) → Action` | 冷却到服务端上报的真实 reset 时间（上限 30min/24h）、backoff 分级、activeIndex 切换、指纹再生触发 | 状态机单元测试 |
+| `runtime/quota` | `rank(accounts, model) → order` | fetchAvailableModels → 按模型族（google/anthropic/openai）聚合配额、drained/hot-window 护栏、required-drain 排名（对齐 OMP） | 纯单元 |
 | `runtime/fingerprint` | `generate() → Fingerprint` | 随机平台/arch/SDK 池、历史管理（≤5）、版本同步；**数据外置 JSON** | 纯单元 |
 | `adapter/translate` | `toBody(generateOptions) → RequestBody` | DSH messages/tools → Gemini contents[]，thinking 原样携带 | fixture（录制请求） |
 | `adapter/parse` | `fromSSE(line) → Chunk[]` | SSE 行解析、candidates[] → StreamChunk、usage/错误事件 | fixture（录制响应原文） |
@@ -66,7 +67,7 @@
 | `thinking-recovery.ts` + warmup | 根源是"剥离 thinking 规避签名校验"；我们原样携带 reasoning 块，无此问题 |
 | `cross-model-integration.ts` | DSH 历史是 provider-neutral 块，loop 负责跨模型连续性；该模块源码在 archived 仓库中已删除 |
 | gemini-cli 头风格/双配额池 | Google 已不支持该客户端路径；单一配额池简化轮换 |
-| 模型族拆分 `activeIndexByFamily` | 1–3 账号场景用不到 |
+| 模型族拆分 `activeIndexByFamily` | 单个亲和 pin + 模型族配额排名（`runtime/quota`）已覆盖需求，无需按族维护独立 activeIndex |
 | 插件 Config（schemastery） | 无用户配置面 |
 
 ## 5. 目录树（最终形态）

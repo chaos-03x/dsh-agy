@@ -9,13 +9,21 @@ import type { AccountStorageV4, FailureKind, ManagedAccount, OAuthAuthDetails } 
 import { refreshAccessToken } from './oauth/refresh.ts'
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from './oauth/auth.ts'
 import type { AccountStore } from './store/accounts.ts'
-import { resolveActiveAccount } from './store/accounts.ts'
 import {
   clearExpiredState,
   decideRotation,
   isCoolingDown,
   pickNextAccountIndex,
+  recordRateLimit,
 } from './runtime/rotation.ts'
+import {
+  familyKeyOf,
+  ingestFamilyQuotas,
+  isFamilyDrained,
+  isQuotaStale,
+  modelFamilyOf,
+  rankPoolCandidates,
+} from './runtime/quota.ts'
 import {
   DEFAULT_FINGERPRINT_DATA,
   generateFingerprint,
@@ -74,9 +82,14 @@ export class AgySessionManager {
   private readonly tokenCache = new Map<string, TokenCacheEntry>()
   /** In-flight refresh promises keyed by account: concurrent requests share one refresh. */
   private readonly refreshInFlight = new Map<string, Promise<OAuthAuthDetails | undefined>>()
+  /** In-flight quota fetches keyed by account: concurrent selections share one fetchAvailableModels call. */
+  private readonly quotaRefreshInFlight = new Map<string, Promise<void>>()
   private readonly failureCounts = new Map<string, number>()
   /** Accounts whose request-time project discovery already failed (no retry per request). */
   private readonly projectRetryFailed = new Set<string>()
+
+  /** Bound for one quota poll so selection never stalls on a hung endpoint. */
+  private static readonly QUOTA_FETCH_TIMEOUT_MS = 3_000
 
   /**
    * Session affinity (time-window approximation): DSH exposes no conversation
@@ -131,30 +144,86 @@ export class AgySessionManager {
     }
   }
 
-  private async pickAccount(storage: AccountStorageV4): Promise<{ account: ManagedAccount; index: number } | undefined> {
+  /**
+   * Refresh stale per-account quota caches (family-scoped, health-based TTL).
+   * Failures leave the account unmeasured: ranking treats it as a fallback
+   * instead of blocking selection on a hung endpoint.
+   */
+  private async refreshQuotaCache(storage: AccountStorageV4): Promise<void> {
+    const now = Date.now()
+    const stale = storage.accounts.filter((account) => account.enabled !== false && isQuotaStale(account, now))
+    if (stale.length === 0) return
+
+    await Promise.all(stale.map(async (account) => {
+      const key = this.accountKey(account)
+      if (this.quotaRefreshInFlight.has(key)) return this.quotaRefreshInFlight.get(key)
+      const refresh = (async () => {
+        try {
+          const auth = await this.accessTokenFor(account)
+          if (!auth) return
+          const { fetchAvailableModels } = await import('./adapter/models.ts')
+          const boundedFetch: typeof fetch = (input, init) => {
+            const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
+            const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+            return fetch(input, { ...init, signal })
+          }
+          const discovered = await fetchAvailableModels(auth.access, account.projectId, boundedFetch)
+          const quotas = ingestFamilyQuotas(discovered)
+          const updatedAt = Date.now()
+          await this.store.mutate((s) => {
+            const target = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+            if (target) {
+              if (Object.keys(quotas).length > 0) target.cachedQuota = quotas
+              target.cachedQuotaUpdatedAt = updatedAt
+            }
+          })
+        } catch {
+          // quota stays unmeasured — ranking falls back to rotation order
+        }
+      })()
+      this.quotaRefreshInFlight.set(key, refresh)
+      try {
+        await refresh
+      } finally {
+        this.quotaRefreshInFlight.delete(key)
+      }
+    }))
+  }
+
+  /**
+   * Pick the account for one request: the affinity pin wins while it is fresh,
+   * healthy, and not drained for the requested model; otherwise the pool is
+   * ranked by family-scoped usage (OMP-aligned) and the best candidate wins.
+   */
+  private async pickAccount(storage: AccountStorageV4, model?: string): Promise<{ account: ManagedAccount; index: number } | undefined> {
     const now = Date.now()
     for (const account of storage.accounts) clearExpiredState(account, now)
 
-    let resolved = resolveActiveAccount(storage)
-    if (!resolved) return undefined
+    const family = modelFamilyOf(model)
     // Session affinity (time-window approximation): reuse the last-used account
     // while it is fresh and healthy, so one conversation stays on one account
-    // (upstream prefix cache + sessionId continuity). DSH exposes no
-    // conversation id, so the window is the proxy; rotate clears it.
+    // (upstream prefix cache + sessionId continuity). A drained family or a
+    // cooldown breaks the pin and re-ranks, mirroring OMP's pinned-until-unusable.
     if (this.lastUsed && now - this.lastUsed.at < SESSION_AFFINITY_WINDOW_MS) {
       const last = storage.accounts[this.lastUsed.index]
-      if (last && last.enabled !== false && !isCoolingDown(last, now)) {
-        resolved = { account: last, index: this.lastUsed.index }
+      if (last && last.enabled !== false && !isCoolingDown(last, now) && !isFamilyDrained(last, family)) {
+        return { account: last, index: this.lastUsed.index }
       }
     }
-    // Skip accounts that are cooling down (rate-limit cooldowns).
-    if (isCoolingDown(resolved.account, now)) {
-      const nextIndex = pickNextAccountIndex(storage.accounts, resolved.index, now)
-      if (nextIndex !== resolved.index) {
-        resolved = { account: storage.accounts[nextIndex]!, index: nextIndex }
-      }
+
+    const eligible = storage.accounts
+      .map((account, index) => ({ account, index }))
+      .filter(({ account }) => account.enabled !== false)
+    if (eligible.length === 0) return undefined
+    if (eligible.length === 1) return eligible[0]
+
+    const [picked] = rankPoolCandidates(eligible, model, now, storage.activeIndex)
+    if (!picked) return eligible[0]
+    if (picked.index !== storage.activeIndex) {
+      storage.activeIndex = picked.index
+      await this.store.save(storage)
     }
-    return resolved
+    return { account: picked.account, index: picked.index }
   }
 
   /**
@@ -162,10 +231,15 @@ export class AgySessionManager {
    * missing projectId at request time — the OAuth-time loadCodeAssist may have
    * transiently failed even when the Google account owns a Cloud Code project
    * (mirrors OmniRoute's ensureAntigravityProjectAssigned + persistence).
+   * @param model - requested model id; drives family-scoped quota ranking.
    */
-  async getSession(): Promise<AgyAccountSession | undefined> {
+  async getSession(model?: string): Promise<AgyAccountSession | undefined> {
+    const initial = await this.store.load()
+    await this.refreshQuotaCache(initial)
+    // The quota refresh persists through the store; re-read so the ranking
+    // below sees the fresh cache it just wrote.
     const storage = await this.store.load()
-    const picked = await this.pickAccount(storage)
+    const picked = await this.pickAccount(storage, model)
     if (!picked) return undefined
 
     const auth = await this.accessTokenFor(picked.account)
@@ -212,7 +286,15 @@ export class AgySessionManager {
   async reportFailure(
     kind: FailureKind,
     session: AgyAccountSession,
-    info?: { retryAfterMs?: number; status?: number; rateLimitCategory?: import('./runtime/classify.ts').RateLimitCategory },
+    info?: {
+      retryAfterMs?: number
+      status?: number
+      rateLimitCategory?: import('./runtime/classify.ts').RateLimitCategory
+      /** Server-reported absolute reset time; drives precise cooldowns. */
+      resetTime?: string
+      /** Requested model id; drives family-scoped rate-limit bookkeeping. */
+      model?: string
+    },
   ): Promise<void> {
     const storage = await this.store.load()
     const account = storage.accounts[session.index]
@@ -222,7 +304,12 @@ export class AgySessionManager {
     const consecutive = (this.failureCounts.get(key) ?? 0) + 1
     this.failureCounts.set(key, consecutive)
 
-    const decision = decideRotation(kind, account, consecutive, info?.retryAfterMs, info?.rateLimitCategory)
+    const decision = decideRotation(kind, account, consecutive, info?.retryAfterMs, info?.rateLimitCategory, info?.resetTime)
+
+    if (kind === 'rate-limit' && info?.resetTime) {
+      // Family-scoped bookkeeping of the real reset (display + ranking wall).
+      recordRateLimit(account, familyKeyOf(info?.model), Date.parse(info.resetTime) || Date.now() + 60_000)
+    }
 
     if (decision.action === 'revoke') {
       this.tokenCache.delete(key)

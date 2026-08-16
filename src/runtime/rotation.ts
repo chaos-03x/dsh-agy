@@ -66,6 +66,16 @@ export function clearExpiredState(account: ManagedAccount, now = Date.now()): vo
 export const FULL_QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000
 /** 5min cooldown for per-minute rate limits. */
 export const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000
+/** Cap for a server-reported reset time on per-minute limits (guards against bogus far-future values). */
+export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000
+
+/** Absolute server-reported reset in ms when it lies in the future, else undefined. */
+export function parseFutureResetMs(resetTime: string | undefined, now = Date.now()): number | undefined {
+  if (!resetTime) return undefined
+  const reset = Date.parse(resetTime)
+  if (Number.isNaN(reset) || reset <= now) return undefined
+  return reset
+}
 
 /**
  * Decide what to do after one failed attempt.
@@ -74,6 +84,7 @@ export const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000
  * @param account - the account that failed (mutated with cooldown/rate-limit state).
  * @param consecutiveFailures - consecutive failures on this account.
  * @param retryAfterMs - server-provided retry delay when present.
+ * @param resetTime - server-provided absolute reset time; cooldowns use it (capped) instead of fixed windows.
  */
 export function decideRotation(
   kind: FailureKind,
@@ -81,6 +92,7 @@ export function decideRotation(
   consecutiveFailures: number,
   retryAfterMs?: number,
   category: RateLimitCategory = 'unknown',
+  resetTime?: string,
 ): RotationAction {
   const now = Date.now()
   const backoffMs = backoffFor(consecutiveFailures)
@@ -92,13 +104,23 @@ export function decideRotation(
         return { action: 'retry', backoffMs: Math.min(retryAfterMs ?? backoffMs, 3000) }
       }
       if (category === 'quota_exhausted') {
-        // Daily/plan quota gone: long cooldown; a single account just waits.
-        account.coolingDownUntil = now + FULL_QUOTA_COOLDOWN_MS
+        // Daily/plan quota gone: cool until the real reset when the backend
+        // reported one (capped at 24h), else the fixed daily window.
+        const resetMs = parseFutureResetMs(resetTime, now)
+        const cooldownMs = resetMs !== undefined
+          ? Math.min(resetMs - now, FULL_QUOTA_COOLDOWN_MS)
+          : FULL_QUOTA_COOLDOWN_MS
+        account.coolingDownUntil = now + Math.max(cooldownMs, 60_000)
         account.cooldownReason = undefined
-        return { action: 'cool', backoffMs: FULL_QUOTA_COOLDOWN_MS }
+        return { action: 'cool', backoffMs: Math.max(cooldownMs, 60_000) }
       }
-      const cooldownMs = retryAfterMs ?? RATE_LIMIT_COOLDOWN_MS
-      account.coolingDownUntil = now + cooldownMs
+      // Per-minute rate limit: prefer the server's real reset (capped), then
+      // Retry-After, then the fixed short window.
+      const resetMs = parseFutureResetMs(resetTime, now)
+      const cooldownMs = resetMs !== undefined
+        ? Math.min(resetMs - now, MAX_RATE_LIMIT_COOLDOWN_MS)
+        : (retryAfterMs ?? RATE_LIMIT_COOLDOWN_MS)
+      account.coolingDownUntil = now + Math.max(cooldownMs, 1000)
       account.cooldownReason = undefined // per-model resets live in rateLimitResetTimes
       return { action: 'rotate', backoffMs }
     }

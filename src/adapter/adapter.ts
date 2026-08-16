@@ -43,13 +43,21 @@ export interface AgyAccountSession {
 }
 
 export interface AgyAdapterOptions {
-  /** Resolve the active account (shell refreshes expired tokens and switches on rotation). */
-  getSession(): Promise<AgyAccountSession | undefined>
+  /** Resolve the active account for a request (model-aware: family-scoped quota ranking). */
+  getSession(model?: string): Promise<AgyAccountSession | undefined>
   /** Report a classified upstream failure so the shell can cool/rotate/revoke. */
   reportFailure(
     kind: FailureKind,
     session: AgyAccountSession,
-    info?: { retryAfterMs?: number; status?: number; rateLimitCategory?: RateLimitCategory },
+    info?: {
+      retryAfterMs?: number
+      status?: number
+      rateLimitCategory?: RateLimitCategory
+      /** Server-reported absolute reset time; drives precise cooldowns. */
+      resetTime?: string
+      /** Requested model id; drives family-scoped rate-limit bookkeeping. */
+      model?: string
+    },
   ): Promise<void>
   /** Report a clean stream completion (resets the failure counter). */
   markSuccess?(session: AgyAccountSession): Promise<void>
@@ -91,7 +99,7 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const session = await this.options.getSession()
+    const session = await this.options.getSession(options.model)
     if (!session) {
       throw new LlmError(
         'No agy account configured — run `dsh-agy login` to authenticate.',
@@ -126,6 +134,8 @@ export class AgyAdapter extends LlmAdapter {
         retryAfterMs: classified.retryAfterMs,
         status: response.status,
         rateLimitCategory: classified.rateLimitCategory,
+        resetTime: classified.resetTime,
+        model: options.model,
       })
       if (classified.kind === 'rate-limit') {
         // soft/rate limits are retryable by the harness (RATE_LIMIT + delay);

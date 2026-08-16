@@ -198,6 +198,116 @@ describe('AgySessionManager', () => {
     expect(s3?.auth.access).toBe('at-1')
   })
 
+describe('usage-driven selection', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function quotaAccount(email: string, quota: Record<string, { remainingFraction?: number; resetTime?: string }>): ManagedAccount {
+    return {
+      ...account(email),
+      cachedQuota: quota,
+      cachedQuotaUpdatedAt: Date.now(),
+    }
+  }
+
+  it('ranks the requested family and picks the account with expiring headroom', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([
+      quotaAccount('a@x', { google: { remainingFraction: 0.9 } }),
+      quotaAccount('b@x', { google: { remainingFraction: 0.2 } }),
+    ], 1))
+    const sessions = new AgySessionManager({ store })
+
+    // a holds the headroom that would expire unused → ranked first for gemini,
+    // re-balancing away from the active account (b).
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session!.index).toBe(0)
+    expect((await store.load()).activeIndex).toBe(0)
+  })
+
+  it('breaks the affinity pin when the pinned account family is drained', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([
+      quotaAccount('a@x', { google: { remainingFraction: 0.5 } }),
+      quotaAccount('b@x', { google: { remainingFraction: 0.8 } }),
+    ], 0))
+    const sessions = new AgySessionManager({ store })
+
+    const first = await sessions.getSession('gemini-3.5-flash')
+    expect(first!.index).toBe(1) // b holds more headroom → picked and pinned
+    // b's google family drops below the soft threshold.
+    await store.mutate((s) => { s.accounts[1]!.cachedQuota!.google!.remainingFraction = 0.05 })
+    const second = await sessions.getSession('gemini-3.5-flash')
+    expect(second!.index).toBe(0)
+  })
+
+  it('ingests fresh family quotas from fetchAvailableModels when the cache is stale', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({
+          models: {
+            'gemini-3.5-flash': { quotaInfo: { remainingFraction: 0.4, resetTime: '2099-01-01T00:00:00Z' } },
+            'gemini-3.5-pro': { quotaInfo: { remainingFraction: 0.1, resetTime: '2098-01-01T00:00:00Z' } },
+            'claude-sonnet-4-6': { quotaInfo: { remainingFraction: 0.6 } },
+          },
+        }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+
+    const store = new InMemoryAccountStore(storage([account('a@x')]))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session!.index).toBe(0)
+    const after = await store.load()
+    expect(after.accounts[0]!.cachedQuota).toEqual({
+      google: { remainingFraction: 0.1, resetTime: '2098-01-01T00:00:00Z', modelCount: 2 },
+      anthropic: { remainingFraction: 0.6, modelCount: 1 },
+    })
+    expect(after.accounts[0]!.cachedQuotaUpdatedAt).toBeGreaterThan(0)
+  })
+
+  it('keeps selection on rotation order when the quota fetch fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        throw new TypeError('fetch failed')
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 1))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session!.index).toBe(1)
+    expect((await store.load()).accounts[0]!.cachedQuota).toBeUndefined()
+  })
+
+  it('records the family-scoped reset from a rate-limit failure', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('claude-sonnet-4-6')
+    const reset = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+    await sessions.reportFailure('rate-limit', session!, { resetTime: reset, model: 'claude-sonnet-4-6' })
+    const after = await store.load()
+    const failed = after.accounts[0]!
+    expect(failed.rateLimitResetTimes).toHaveProperty('anthropic')
+    expect(failed.rateLimitResetTimes!['anthropic']).toBeGreaterThan(Date.now() + 60 * 60 * 1000)
+    // Precise cooldown from the reported reset (capped at 30min), not the fixed 5min window.
+    expect(failed.coolingDownUntil).toBeGreaterThan(Date.now() + 29 * 60 * 1000)
+  })
+})
+
 describe('verifyAccount', () => {
   afterEach(() => vi.unstubAllGlobals())
 

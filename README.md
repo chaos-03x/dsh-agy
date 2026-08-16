@@ -15,8 +15,9 @@ fingerprinting, and both CLI and web management.
   paste-URL mode and a remote paste-credential blob channel.
 - **Two management surfaces**: web and CLI, either one works, core features are
   the same.
-- **Multi-account pool**: encrypted account store, automatic rotation on rate
-  limits, per-account cooldown with tiered backoff, per-account device
+- **Multi-account pool**: encrypted account store, usage-aware account
+  selection (family-scoped quotas, OMP-aligned ranking), automatic rotation on
+  rate limits, per-account cooldown to the real reset time, per-account device
   fingerprints.
 - **Quota dashboard**: only active when DSH Web is running; append `/agy` to
   your dsh web address: login, account management, per-model quota bars, model
@@ -119,8 +120,8 @@ valid until it expires or you revoke it in your Google account security settings
 | Category | Behavior |
 |---|---|
 | `soft_rate_limit` (Retry-After < 3s) | immediate retry on the same account, no cooldown |
-| `rate_limited` | 5-minute cooldown + switch to the next account (same account when single) |
-| `quota_exhausted` ("quota reached", "individual quota", RESOURCE_EXHAUSTED…) | 24-hour cooldown — no further calls to that account for the day |
+| `rate_limited` | cooldown until the server-reported reset time (capped 30min, 5min fallback) + switch to the next account (same account when single) |
+| `quota_exhausted` ("quota reached", "individual quota", RESOURCE_EXHAUSTED…) | cooldown until the server-reported reset time (capped 24h) — no further calls to that account until then |
 | `unknown` | exponential backoff |
 
 401/403 → account revoked (marked for re-authentication). Success resets the failure
