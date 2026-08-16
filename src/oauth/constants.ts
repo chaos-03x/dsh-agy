@@ -14,6 +14,18 @@ export const AGY_CLIENT_ID =
 
 export const AGY_CLIENT_SECRET = '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'
 
+/**
+ * Effective OAuth client credentials: AGY_CLIENT_ID / AGY_CLIENT_SECRET env
+ * overrides win when set (BYO OAuth app escape hatch, mirrors pi-antigravity);
+ * otherwise the embedded public Antigravity credentials are used.
+ */
+export function resolveAgyClientCredentials(): { clientId: string; clientSecret: string } {
+  return {
+    clientId: process.env.AGY_CLIENT_ID || AGY_CLIENT_ID,
+    clientSecret: process.env.AGY_CLIENT_SECRET || AGY_CLIENT_SECRET,
+  }
+}
+
 /** Required scopes. `openid` must NOT be added: it routes Google into the hanging
  * `firstparty/nativeapp` consent for this client (verified by OmniRoute). */
 export const AGY_SCOPES: readonly string[] = [

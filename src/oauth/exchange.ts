@@ -7,13 +7,12 @@
 import type { TokenExchangeFailure, TokenExchangeResult } from '../types.ts'
 import { calculateTokenExpiry } from './auth.ts'
 import {
-  AGY_CLIENT_ID,
-  AGY_CLIENT_SECRET,
   AGY_ENDPOINT_FALLBACKS,
   OAUTH_TOKEN_URL,
   OAUTH_USERINFO_URL,
   getAgyBootstrapClientMetadata,
   getAgyBootstrapUserAgent,
+  resolveAgyClientCredentials,
 } from './constants.ts'
 import { decodeState } from './pkce.ts'
 import { proxiedFetch } from '../proxy.ts'
@@ -230,6 +229,7 @@ export async function exchangeAntigravity(
     }
 
     const startTime = Date.now()
+    const { clientId, clientSecret } = resolveAgyClientCredentials()
     const tokenResponse = await proxiedFetch(OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: {
@@ -238,8 +238,8 @@ export async function exchangeAntigravity(
         'User-Agent': getAgyBootstrapUserAgent(),
       },
       body: new URLSearchParams({
-        client_id: AGY_CLIENT_ID,
-        client_secret: AGY_CLIENT_SECRET,
+        client_id: clientId,
+        client_secret: clientSecret,
         code,
         grant_type: 'authorization_code',
         redirect_uri: redirectUri,

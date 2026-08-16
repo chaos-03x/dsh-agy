@@ -13,6 +13,7 @@ import {
   buildFingerprintHeaders,
   generateFingerprint,
   getRandomizedHeaders,
+  getStableHeaders,
   recordFingerprintVersion,
   restoreFingerprint,
   updateFingerprintVersion,
@@ -29,6 +30,7 @@ import {
   rankPoolCandidates,
   requiredDrainFor,
 } from '../src/runtime/quota.ts'
+import { fingerprintMode, isAgyDisabled } from '../src/runtime/risk.ts'
 import type { ManagedAccount } from '../src/types.ts'
 
 function account(): ManagedAccount {
@@ -277,6 +279,32 @@ describe('fingerprint', () => {
     expect(evicted!.length).toBe(5)
     const current = generateFingerprint()
     expect(restoreFingerprint(evicted, current)?.deviceId).toBe(current.deviceId)
+  })
+
+  it('pins deterministic fallback headers for the stable mode', () => {
+    const first = getStableHeaders()
+    const second = getStableHeaders()
+    expect(first).toEqual(second)
+    expect(first['Client-Metadata']).toContain('"ideType"')
+    expect(Object.keys(first).sort()).toEqual(['Client-Metadata', 'User-Agent', 'X-Goog-Api-Client'])
+  })
+})
+
+describe('risk controls', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('reads the kill switch and fingerprint mode from env', () => {
+    vi.stubEnv('DSH_AGY_DISABLE', '1')
+    expect(isAgyDisabled()).toBe(true)
+    vi.stubEnv('DSH_AGY_DISABLE', '')
+    expect(isAgyDisabled()).toBe(false)
+
+    vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', 'stable')
+    expect(fingerprintMode()).toBe('stable')
+    vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', 'dynamic')
+    expect(fingerprintMode()).toBe('dynamic')
+    vi.unstubAllEnvs()
+    expect(fingerprintMode()).toBe('dynamic')
   })
 })
 

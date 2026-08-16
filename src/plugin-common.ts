@@ -71,6 +71,11 @@ export async function createAgyRuntime(ctx: Context): Promise<{
   const dshHome = resolveDshHome()
   const store = new JsonAccountStore({ file: `${dshHome}/agy-accounts.json`, codec })
   const sessions = new AgySessionManager({ store })
+  // Optional background health probe (DSH_AGY_HEALTH_INTERVAL_MS), off by default.
+  const healthIntervalMs = Number(process.env.DSH_AGY_HEALTH_INTERVAL_MS ?? 0)
+  if (Number.isFinite(healthIntervalMs) && healthIntervalMs > 0) {
+    sessions.startHealthProbe(healthIntervalMs)
+  }
   const adapter = new AgyAdapter({
     getSession: (model) => sessions.getSession(model),
     reportFailure: (kind, session, info) => sessions.reportFailure(kind, session, info),

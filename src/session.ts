@@ -28,10 +28,12 @@ import {
   DEFAULT_FINGERPRINT_DATA,
   generateFingerprint,
   getRandomizedHeaders,
+  getStableHeaders,
   recordFingerprintVersion,
   updateFingerprintVersion,
 } from './runtime/fingerprint.ts'
 import { deriveAntigravitySessionId } from './runtime/identity.ts'
+import { fingerprintMode } from './runtime/risk.ts'
 import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
 import { proxiedFetch } from './proxy.ts'
 import type { Fingerprint } from './types.ts'
@@ -40,6 +42,16 @@ export interface SessionManagerOptions {
   store: AccountStore
   /** Called after rotation changes the active index (for logging/UI). */
   onRotate?: (fromIndex: number, toIndex: number, reason: FailureKind) => void
+  /** Called after a health check finishes (batch probe results). */
+  onHealthReport?: (results: AccountHealthResult[]) => void
+}
+
+/** One account's health check result (refresh + userinfo). */
+export interface AccountHealthResult {
+  index: number
+  email?: string
+  ok: boolean
+  error?: string
 }
 
 /**
@@ -56,8 +68,8 @@ interface TokenCacheEntry {
 
 /**
  * Resolve the impersonation headers for one request from the account's
- * persistent fingerprint (stable identity), falling back to full per-request
- * randomization when the account has no fingerprint yet.
+ * persistent fingerprint (stable identity). The fallback randomizes per
+ * request in `dynamic` mode and pins one identity in `stable` mode.
  */
 export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSession['impersonation'] {
   const fingerprint = account.fingerprint
@@ -68,17 +80,20 @@ export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSess
       'Client-Metadata': JSON.stringify(fingerprint.clientMetadata),
     }
   }
-  const randomized = getRandomizedHeaders(DEFAULT_FINGERPRINT_DATA)
+  const headers = fingerprintMode() === 'stable'
+    ? getStableHeaders(DEFAULT_FINGERPRINT_DATA)
+    : getRandomizedHeaders(DEFAULT_FINGERPRINT_DATA)
   return {
-    'User-Agent': randomized['User-Agent'],
-    'X-Goog-Api-Client': randomized['X-Goog-Api-Client'],
-    'Client-Metadata': randomized['Client-Metadata'],
+    'User-Agent': headers['User-Agent'],
+    'X-Goog-Api-Client': headers['X-Goog-Api-Client'],
+    'Client-Metadata': headers['Client-Metadata'],
   }
 }
 
 export class AgySessionManager {
   private readonly store: AccountStore
   private readonly onRotate: SessionManagerOptions['onRotate']
+  private readonly onHealthReport: SessionManagerOptions['onHealthReport']
   private readonly tokenCache = new Map<string, TokenCacheEntry>()
   /** In-flight refresh promises keyed by account: concurrent requests share one refresh. */
   private readonly refreshInFlight = new Map<string, Promise<OAuthAuthDetails | undefined>>()
@@ -105,6 +120,7 @@ export class AgySessionManager {
   constructor(options: SessionManagerOptions) {
     this.store = options.store
     this.onRotate = options.onRotate
+    this.onHealthReport = options.onHealthReport
   }
 
   private accountKey(account: ManagedAccount): string {
@@ -338,7 +354,8 @@ export class AgySessionManager {
     // Fingerprint lifecycle: create on first rate-limit, regenerate after
     // repeated failures (bounded by history inside recordFingerprintVersion).
     // UA versions come from the version resolver (bounded, cached 6h) so
-    // fingerprints never pin a stale Antigravity client version.
+    // fingerprints never pin a stale Antigravity client version. The `stable`
+    // risk mode pins one identity per account: create once, never regenerate.
     if (kind === 'rate-limit') {
       if (!account.fingerprint) {
         account.fingerprint = generateFingerprint(undefined, await resolveAntigravityVersionBounded())
@@ -347,7 +364,7 @@ export class AgySessionManager {
         // In-place UA refresh from the cached version (no network on this path).
         const cached = peekCachedAntigravityVersion()
         if (cached) updateFingerprintVersion(account.fingerprint, cached)
-        if (consecutive >= 2) {
+        if (fingerprintMode() !== 'stable' && consecutive >= 2) {
           const fresh = generateFingerprint(undefined, await resolveAntigravityVersionBounded())
           account.fingerprintHistory = recordFingerprintVersion(account.fingerprintHistory, fresh, 'regenerated')
           account.fingerprint = fresh
@@ -439,11 +456,8 @@ export class AgySessionManager {
     }
   }
 
-  /** CLI/web helper: verify an account's credentials (refresh + userinfo). */
-  async verifyAccount(index: number): Promise<{ ok: boolean; email?: string; error?: string }> {
-    const storage = await this.store.load()
-    const account = storage.accounts[index]
-    if (!account) return { ok: false, error: 'account not found' }
+  /** Probe one account: refresh + userinfo; a live credential re-enables the account. */
+  private async probeAccount(index: number, account: ManagedAccount): Promise<{ ok: boolean; email?: string; error?: string }> {
     const auth = await this.accessTokenFor(account)
     if (!auth) return { ok: false, error: 'refresh failed (revoked?)' }
     try {
@@ -468,6 +482,47 @@ export class AgySessionManager {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
+  }
+
+  /** CLI/web helper: verify an account's credentials (refresh + userinfo). */
+  async verifyAccount(index: number): Promise<{ ok: boolean; email?: string; error?: string }> {
+    const storage = await this.store.load()
+    const account = storage.accounts[index]
+    if (!account) return { ok: false, error: 'account not found' }
+    return this.probeAccount(index, account)
+  }
+
+  /**
+   * Batch health check over all enabled accounts (or the given indices):
+   * refresh + userinfo per account, live credentials re-enable the account.
+   * Reports results through onHealthReport when a listener is registered.
+   */
+  async checkAccounts(indices?: number[]): Promise<AccountHealthResult[]> {
+    const storage = await this.store.load()
+    const targets = indices !== undefined
+      ? indices.filter((index) => storage.accounts[index])
+      : storage.accounts.map((_, index) => index).filter((index) => storage.accounts[index]!.enabled !== false)
+
+    const results: AccountHealthResult[] = await Promise.all(targets.map(async (index) => {
+      const probed = await this.probeAccount(index, storage.accounts[index]!)
+      return { index, ...probed }
+    }))
+    this.onHealthReport?.(results)
+    return results
+  }
+
+  /**
+   * Start a background health probe on an interval (disposable stop handle).
+   * The timer is unref'd unless told otherwise so harness processes can still
+   * exit; the CLI loop mode passes `unref: false`.
+   */
+  startHealthProbe(intervalMs: number, options: { unref?: boolean } = {}): () => void {
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) return () => {}
+    const timer = setInterval(() => {
+      void this.checkAccounts().catch(() => {})
+    }, intervalMs)
+    if (options.unref !== false) timer.unref?.()
+    return () => clearInterval(timer)
   }
 }
 

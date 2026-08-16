@@ -58,6 +58,7 @@ describe('dsh-agy web routes & page rendering', () => {
     expect(paths).toContain('/agy/api/import')
     expect(paths).toContain('/agy/api/export-all')
     expect(paths).toContain('/agy/api/verify')
+    expect(paths).toContain('/agy/api/health')
     expect(paths).toContain('/agy/api/delete')
     expect(paths).toContain('/agy/api/activate')
     expect(paths).toContain('/agy/api/models')

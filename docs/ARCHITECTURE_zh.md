@@ -48,6 +48,7 @@
 | `runtime/classify` | `classify(error) → Kind` | 429/403/网络错误解析、Retry-After、resetTime | fixture |
 | `runtime/rotation` | `onFailure(acc, kind) → Action` | 冷却到服务端上报的真实 reset 时间（上限 30min/24h）、backoff 分级、activeIndex 切换、指纹再生触发 | 状态机单元测试 |
 | `runtime/quota` | `rank(accounts, model) → order` | fetchAvailableModels → 按模型族（google/anthropic/openai）聚合配额、drained/hot-window 护栏、required-drain 排名（对齐 OMP） | 纯单元 |
+| `runtime/risk` | `isDisabled() / fingerprintMode()` | 环境开关：总开关 + 固定身份模式（自备客户端凭据在 oauth/constants 解析） | 纯单元 |
 | `runtime/fingerprint` | `generate() → Fingerprint` | 随机平台/arch/SDK 池、历史管理（≤5）、版本同步；**数据外置 JSON** | 纯单元 |
 | `adapter/translate` | `toBody(generateOptions) → RequestBody` | DSH messages/tools → Gemini contents[]，thinking 原样携带 | fixture（录制请求） |
 | `adapter/parse` | `fromSSE(line) → Chunk[]` | SSE 行解析、candidates[] → StreamChunk、usage/错误事件 | fixture（录制响应原文） |
@@ -68,7 +69,7 @@
 | `cross-model-integration.ts` | DSH 历史是 provider-neutral 块，loop 负责跨模型连续性；该模块源码在 archived 仓库中已删除 |
 | gemini-cli 头风格/双配额池 | Google 已不支持该客户端路径；单一配额池简化轮换 |
 | 模型族拆分 `activeIndexByFamily` | 单个亲和 pin + 模型族配额排名（`runtime/quota`）已覆盖需求，无需按族维护独立 activeIndex |
-| 插件 Config（schemastery） | 无用户配置面 |
+| 插件 Config（schemastery） | 无插件 Config schema——风险管控走纯环境开关（`runtime/risk`） |
 
 ## 5. 目录树（最终形态）
 

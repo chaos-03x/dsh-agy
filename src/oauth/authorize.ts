@@ -1,9 +1,9 @@
 /** Build the Antigravity OAuth authorization URL with PKCE and project metadata. */
 
 import {
-  AGY_CLIENT_ID,
   AGY_SCOPES,
   OAUTH_AUTHORIZE_URL,
+  resolveAgyClientCredentials,
 } from './constants.ts'
 import { encodeState, generatePkcePair } from './pkce.ts'
 
@@ -29,7 +29,8 @@ export async function authorizeAntigravity(
   const { verifier, challenge } = generatePkcePair()
 
   const url = new URL(OAUTH_AUTHORIZE_URL)
-  url.searchParams.set('client_id', AGY_CLIENT_ID)
+  const { clientId } = resolveAgyClientCredentials()
+  url.searchParams.set('client_id', clientId)
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('redirect_uri', redirectUri)
   url.searchParams.set('scope', AGY_SCOPES.join(' '))

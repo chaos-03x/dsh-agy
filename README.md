@@ -64,6 +64,7 @@ npm install -g dsh-agy
 dsh-agy login          # interactive OAuth (browser, --headless paste, or --blob)
 dsh-agy status         # list accounts + quota summary
 dsh-agy verify         # refresh + health check
+dsh-agy health         # batch health check (optionally on an interval)
 dsh-agy import <file>  # import agy auth.json or credential blob (--blob)
 dsh-agy logout         # remove account
 ```
@@ -77,6 +78,7 @@ dsh-agy logout         # remove account
 | `dsh-agy import <files...>` | `--blob` — the pasted value is a credential blob<br>`--email <email>` — set the account email (skips userinfo verification)<br>`--overwrite` — replace an existing account with the same email | Import agy auth.json files or credential blobs (multiple files / multi-line paste = batch import) |
 | `dsh-agy export` | `--index <n>` — export one account by index (default: all)<br>`--out <dir>` — write one `dsh-agy-<index>.blob` per account (default: print to stdout, one blob per line) | Export account credentials as paste blobs |
 | `dsh-agy verify` | `--index <n>` — verify one account by index (default: all) | Refresh + health check |
+| `dsh-agy health` | `--index <n...>` — check only these accounts (default: all enabled)<br>`--interval <ms>` — repeat on an interval instead of once | Batch health check (refresh + userinfo), re-enables accounts whose credentials are live again |
 | `dsh-agy logout` | `--index <n>` — account index (default: active)<br>`--email <email>` — account email | Remove an account |
 
 ### Path C: Local Development & Link
@@ -115,6 +117,13 @@ valid until it expires or you revoke it in your Google account security settings
 
 ### Rotation mechanics
 
+Usage-aware selection: when several accounts are available, requests rank them
+by the requested model's backend counter family (`gemini-*` → Google,
+`claude-*` → Anthropic, `gpt-*` → OpenAI): accounts whose quota is about to
+reset with headroom left are used first ("use it or lose it"), near-exhausted
+families are avoided, and exhausted families block the account until the real
+reset time.
+
 429 (Too Many Requests) responses:
 
 | Category | Behavior |
@@ -126,6 +135,15 @@ valid until it expires or you revoke it in your Google account security settings
 
 401/403 → account revoked (marked for re-authentication). Success resets the failure
 counter.
+
+### Risk controls (environment switches)
+
+| Env | Effect |
+|---|---|
+| `DSH_AGY_DISABLE=1` | Kill switch: the plugin registers nothing (provider + `/agy` routes) and the CLI refuses to run. |
+| `DSH_AGY_FINGERPRINT_MODE=stable` | One fixed client identity per account — no per-request header randomization, no fingerprint regeneration (OMP-style fixed-client posture). Default `dynamic` keeps per-request randomization. |
+| `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | Background batch health probe inside the harness (refresh + userinfo on the configured interval); off by default. |
+| `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | BYO OAuth app escape hatch: override the embedded public Antigravity client credentials. |
 
 ### About cache hits: why not 99% like DeepSeek V4?
 

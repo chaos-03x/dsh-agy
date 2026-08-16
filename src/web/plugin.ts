@@ -8,6 +8,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { createAgyRuntime } from '../plugin-common.ts'
+import { isAgyDisabled } from '../runtime/risk.ts'
 import { createAgyWebRoutes, type WebRoute } from './routes.ts'
 
 export const name = 'dsh-agy-web'
@@ -15,6 +16,10 @@ export const name = 'dsh-agy-web'
 export const inject = ['llm', 'webServer']
 
 export function apply(ctx: Context): void {
+  if (isAgyDisabled()) {
+    ctx.logger.warn('[dsh-agy] disabled by DSH_AGY_DISABLE=1 — skipping /agy registration')
+    return
+  }
   ctx.effect(async () => {
     const webServer = ctx.get('webServer') as
       | { register(route: WebRoute): () => void; host?: string }

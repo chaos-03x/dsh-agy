@@ -5,7 +5,7 @@
 
 import type { OAuthAuthDetails } from '../types.ts'
 import { calculateTokenExpiry, formatRefreshParts, parseRefreshParts } from './auth.ts'
-import { AGY_CLIENT_ID, AGY_CLIENT_SECRET, OAUTH_TOKEN_URL } from './constants.ts'
+import { AGY_CLIENT_ID, AGY_CLIENT_SECRET, OAUTH_TOKEN_URL, resolveAgyClientCredentials } from './constants.ts'
 import { proxiedFetch } from '../proxy.ts'
 
 interface OAuthErrorPayload {
@@ -95,6 +95,7 @@ export async function refreshAccessToken(auth: OAuthAuthDetails): Promise<Refres
 
   try {
     const startTime = Date.now()
+    const { clientId, clientSecret } = resolveAgyClientCredentials()
     const response = await proxiedFetch(OAUTH_TOKEN_URL, {
       method: 'POST',
       headers: {
@@ -103,8 +104,8 @@ export async function refreshAccessToken(auth: OAuthAuthDetails): Promise<Refres
       body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: parts.refreshToken,
-        client_id: AGY_CLIENT_ID,
-        client_secret: AGY_CLIENT_SECRET,
+        client_id: clientId,
+        client_secret: clientSecret,
       }),
     })
 

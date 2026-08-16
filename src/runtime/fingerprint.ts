@@ -103,6 +103,25 @@ export function getRandomizedHeaders(
   }
 }
 
+/**
+ * Deterministic fallback headers for the `stable` fingerprint mode: the first
+ * entry of each pool, every call — one fixed client identity instead of
+ * per-request randomization (OMP-style fixed-client posture).
+ */
+export function getStableHeaders(
+  data: FingerprintData = getFingerprintData(),
+  version = data.versionPool[0] ?? '',
+): { 'User-Agent': string; 'X-Goog-Api-Client': string; 'Client-Metadata': string } {
+  const platform = data.platforms[0] ?? 'windows/amd64'
+  return {
+    'User-Agent': `antigravity/${version || '1.18.3'} ${platform}`,
+    'X-Goog-Api-Client': data.sdkClients[0] ?? '',
+    'Client-Metadata': JSON.stringify({
+      ideType: data.ideTypes[0] ?? 'ANTIGRAVITY',
+    }),
+  }
+}
+
 /** Rewrite the version inside a fingerprint UA; reports whether it changed. */
 export function updateFingerprintVersion(fingerprint: Fingerprint, version: string): boolean {
   const pattern = /^(antigravity\/)([\d.]+)/

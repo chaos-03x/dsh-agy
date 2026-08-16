@@ -219,6 +219,19 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     }
   }
 
+  const handleHealth = async (req: IncomingMessage, res: ServerResponse) => {
+    try {
+      const body = await readJson(req)
+      const indices = Array.isArray(body.indices)
+        ? (body.indices as unknown[]).map((value) => Number(value))
+        : undefined
+      const results = await sessions.checkAccounts(indices)
+      sendJson(res, 200, { results })
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   const handleDelete = async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const body = await readJson(req)
@@ -341,6 +354,7 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     { kind: 'exact', path: '/agy/api/import', handler: handleImport },
     { kind: 'exact', path: '/agy/api/export-all', handler: handleExportAll },
     { kind: 'exact', path: '/agy/api/verify', handler: handleVerify },
+    { kind: 'exact', path: '/agy/api/health', handler: handleHealth },
     { kind: 'exact', path: '/agy/api/delete', handler: handleDelete },
     { kind: 'exact', path: '/agy/api/activate', handler: handleActivate },
     { kind: 'exact', path: '/agy/api/models', handler: handleModels },

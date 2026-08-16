@@ -70,6 +70,7 @@ dsh-agy logout         # 删除账号
 | `dsh-agy import <文件...>` | `--blob` — 输入是凭据 blob<br>`--email <email>` — 指定邮箱（跳过 userinfo 校验）<br>`--overwrite` — 覆盖同邮箱的已有账号 | 导入 agy auth.json 文件或凭据 blob（多文件 / 多行粘贴 = 批量导入） |
 | `dsh-agy export` | `--index <n>` — 只导出指定账号（默认全部）<br>`--out <dir>` — 每账号写一个 `dsh-agy-<index>.blob` 文件（默认输出到 stdout，每行一个 blob） | 将账号凭据导出为粘贴 blob |
 | `dsh-agy verify` | `--index <n>` — 只验证指定账号（默认全部） | refresh + 健康检查 |
+| `dsh-agy health` | `--index <n...>` — 只检查指定账号（默认全部启用账号）<br>`--interval <ms>` — 按间隔重复检查 | 批量健康检查（refresh + userinfo），凭据恢复有效的账号自动重新启用 |
 | `dsh-agy logout` | `--index <n>` — 账号索引（默认当前 active）<br>`--email <email>` — 账号邮箱 | 删除账号 |
 
 ### 路径 C：本地源码开发与调试（Link 模式）
@@ -108,6 +109,11 @@ rm -f ~/.dsh/agy-fingerprint-data.json   # 仅当创建过覆盖文件
 
 ### 轮换机制
 
+用量感知选号：多账号时，按请求模型对应的后端计数器族（`gemini-*` → Google、
+`claude-*` → Anthropic、`gpt-*` → OpenAI）排序——即将到期且仍有额度的账号优先
+使用（"不用白不用"），接近耗尽的族会被避开，完全耗尽的族会把账号阻断到真实
+reset 时间。
+
 429 (Too Many Requests)响应：
 
 | 分类 | 行为 |
@@ -118,6 +124,15 @@ rm -f ~/.dsh/agy-fingerprint-data.json   # 仅当创建过覆盖文件
 | `unknown` | 指数退避 |
 
 401/403 → 账号吊销（标记需重新认证）。成功重置失败计数。
+
+### 风险管控（环境开关）
+
+| 环境变量 | 作用 |
+|---|---|
+| `DSH_AGY_DISABLE=1` | 总开关：插件不注册任何东西（provider + `/agy` 路由），CLI 拒绝运行。 |
+| `DSH_AGY_FINGERPRINT_MODE=stable` | 每账号固定一个客户端身份——不做逐请求随机头、不再生指纹（OMP 式固定客户端姿态）。默认 `dynamic` 保持逐请求随机。 |
+| `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | harness 内后台批量健康探测（按间隔 refresh + userinfo）；默认关闭。 |
+| `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | 自备 OAuth App 逃生通道：覆盖内置的公开 Antigravity 客户端凭据。 |
 
 
 ### 关于缓存命中：为什么达不到 DeepSeek V4 的 99%？

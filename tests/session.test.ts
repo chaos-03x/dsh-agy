@@ -364,6 +364,65 @@ describe('usage-driven selection', () => {
     // Precise cooldown from the reported reset (capped at 30min), not the fixed 5min window.
     expect(failed.coolingDownUntil).toBeGreaterThan(Date.now() + 29 * 60 * 1000)
   })
+
+  it('stable fingerprint mode pins one identity: no regeneration on repeated rate-limits', async () => {
+    vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', 'stable')
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x')]))
+    const sessions = new AgySessionManager({ store })
+
+    let session = await sessions.getSession()
+    await sessions.reportFailure('rate-limit', session!)
+    const first = (await store.load()).accounts[0]!.fingerprint!
+    session = await sessions.getSession()
+    await sessions.reportFailure('rate-limit', session!)
+    const after = await store.load()
+    expect(after.accounts[0]!.fingerprint!.deviceId).toBe(first.deviceId)
+    expect(after.accounts[0]!.fingerprintHistory).toHaveLength(1)
+    vi.unstubAllEnvs()
+  })
+
+  it('stable fingerprint mode serves deterministic fallback headers without a fingerprint', () => {
+    vi.stubEnv('DSH_AGY_FINGERPRINT_MODE', 'stable')
+    const first = impersonationHeadersFor(account('a@x'))
+    const second = impersonationHeadersFor(account('a@x'))
+    expect(first).toEqual(second)
+    expect(first['Client-Metadata']).toContain('ANTIGRAVITY')
+    vi.unstubAllEnvs()
+  })
+
+  it('health-check probes enabled accounts in batch and re-enables live ones', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('userinfo')) {
+        return new Response(JSON.stringify({ email: 'probed@x' }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: {} }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+    const disabled = { ...account('a@x'), enabled: false, verificationRequired: true }
+    const store = new InMemoryAccountStore(storage([disabled, account('b@x')]))
+    const reports: Array<Array<{ index: number; ok: boolean }>> = []
+    const sessions = new AgySessionManager({ store, onHealthReport: (results) => reports.push(results) })
+
+    // Default target: enabled accounts only (the disabled one is skipped).
+    const results = await sessions.checkAccounts()
+    expect(results.map((r) => r.index)).toEqual([1])
+    expect(results[0]!.ok).toBe(true)
+    expect(reports).toHaveLength(1)
+
+    // Explicit indices include disabled accounts; a live credential re-enables them.
+    const withDisabled = await sessions.checkAccounts([0, 1])
+    expect(withDisabled.map((r) => r.index).sort((x, y) => x - y)).toEqual([0, 1])
+    const after = await store.load()
+    expect(after.accounts[0]!.enabled).toBe(true)
+    expect(after.accounts[0]!.verificationRequired).toBe(false)
+  })
 })
 
 describe('verifyAccount', () => {

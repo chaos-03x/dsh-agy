@@ -7,12 +7,17 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { AGY_PROVIDER, createAgyRuntime } from './plugin-common.ts'
+import { isAgyDisabled } from './runtime/risk.ts'
 
 export const name = 'dsh-agy'
 
 export const inject = ['llm']
 
 export function apply(ctx: Context): void {
+  if (isAgyDisabled()) {
+    ctx.logger.warn('[dsh-agy] disabled by DSH_AGY_DISABLE=1 — skipping registration')
+    return
+  }
   ctx.effect(async () => {
     const { adapter } = await createAgyRuntime(ctx)
     const registration = ctx.llm.registerAdapter([AGY_PROVIDER], adapter)

@@ -17,6 +17,7 @@ import { createAesGcmCodec, deriveKey, loadMasterKey, resolveDshHome, resolveMas
 import type { SecretCodec } from '../store/keyring.ts'
 import { JsonAccountStore } from '../store/accounts.ts'
 import { AgySessionManager } from '../session.ts'
+import { isAgyDisabled } from '../runtime/risk.ts'
 import { startCallbackServer, openBrowser } from './callback-server.ts'
 import { importManySources, upsertImportedAccount } from './import.ts'
 
@@ -267,6 +268,35 @@ async function verifyCommand(options: { index?: string }) {
   }
 }
 
+async function healthCommand(options: { interval?: string; index?: string[] }) {
+  const store = createReadOnlyStoreOrExit()
+  const sessions = new AgySessionManager({
+    store,
+    onHealthReport: (results) => {
+      for (const result of results) {
+        if (result.ok) console.log(`[${result.index}] ${result.email ?? ''} — OK`)
+        else console.log(`[${result.index}] ${result.email ?? ''} — FAILED: ${result.error}`)
+      }
+    },
+  })
+  const indices = options.index?.map((value) => Number(value))
+
+  if (options.interval) {
+    const intervalMs = Number(options.interval)
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      console.error('Error: --interval must be a positive number of milliseconds.')
+      process.exit(1)
+    }
+    console.log(`Health probe every ${intervalMs}ms (Ctrl+C to stop).`)
+    sessions.startHealthProbe(intervalMs, { unref: false })
+    await new Promise<void>(() => {}) // keep the loop alive
+    return
+  }
+
+  const results = await sessions.checkAccounts(indices)
+  if (results.length === 0) console.log('No enabled accounts — run `dsh-agy login` first.')
+}
+
 async function logoutCommand(options: { index?: string; email?: string }) {
   const store = createReadOnlyStoreOrExit()
   await store.mutate((storage) => {
@@ -290,6 +320,13 @@ export function createProgram(): Command {
     .name('dsh-agy')
     .description('Google Antigravity (agy) account management for DeepSeek Harness')
     .version(PACKAGE_VERSION)
+
+  program.hook('preAction', () => {
+    if (isAgyDisabled()) {
+      console.error('dsh-agy is disabled (DSH_AGY_DISABLE=1).')
+      process.exit(1)
+    }
+  })
 
   program
     .command('login')
@@ -336,6 +373,15 @@ export function createProgram(): Command {
     .option('--index <n>', 'verify one account by index; default all')
     .action(async (options: { index?: string }) => {
       await verifyCommand(options)
+    })
+
+  program
+    .command('health')
+    .description('Check every enabled account (refresh + userinfo), optionally on an interval')
+    .option('--interval <ms>', 'repeat on an interval instead of once')
+    .option('--index <n...>', 'check only these accounts')
+    .action(async (options: { interval?: string; index?: string[] }) => {
+      await healthCommand(options)
     })
 
   program
