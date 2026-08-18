@@ -104,7 +104,7 @@ describe('rotation state machine', () => {
     const acc = account()
     const decision = decideRotation('rate-limit', acc, 0, undefined, 'rate_limited')
     expect(decision.action).toBe('rotate')
-    expect(acc.coolingDownUntil).toBeGreaterThan(Date.now())
+    expect(acc.coolingDownUntil).toBeUndefined()
     expect(decision.backoffMs).toBeGreaterThan(0)
   })
 
@@ -170,17 +170,19 @@ describe('rotation state machine', () => {
   it('cools per-minute limits until the real reset (capped at 30min), ignoring past resets', () => {
     const before = Date.now()
     const acc = account()
-    decideRotation('rate-limit', acc, 0, undefined, 'rate_limited', new Date(before + 10 * 60 * 1000).toISOString())
-    expect(acc.coolingDownUntil!).toBeGreaterThanOrEqual(before + 10 * 60 * 1000 - 1000)
-    expect(acc.coolingDownUntil!).toBeLessThan(before + 10 * 60 * 1000 + 5000)
+    const decision = decideRotation('rate-limit', acc, 0, undefined, 'rate_limited', new Date(before + 10 * 60 * 1000).toISOString())
+    expect(decision.action).toBe('rotate')
+    expect(decision.backoffMs).toBeGreaterThanOrEqual(10 * 60 * 1000 - 1000)
+    expect(decision.backoffMs).toBeLessThan(10 * 60 * 1000 + 5000)
 
     const far = account()
-    decideRotation('rate-limit', far, 0, undefined, 'rate_limited', new Date(before + 2 * 60 * 60 * 1000).toISOString())
-    expect(far.coolingDownUntil! - before).toBeLessThan(30 * 60 * 1000 + 5000)
+    const farDecision = decideRotation('rate-limit', far, 0, undefined, 'rate_limited', new Date(before + 48 * 60 * 1000).toISOString())
+    expect(farDecision.backoffMs).toBeLessThan(30 * 60 * 1000 + 5000)
 
     const past = account()
-    decideRotation('rate-limit', past, 0, undefined, 'rate_limited', new Date(before - 60 * 1000).toISOString())
-    expect(past.coolingDownUntil! - before).toBe(5 * 60 * 1000)
+    const pastDecision = decideRotation('rate-limit', past, 0, undefined, 'rate_limited', new Date(before - 60 * 1000).toISOString())
+    expect(pastDecision.backoffMs).toBeGreaterThanOrEqual(5 * 60 * 1000 - 1000)
+    expect(pastDecision.backoffMs).toBeLessThan(5 * 60 * 1000 + 5000)
   })
 
   it('picks the next eligible account round-robin', () => {

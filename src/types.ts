@@ -39,10 +39,12 @@ export interface CachedQuota {
 
 /** One account in the pool. `refresh` is the packed `refreshToken|projectId|managedProjectId` string. */
 export interface ManagedAccount {
+  id?: string
   email?: string
   refresh: string
   projectId?: string
   managedProjectId?: string
+  clientId?: string
   addedAt: number
   lastUsed: number
   enabled?: boolean
@@ -127,6 +129,7 @@ export interface TokenExchangeSuccess {
   email?: string
   projectId: string
   tier?: string
+  clientId?: string
 }
 
 export interface TokenExchangeFailure {

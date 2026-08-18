@@ -167,6 +167,7 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
       authMethod: 'oauth',
       email: result.email ?? null,
       projectId: result.projectId || null,
+      clientId: result.clientId || null,
     }, { overwriteExisting: true })
 
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })

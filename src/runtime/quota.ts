@@ -165,9 +165,9 @@ export function rankPoolCandidates(
   startIndex = 0,
 ): PoolCandidate[] {
   const family = modelFamilyOf(modelId)
-  const clampedStart = entries.length === 0 ? 0 : Math.min(Math.max(startIndex, 0), entries.length - 1)
+  const activePos = entries.findIndex((e) => e.index === startIndex)
+  const clampedStart = activePos >= 0 ? activePos : 0
   const ordered = entries.length === 0 ? [] : [...entries.slice(clampedStart), ...entries.slice(0, clampedStart)]
-
   const candidates: PoolCandidateWithOrder[] = ordered.map(({ account, index }, orderPos) => {
     const quota = familyQuotaFor(account, family)
     const remaining = quota?.remainingFraction

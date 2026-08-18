@@ -43,9 +43,20 @@ export function isRateLimited(account: ManagedAccount, now = Date.now()): boolea
   return Object.values(times).some((reset) => typeof reset === 'number' && reset > now)
 }
 
-/** Record a rate-limit reset for one model key. */
+/** Whether the requested model family on this account is rate-limited. */
+export function isFamilyRateLimited(account: ManagedAccount, family: string | undefined, now = Date.now()): boolean {
+  if (!family) return false
+  const resetAt = account.rateLimitResetTimes?.[family]
+  return typeof resetAt === 'number' && resetAt > now
+}
+
+/** Record a rate-limit reset for one model key, retaining the latest reset time. */
 export function recordRateLimit(account: ManagedAccount, modelKey: string, resetAtMs: number): void {
-  account.rateLimitResetTimes = { ...(account.rateLimitResetTimes ?? {}), [modelKey]: resetAtMs }
+  const current = account.rateLimitResetTimes?.[modelKey] ?? 0
+  account.rateLimitResetTimes = {
+    ...(account.rateLimitResetTimes ?? {}),
+    [modelKey]: Math.max(current, resetAtMs),
+  }
 }
 
 /** Clear expired rate limits and cooldowns in place. */
@@ -115,14 +126,14 @@ export function decideRotation(
         return { action: 'cool', backoffMs: Math.max(cooldownMs, 60_000) }
       }
       // Per-minute rate limit: prefer the server's real reset (capped), then
-      // Retry-After, then the fixed short window.
+      // Retry-After, then the fixed short window. The family-scoped reset is
+      // recorded in account.rateLimitResetTimes, so other model families on
+      // this account stay unblocked (AuthStorage-aligned).
       const resetMs = parseFutureResetMs(resetTime, now)
       const cooldownMs = resetMs !== undefined
         ? Math.min(resetMs - now, MAX_RATE_LIMIT_COOLDOWN_MS)
         : (retryAfterMs ?? RATE_LIMIT_COOLDOWN_MS)
-      account.coolingDownUntil = now + Math.max(cooldownMs, 1000)
-      account.cooldownReason = undefined // per-model resets live in rateLimitResetTimes
-      return { action: 'rotate', backoffMs }
+      return { action: 'rotate', backoffMs: Math.max(cooldownMs, 1000) }
     }
     case 'auth-failure': {
       // Terminal: account credentials are dead; never auto-recover.
@@ -162,10 +173,16 @@ export function pickNextAccountIndex(
   accounts: ManagedAccount[],
   currentIndex: number,
   now = Date.now(),
+  modelOrFamily?: string,
 ): number {
   if (accounts.length <= 1) return currentIndex
   const enabled = accounts.map((a, i) => ({ account: a, index: i }))
-    .filter(({ account, index }) => index !== currentIndex && account.enabled !== false && !isCoolingDown(account, now))
+    .filter(({ account, index }) => {
+      if (index === currentIndex || account.enabled === false) return false
+      if (isCoolingDown(account, now)) return false
+      if (modelOrFamily && isFamilyRateLimited(account, modelOrFamily, now)) return false
+      return true
+    })
   if (enabled.length === 0) return currentIndex
   // Round-robin: first candidate after current index, else first eligible.
   const after = enabled.find((e) => e.index > currentIndex)

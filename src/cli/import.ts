@@ -4,7 +4,7 @@
  * and persist into the account store. Adapted from OmniRoute's agyAuthImport
  * (MIT, see NOTICE.md).
  */
-
+import { randomUUID } from 'node:crypto'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapClientMetadata, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { decodeCredentialBlob } from '../oauth/blob.ts'
 import { proxiedFetch } from '../proxy.ts'
@@ -29,13 +29,14 @@ export interface ParsedAgyAuth {
   tokenType: string
   expiresAt: string | null
   authMethod: string | null
+  clientId?: string | null
 }
 
 export interface EnrichedAgyAuth extends ParsedAgyAuth {
   email: string | null
   projectId: string | null
+  clientId?: string | null
 }
-
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 }
@@ -74,6 +75,7 @@ export function parseAndValidateAgyToken(raw: unknown): ParsedAgyAuth {
     tokenType: toNonEmptyString(token.token_type) ?? 'Bearer',
     expiresAt,
     authMethod: toNonEmptyString(doc.auth_method) ?? toNonEmptyString(token.auth_method),
+    clientId: toNonEmptyString(token.client_id) ?? toNonEmptyString(doc.client_id) ?? toNonEmptyString(token.clientId) ?? toNonEmptyString(doc.clientId),
   }
 }
 
@@ -131,7 +133,12 @@ export async function enrichWithAntigravityBackend(parsed: ParsedAgyAuth): Promi
     clearTimeout(loadTimer)
   }
 
-  return { ...parsed, email, projectId }
+  return {
+    ...parsed,
+    email,
+    projectId,
+    clientId: parsed.clientId ?? null,
+  }
 }
 
 /** Parse either a raw token document or a paste blob into an enriched account. */
@@ -192,8 +199,10 @@ export async function upsertImportedAccount(
       const existing = storage.accounts[existingIndex]!
       storage.accounts[existingIndex] = {
         ...existing,
+        id: existing.id || randomUUID(),
         refresh,
         email: existing.email ?? resolvedEmail ?? undefined,
+        clientId: enriched.clientId ? enriched.clientId : existing.clientId,
         addedAt: existing.addedAt,
         lastUsed: Date.now(),
         enabled: true,
@@ -205,9 +214,11 @@ export async function upsertImportedAccount(
     }
 
     const account: ManagedAccount = {
+      id: randomUUID(),
       email: resolvedEmail ?? undefined,
       refresh,
       projectId: enriched.projectId ?? undefined,
+      clientId: enriched.clientId ?? undefined,
       addedAt: Date.now(),
       lastUsed: Date.now(),
       enabled: true,

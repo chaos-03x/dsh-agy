@@ -278,6 +278,7 @@ export async function exchangeAntigravity(
       expires: calculateTokenExpiry(startTime, tokenPayload.expires_in),
       email: userInfo.email,
       projectId: effectiveProjectId || '',
+      clientId,
     }
   } catch (error) {
     const failure: TokenExchangeFailure = {

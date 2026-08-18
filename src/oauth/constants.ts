@@ -19,7 +19,16 @@ export const AGY_CLIENT_SECRET = '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'
  * overrides win when set (BYO OAuth app escape hatch, mirrors pi-antigravity);
  * otherwise the embedded public Antigravity credentials are used.
  */
-export function resolveAgyClientCredentials(): { clientId: string; clientSecret: string } {
+export function resolveAgyClientCredentials(overrideClientId?: string): { clientId: string; clientSecret: string } {
+  if (overrideClientId) {
+    if (overrideClientId === AGY_CLIENT_ID) {
+      return { clientId: AGY_CLIENT_ID, clientSecret: AGY_CLIENT_SECRET }
+    }
+    return {
+      clientId: overrideClientId,
+      clientSecret: process.env.AGY_CLIENT_SECRET || AGY_CLIENT_SECRET,
+    }
+  }
   return {
     clientId: process.env.AGY_CLIENT_ID || AGY_CLIENT_ID,
     clientSecret: process.env.AGY_CLIENT_SECRET || AGY_CLIENT_SECRET,

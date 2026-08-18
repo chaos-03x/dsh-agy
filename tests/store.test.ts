@@ -177,8 +177,68 @@ describe('in-memory store', () => {
     expect(deduplicateAccountsByEmail(loaded.accounts)).toHaveLength(1)
     expect(resolveActiveAccount(loaded)?.account.email).toBe('a@b.c')
   })
-})
 
+  it('materializes missing UUIDs and persists them across loads', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, 'agy-accounts.json')
+    // Write raw legacy json without IDs
+    writeFileSync(file, JSON.stringify({
+      version: CURRENT_STORAGE_VERSION,
+      activeIndex: 0,
+      accounts: [
+        { email: 'legacy@x', refresh: 'rt-1', addedAt: 1, lastUsed: 1 },
+      ],
+    }, null, 2) + '\n')
+
+    const store = new JsonAccountStore({ file, codec, lock: noopFileLock })
+    const firstLoad = await store.load()
+    expect(firstLoad.accounts[0]?.id).toBeDefined()
+    const id1 = firstLoad.accounts[0]!.id
+
+    // Second load from fresh store instance must return the EXACT same materialized ID
+    const store2 = new JsonAccountStore({ file, codec, lock: noopFileLock })
+    const secondLoad = await store2.load()
+    expect(secondLoad.accounts[0]?.id).toBe(id1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('deduplicates duplicate IDs in stored JSON', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-agy-'))
+    const file = join(dir, 'agy-accounts.json')
+    // Write json with identical duplicate IDs
+    writeFileSync(file, JSON.stringify({
+      version: CURRENT_STORAGE_VERSION,
+      activeIndex: 0,
+      accounts: [
+        { id: 'duplicate-id-1', email: 'a@x', refresh: 'rt-a', addedAt: 1, lastUsed: 1 },
+        { id: 'duplicate-id-1', email: 'b@x', refresh: 'rt-b', addedAt: 1, lastUsed: 1 },
+      ],
+    }, null, 2) + '\n')
+
+    const store = new JsonAccountStore({ file, codec, lock: noopFileLock })
+    const loaded = await store.load()
+    expect(loaded.accounts[0]!.id).toBe('duplicate-id-1')
+    expect(loaded.accounts[1]!.id).not.toBe('duplicate-id-1')
+    expect(loaded.accounts[1]!.id).toBeDefined()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('serializes concurrent mutate operations without losing updates', async () => {
+    const store = new InMemoryAccountStore()
+    const p1 = store.mutate(async (s) => {
+      await new Promise((r) => setTimeout(r, 20))
+      s.accounts.push(account('p1@x'))
+    })
+    const p2 = store.mutate(async (s) => {
+      await new Promise((r) => setTimeout(r, 10))
+      s.accounts.push(account('p2@x'))
+    })
+    await Promise.all([p1, p2])
+    const loaded = await store.load()
+    expect(loaded.accounts).toHaveLength(2)
+    expect(loaded.accounts.map((a) => a.email).sort()).toEqual(['p1@x', 'p2@x'])
+  })
+})
 describe('pool helpers', () => {
   it('resolves active account with enabled fallback', () => {
     const storage = {

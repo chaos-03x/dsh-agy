@@ -143,6 +143,7 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
       authMethod: 'oauth',
       email: result.email ?? null,
       projectId: result.projectId || null,
+      clientId: result.clientId || null,
     }, { overwriteExisting: true })
     console.log(`${created ? 'Added' : 'Updated'} account: ${account.email ?? '(no email)'} (project: ${result.projectId || 'default'})`)
   }

@@ -6,6 +6,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import lockfile from 'proper-lockfile'
 import type {
   AccountStorage,
@@ -83,6 +84,19 @@ function encryptAccount(account: ManagedAccount, codec: SecretCodec): ManagedAcc
   return account
 }
 
+export function ensureAccountIds(storage: AccountStorageV4): { storage: AccountStorageV4; mutated: boolean } {
+  let mutated = false
+  const seenIds = new Set<string>()
+  for (const account of storage.accounts) {
+    if (!account.id || seenIds.has(account.id)) {
+      account.id = randomUUID()
+      mutated = true
+    }
+    seenIds.add(account.id)
+  }
+  return { storage, mutated }
+}
+
 export function decryptStorage(storage: AccountStorageV4, codec: SecretCodec): AccountStorageV4 {
   return { ...storage, accounts: storage.accounts.map((a) => decryptAccount(a, codec)) }
 }
@@ -90,7 +104,6 @@ export function decryptStorage(storage: AccountStorageV4, codec: SecretCodec): A
 export function encryptStorage(storage: AccountStorageV4, codec: SecretCodec): AccountStorageV4 {
   return { ...storage, accounts: storage.accounts.map((a) => encryptAccount(a, codec)) }
 }
-
 // ──── Migrations ────────────────────────────────────────────────────────────
 
 export function migrateV1ToV2(v1: AccountStorageV1): AccountStorageV2 {
@@ -162,10 +175,6 @@ export class JsonAccountStore implements AccountStore {
     this.lock = options.lock ?? properFileLock
   }
 
-  /**
-   * Ensure the store document exists before locking: proper-lockfile resolves
-   * the target's realpath and fails with ENOENT when it is absent.
-   */
   private ensureFile(): void {
     if (existsSync(this.file)) return
     mkdirSync(dirname(this.file), { recursive: true })
@@ -174,36 +183,69 @@ export class JsonAccountStore implements AccountStore {
     renameSync(tmp, this.file)
   }
 
-  async load(): Promise<AccountStorageV4> {
+  private readAndMigrateUnlocked(): { storage: AccountStorageV4; mutated: boolean } {
     let text: string
     try {
       text = readFileSync(this.file, 'utf8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { version: CURRENT_STORAGE_VERSION, accounts: [], activeIndex: 0 }
+        return { storage: { version: CURRENT_STORAGE_VERSION, accounts: [], activeIndex: 0 }, mutated: false }
       }
       throw error
     }
     assertOwnerOnly(this.file)
     const raw = JSON.parse(text) as AccountStorage
     const migrated = migrateStorage(raw)
-    return decryptStorage(migrated, this.codec)
+    const decrypted = decryptStorage(migrated, this.codec)
+    return ensureAccountIds(decrypted)
   }
 
-  async save(storage: AccountStorageV4): Promise<void> {
-    const encrypted = encryptStorage(storage, this.codec)
+  private writeUnlocked(storage: AccountStorageV4): void {
+    const encrypted = encryptStorage(ensureAccountIds(storage).storage, this.codec)
     mkdirSync(dirname(this.file), { recursive: true })
     const tmp = `${this.file}.tmp`
     writeFileSync(tmp, JSON.stringify(encrypted, null, 2) + '\n', { mode: 0o600 })
     renameSync(tmp, this.file)
   }
 
+  /**
+   * Materialize and persist generated/repaired UUIDs under the file lock:
+   * re-reads the fresh on-disk state under the lock so concurrent mutations
+   * are never clobbered by a stale pre-lock snapshot.
+   */
+  private async materializeIdsWithLock(): Promise<AccountStorageV4> {
+    this.ensureFile()
+    return this.lock.withLock(this.file, async () => {
+      const { storage, mutated } = this.readAndMigrateUnlocked()
+      if (mutated) {
+        this.writeUnlocked(storage)
+      }
+      return storage
+    })
+  }
+
+  async load(): Promise<AccountStorageV4> {
+    const { storage, mutated } = this.readAndMigrateUnlocked()
+    if (mutated) {
+      // Missing or duplicate IDs detected: atomically materialize and persist under the lock.
+      return this.materializeIdsWithLock()
+    }
+    return storage
+  }
+
+  async save(storage: AccountStorageV4): Promise<void> {
+    this.ensureFile()
+    await this.lock.withLock(this.file, async () => {
+      this.writeUnlocked(storage)
+    })
+  }
+
   async mutate<T>(fn: (storage: AccountStorageV4) => T | Promise<T>): Promise<T> {
     this.ensureFile()
     return this.lock.withLock(this.file, async () => {
-      const storage = await this.load()
+      const { storage } = this.readAndMigrateUnlocked()
       const result = await fn(storage)
-      await this.save(storage)
+      this.writeUnlocked(storage)
       return result
     })
   }
@@ -213,24 +255,32 @@ export class JsonAccountStore implements AccountStore {
 
 export class InMemoryAccountStore implements AccountStore {
   private storage: AccountStorageV4
+  private mutateChain: Promise<unknown> = Promise.resolve()
 
   constructor(initial: AccountStorageV4 = { version: CURRENT_STORAGE_VERSION, accounts: [], activeIndex: 0 }) {
-    this.storage = initial
+    this.storage = ensureAccountIds(initial).storage
   }
 
   async load(): Promise<AccountStorageV4> {
+    const { storage, mutated } = ensureAccountIds(this.storage)
+    if (mutated) this.storage = storage
     return structuredClone(this.storage)
   }
 
   async save(storage: AccountStorageV4): Promise<void> {
-    this.storage = structuredClone(storage)
+    this.storage = structuredClone(ensureAccountIds(storage).storage)
   }
 
   async mutate<T>(fn: (storage: AccountStorageV4) => T | Promise<T>): Promise<T> {
-    const storage = structuredClone(this.storage)
-    const result = await fn(storage)
-    this.storage = storage
-    return result
+    const run = async () => {
+      const storage = structuredClone(ensureAccountIds(this.storage).storage)
+      const result = await fn(storage)
+      this.storage = ensureAccountIds(storage).storage
+      return result
+    }
+    const next = this.mutateChain.then(run, run)
+    this.mutateChain = next
+    return next
   }
 }
 
