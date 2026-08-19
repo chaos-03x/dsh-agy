@@ -546,24 +546,28 @@ export class AgySessionManager {
     const storage = await this.store.load()
     const account = storage.accounts[index]
     if (!account) return { error: 'account not found' }
-    const auth = await this.accessTokenFor(account)
-    if (!auth) return { error: 'refresh failed (revoked?)' }
-    const { encodeCredentialBlob } = await import('./oauth/blob.ts')
-    const parts = parseRefreshParts(account.refresh)
-    return {
-      blob: encodeCredentialBlob('agy', {
-        access_token: auth.access,
-        refresh_token: parts.refreshToken,
-        expires_in: Math.max(0, Math.round((auth.expires - Date.now()) / 1000)),
-      }),
+    try {
+      const auth = await this.accessTokenFor(account)
+      if (!auth) return { error: 'refresh failed (revoked?)' }
+      const { encodeCredentialBlob } = await import('./oauth/blob.ts')
+      const parts = parseRefreshParts(account.refresh)
+      return {
+        blob: encodeCredentialBlob('agy', {
+          access_token: auth.access,
+          refresh_token: parts.refreshToken,
+          expires_in: Math.max(0, Math.round((auth.expires - Date.now()) / 1000)),
+        }),
+      }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) }
     }
   }
 
   /** Probe one account: refresh + userinfo; a live credential re-enables the account. */
   private async probeAccount(index: number, account: ManagedAccount): Promise<{ ok: boolean; email?: string; error?: string }> {
-    const auth = await this.accessTokenFor(account)
-    if (!auth) return { ok: false, error: 'refresh failed (revoked?)' }
     try {
+      const auth = await this.accessTokenFor(account)
+      if (!auth) return { ok: false, error: 'refresh failed (revoked?)' }
       const response = await proxiedFetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
         headers: { Authorization: `Bearer ${auth.access}` },
       })
