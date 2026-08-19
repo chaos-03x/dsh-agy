@@ -28,6 +28,7 @@ export type CooldownReason =
   | 'auth-failure'
   | 'network-error'
   | 'project-error'
+  | 'quota-exhausted'
   | 'validation-required'
 
 /** Per-account quota cache keyed by model id. */
@@ -138,6 +139,56 @@ export interface TokenExchangeFailure {
 }
 
 export type TokenExchangeResult = TokenExchangeSuccess | TokenExchangeFailure
+
+export interface AgyAccountSession {
+  auth: OAuthAuthDetails
+  account: ManagedAccount
+  index: number
+  /** Fingerprint + randomized impersonation headers for this request. */
+  impersonation: {
+    'User-Agent': string
+    'X-Goog-Api-Client': string
+    'Client-Metadata': string
+  }
+}
+
+/** Authentication failure while resolving an account session. */
+export type AgyAuthErrorKind = 'transport' | 'rate-limit' | 'invalid-credential'
+
+/**
+ * Host-independent authentication error. The adapter maps `kind` to the DSH
+ * error protocol without coupling the session or CLI layers to dsh-llm.
+ */
+export class AgyAuthError extends Error {
+  readonly kind: AgyAuthErrorKind
+
+  constructor(kind: AgyAuthErrorKind, message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'AgyAuthError'
+    this.kind = kind
+  }
+}
+
+/** Why an enabled account pool cannot currently serve one model family. */
+export type PoolBlockedKind = 'retryable' | 'quota-exhausted'
+
+/**
+ * Enabled accounts exist, but every candidate is temporarily blocked. Kept
+ * independent of dsh-llm so CLI and web entry points do not gain a host import.
+ */
+export class AgyPoolBlockedError extends Error {
+  readonly kind: PoolBlockedKind
+  readonly blockedUntil: number
+
+  constructor(kind: PoolBlockedKind, blockedUntil: number) {
+    super(kind === 'quota-exhausted'
+      ? 'All agy accounts have exhausted quota for the requested model family.'
+      : 'All agy accounts are temporarily blocked for the requested model family.')
+    this.name = 'AgyPoolBlockedError'
+    this.kind = kind
+    this.blockedUntil = blockedUntil
+  }
+}
 
 /** Classified upstream failure kinds consumed by the rotation state machine. */
 export type FailureKind =

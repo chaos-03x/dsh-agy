@@ -122,7 +122,7 @@ export function decideRotation(
           ? Math.min(resetMs - now, FULL_QUOTA_COOLDOWN_MS)
           : FULL_QUOTA_COOLDOWN_MS
         account.coolingDownUntil = now + Math.max(cooldownMs, 60_000)
-        account.cooldownReason = undefined
+        account.cooldownReason = 'quota-exhausted'
         return { action: 'cool', backoffMs: Math.max(cooldownMs, 60_000) }
       }
       // Per-minute rate limit: prefer the server's real reset (capped), then

@@ -188,7 +188,7 @@ describe('in-memory store', () => {
       accounts: [
         { email: 'legacy@x', refresh: 'rt-1', addedAt: 1, lastUsed: 1 },
       ],
-    }, null, 2) + '\n')
+    }, null, 2) + '\n', { mode: 0o600 })
 
     const store = new JsonAccountStore({ file, codec, lock: noopFileLock })
     const firstLoad = await store.load()
@@ -213,7 +213,7 @@ describe('in-memory store', () => {
         { id: 'duplicate-id-1', email: 'a@x', refresh: 'rt-a', addedAt: 1, lastUsed: 1 },
         { id: 'duplicate-id-1', email: 'b@x', refresh: 'rt-b', addedAt: 1, lastUsed: 1 },
       ],
-    }, null, 2) + '\n')
+    }, null, 2) + '\n', { mode: 0o600 })
 
     const store = new JsonAccountStore({ file, codec, lock: noopFileLock })
     const loaded = await store.load()

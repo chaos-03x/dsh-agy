@@ -4,8 +4,8 @@
  * in-harness plugin shell, the CLI, and the web routes.
  */
 
-import type { AgyAccountSession } from './adapter/adapter.ts'
-import type { AccountStorageV4, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails } from './types.ts'
+import { AgyAuthError, AgyPoolBlockedError } from './types.ts'
+import type { AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails } from './types.ts'
 import { refreshAccessToken } from './oauth/refresh.ts'
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from './oauth/auth.ts'
 import type { AccountStore } from './store/accounts.ts'
@@ -22,6 +22,7 @@ import {
 } from './runtime/rotation.ts'
 import {
   familyKeyOf,
+  familyQuotaFor,
   ingestFamilyQuotas,
   isFamilyDrained,
   isQuotaStale,
@@ -165,6 +166,17 @@ export class AgySessionManager {
         this.tokenCache.set(key, { access: result.auth.access, expires: result.auth.expires })
         return result.auth
       }
+      if (result.type === 'failed') {
+        if (cached && !accessTokenExpired({ access: cached.access, expires: cached.expires, refresh: account.refresh })) {
+          return { access: cached.access, expires: cached.expires, refresh: account.refresh }
+        }
+        const kind = result.error.status === 429
+          ? 'rate-limit'
+          : result.error.status === 0 || result.error.status === 408 || result.error.status >= 500
+            ? 'transport'
+            : 'invalid-credential'
+        throw new AgyAuthError(kind, result.error.message, { cause: result.error })
+      }
       if (result.type === 'revoked') {
         // Account credentials are dead — mark it disabled and verificationRequired in the store
         this.tokenCache.delete(key)
@@ -177,12 +189,14 @@ export class AgySessionManager {
             target.verificationRequiredReason = 'auth-failure'
           }
         })
+        account.enabled = false
+        account.verificationRequired = true
+        account.verificationRequiredAt = Date.now()
+        account.verificationRequiredReason = 'auth-failure'
         return undefined
       }
-      // Transient failure: the cached token (when present) remains servable.
       return undefined
     })()
-
     this.refreshInFlight.set(key, refreshing)
     refreshing.then(
       () => this.refreshInFlight.delete(key),
@@ -247,15 +261,27 @@ export class AgySessionManager {
 
     const updates = results.filter((r): r is { key: string; quotas: Record<string, CachedQuota>; updatedAt: number } => Boolean(r && Object.keys(r.quotas).length > 0))
     if (updates.length > 0) {
-      await this.store.mutate((s) => {
-        for (const update of updates) {
-          const target = s.accounts.find((candidate) => this.accountKey(candidate) === update.key)
-          if (target) {
-            target.cachedQuota = update.quotas
-            target.cachedQuotaUpdatedAt = update.updatedAt
-          }
+      for (const update of updates) {
+        const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
+        if (target) {
+          target.cachedQuota = update.quotas
+          target.cachedQuotaUpdatedAt = update.updatedAt
         }
-      })
+      }
+      try {
+        await this.store.mutate((s) => {
+          for (const update of updates) {
+            const target = s.accounts.find((candidate) => this.accountKey(candidate) === update.key)
+            if (target) {
+              target.cachedQuota = update.quotas
+              target.cachedQuotaUpdatedAt = update.updatedAt
+            }
+          }
+        })
+      } catch {
+        // Quota is a derived cache — a failed write degrades gracefully without
+        // failing the active request (next refresh cycle re-ingests).
+      }
     }
   }
 
@@ -294,10 +320,20 @@ export class AgySessionManager {
     if (eligible.length === 0) return undefined
 
     const ranked = rankPoolCandidates(eligible, model, now, storage.activeIndex)
-    const picked = ranked.find((c) => c.blockedUntil === null)
-    // Hard gating: all candidates are blocked for this family/account
-    if (!picked) return undefined
-
+    const picked = ranked.find((candidate) => candidate.blockedUntil === null)
+    if (!picked) {
+      const quotaExhausted = (account: ManagedAccount): boolean => {
+        if (account.cooldownReason === 'quota-exhausted' && (account.coolingDownUntil ?? 0) > now) return true
+        const quota = familyQuotaFor(account, family)
+        if ((quota?.remainingFraction ?? 1) > 0 || !quota?.resetTime) return false
+        const resetAt = Date.parse(quota.resetTime)
+        return !Number.isNaN(resetAt) && resetAt > now
+      }
+      const retryable = ranked.filter((candidate) => !quotaExhausted(candidate.account))
+      const blocked = retryable.length > 0 ? retryable : ranked
+      const blockedUntil = Math.min(...blocked.map((candidate) => candidate.blockedUntil ?? now))
+      throw new AgyPoolBlockedError(retryable.length > 0 ? 'retryable' : 'quota-exhausted', blockedUntil)
+    }
     if (picked.index !== storage.activeIndex) {
       storage.activeIndex = picked.index
       await this.store.mutate((s) => {
@@ -315,53 +351,63 @@ export class AgySessionManager {
    */
   async getSession(model?: string): Promise<AgyAccountSession | undefined> {
     let storage = await this.store.load()
-    const eligible = storage.accounts.filter((a) => a.enabled !== false)
-    if (eligible.length > 1) {
-      await this.refreshQuotaCache(storage)
-      // The quota refresh persists through the store; re-read so the ranking
-      // below sees the fresh cache it just wrote.
-      storage = await this.store.load()
-    }
-    const picked = await this.pickAccount(storage, model)
-    if (!picked) return undefined
-    const auth = await this.accessTokenFor(picked.account)
-    if (!auth) return undefined
+    const maxAttempts = storage.accounts.filter((account) => account.enabled !== false).length
 
-    const key = this.accountKey(picked.account)
-    if (!picked.account.projectId && !this.projectRetryFailed.has(key)) {
-      try {
-        const { loadCodeAssist } = await import('./oauth/exchange.ts')
-        const { projectId } = await loadCodeAssist(auth.access)
-        if (projectId) {
-          await this.store.mutate((s) => {
-            const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
-            if (account) {
-              account.projectId = projectId
-              // Keep the packed refresh string in sync.
-              const parts = parseRefreshParts(account.refresh)
-              account.refresh = formatRefreshParts({
-                refreshToken: parts.refreshToken,
-                projectId,
-                managedProjectId: parts.managedProjectId,
-              })
-            }
-          })
-          picked.account.projectId = projectId
-        } else {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const eligible = storage.accounts.filter((account) => account.enabled !== false)
+      if (eligible.length > 1) {
+        await this.refreshQuotaCache(storage)
+        // In-memory overlay on storage already took place in refreshQuotaCache.
+      }
+      const picked = await this.pickAccount(storage, model)
+      if (!picked) return undefined
+      const auth = await this.accessTokenFor(picked.account)
+      if (!auth) {
+        // The selected credential was revoked and disabled by accessTokenFor.
+        // Re-read and select another enabled account within this same request.
+        this.lastUsed = null
+        storage = await this.store.load()
+        continue
+      }
+
+      const key = this.accountKey(picked.account)
+      if (!picked.account.projectId && !this.projectRetryFailed.has(key)) {
+        try {
+          const { loadCodeAssist } = await import('./oauth/exchange.ts')
+          const { projectId } = await loadCodeAssist(auth.access)
+          if (projectId) {
+            await this.store.mutate((s) => {
+              const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+              if (account) {
+                account.projectId = projectId
+                // Keep the packed refresh string in sync.
+                const parts = parseRefreshParts(account.refresh)
+                account.refresh = formatRefreshParts({
+                  refreshToken: parts.refreshToken,
+                  projectId,
+                  managedProjectId: parts.managedProjectId,
+                })
+              }
+            })
+            picked.account.projectId = projectId
+          } else {
+            this.projectRetryFailed.add(key)
+          }
+        } catch {
           this.projectRetryFailed.add(key)
         }
-      } catch {
-        this.projectRetryFailed.add(key)
+      }
+
+      this.lastUsed = { key, at: Date.now() }
+      return {
+        auth,
+        account: picked.account,
+        index: picked.index,
+        impersonation: impersonationHeadersFor(picked.account),
       }
     }
 
-    this.lastUsed = { key, at: Date.now() }
-    return {
-      auth,
-      account: picked.account,
-      index: picked.index,
-      impersonation: impersonationHeadersFor(picked.account),
-    }
+    return undefined
   }
 
   /** Adapter hook: apply rotation decisions and fingerprint regeneration. */
@@ -454,9 +500,9 @@ export class AgySessionManager {
    * Returns the collected text or a structured error message.
    */
   async testCall(model: string, prompt = 'Reply with exactly: OK', maxTokens = 1024): Promise<{ ok: boolean; text?: string; error?: string }> {
-    const session = await this.getSession(model)
-    if (!session) return { ok: false, error: 'No agy account configured — run `dsh-agy login` first.' }
     try {
+      const session = await this.getSession(model)
+      if (!session) return { ok: false, error: 'No agy account configured — run `dsh-agy login` first.' }
       const { toAgyRequestBody } = await import('./adapter/translate.ts')
       const { fetchAgyFirstOk } = await import('./oauth/constants.ts')
       const { parseAgySse } = await import('./adapter/parse.ts')

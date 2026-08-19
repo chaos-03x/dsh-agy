@@ -5,7 +5,7 @@ import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AgyAdapter } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
-
+import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 function textMessage(role: Message['role'], text: string): Message {
   return { id: `m-${Math.random()}`, role, content: [{ type: 'text', text }] } as Message
 }
@@ -595,6 +595,91 @@ describe('AgyAdapter', () => {
     await expect(async () => {
       for await (const _ of adapter.stream(generateOptions())) void _
     }).rejects.toMatchObject({ code: 'RATE_LIMIT', failure: { providerRetryAfterMs: 2000 } })
+  })
+
+  it('converts retryable pool blockage into RATE_LIMIT with a positive integer delay', async () => {
+    const resetAt = Date.now() + 5000
+    const adapter = new AgyAdapter({
+      getSession: async () => {
+        throw new AgyPoolBlockedError('retryable', resetAt)
+      },
+      reportFailure: async () => {},
+    })
+
+    let thrown: unknown
+    try {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toMatchObject({
+      code: 'RATE_LIMIT',
+      failure: { providerRetryAfterMs: expect.any(Number) },
+    })
+    expect(thrown && typeof thrown === 'object' && 'failure' in thrown).toBe(true)
+    if (!thrown || typeof thrown !== 'object' || !('failure' in thrown)) throw new Error('missing failure')
+    const failure = thrown.failure
+    expect(failure && typeof failure === 'object' && 'providerRetryAfterMs' in failure).toBe(true)
+    if (!failure || typeof failure !== 'object' || !('providerRetryAfterMs' in failure)) throw new Error('missing retry delay')
+    const retryMs = failure.providerRetryAfterMs
+    expect(typeof retryMs).toBe('number')
+    if (typeof retryMs !== 'number') throw new Error('retry delay is not numeric')
+    expect(Number.isFinite(retryMs)).toBe(true)
+    expect(Number.isInteger(retryMs)).toBe(true)
+    expect(retryMs).toBeGreaterThan(0)
+  })
+
+  it('maps structured auth failures to the matching host error code', async () => {
+    const cases = [
+      ['transport', 'TRANSPORT'],
+      ['rate-limit', 'RATE_LIMIT'],
+      ['invalid-credential', 'INVALID_CREDENTIAL'],
+    ] as const
+
+    for (const [kind, code] of cases) {
+      const adapter = new AgyAdapter({
+        getSession: async () => {
+          throw new AgyAuthError(kind, `auth ${kind}`)
+        },
+        reportFailure: async () => {},
+      })
+      await expect(async () => {
+        for await (const _ of adapter.stream(generateOptions())) void _
+      }).rejects.toMatchObject({ code })
+    }
+  })
+
+  it('listModels falls back for expected availability errors but rethrows unknown failures', async () => {
+    const blocked = new AgyAdapter({
+      getSession: async () => {
+        throw new AgyPoolBlockedError('retryable', Date.now() + 60000)
+      },
+      reportFailure: async () => {},
+    })
+    const models = await blocked.listModels('agy')
+    expect(models.length).toBeGreaterThan(0)
+    expect(models.some((m) => m.id === 'gemini-2.5-flash')).toBe(true)
+
+    const broken = new AgyAdapter({
+      getSession: async () => { throw new Error('store corrupt') },
+      reportFailure: async () => {},
+    })
+    await expect(broken.listModels('agy')).rejects.toThrow('store corrupt')
+  })
+
+  it('converts quota-exhausted pool blockage into terminal QUOTA error', async () => {
+    const resetAt = Date.now() + 86400000
+    const adapter = new AgyAdapter({
+      getSession: async () => {
+        throw new AgyPoolBlockedError('quota-exhausted', resetAt)
+      },
+      reportFailure: async () => {},
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({
+      code: 'QUOTA',
+    })
   })
 })
 

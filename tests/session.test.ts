@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgySessionManager, impersonationHeadersFor, SESSION_AFFINITY_WINDOW_MS } from '../src/session.ts'
 import { InMemoryAccountStore } from '../src/store/accounts.ts'
+import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
 import type { ManagedAccount } from '../src/types.ts'
-
 function account(email = 'a@b.c'): ManagedAccount {
   return { email, refresh: `rt-${email}|proj-1`, projectId: 'proj-1', addedAt: 0, lastUsed: 0, enabled: true }
 }
@@ -479,18 +479,22 @@ describe('usage-driven selection', () => {
     expect(after.accounts[0]!.verificationRequired).toBe(false)
   })
 
-  it('hard gates and blocks requests when the requested family is rate-limited on all accounts', async () => {
+  it('hard gates and throws AgyPoolBlockedError when the requested family is rate-limited on all accounts', async () => {
     stubTokenEndpoint()
     const a = account('a@x')
     const b = account('b@x')
-    a.rateLimitResetTimes = { google: Date.now() + 60_000 }
-    b.rateLimitResetTimes = { google: Date.now() + 60_000 }
+    const resetAt = Date.now() + 60_000
+    a.rateLimitResetTimes = { google: resetAt }
+    b.rateLimitResetTimes = { google: resetAt }
     const store = new InMemoryAccountStore(storage([a, b]))
     const sessions = new AgySessionManager({ store })
 
-    // When requested for Gemini (google family), all accounts are blocked -> must return undefined
-    const session = await sessions.getSession('gemini-3.5-flash')
-    expect(session).toBeUndefined()
+    // When requested for Gemini (google family), all accounts are blocked -> throws retryable AgyPoolBlockedError
+    await expect(sessions.getSession('gemini-3.5-flash')).rejects.toMatchObject({
+      name: 'AgyPoolBlockedError',
+      kind: 'retryable',
+      blockedUntil: resetAt,
+    })
   })
 
   it('legacy accounts without clientId refresh via embedded fallback and persist clientId on success', async () => {
@@ -613,8 +617,7 @@ describe('usage-driven selection', () => {
     const store = new InMemoryAccountStore(storage([legacyAccount]))
     const sessions = new AgySessionManager({ store })
 
-    const session = await sessions.getSession()
-    expect(session).toBeUndefined()
+    await expect(sessions.getSession()).rejects.toMatchObject({ name: 'AgyAuthError', kind: 'transport' })
     const after = await store.load()
     // Transient failure must NOT revoke the account!
     expect(after.accounts[0]!.enabled).toBe(true)
@@ -765,6 +768,140 @@ describe('usage-driven selection', () => {
 
     const after = await store.load()
     expect(after.accounts[0]!.clientId).toBe('1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com')
+  })
+
+  it('degrades gracefully when quota cache mutate fails and overlays fresh quota in memory', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at-quota-ok', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({
+          models: {
+            'gemini-3.5-flash': { quotaInfo: { remainingFraction: 0.8, resetTime: '2099-01-01T00:00:00Z' } },
+          },
+        }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+
+    // Both accounts start with stale exhausted quota (remainingFraction: 0)
+    const a = {
+      ...account('a@x'),
+      cachedQuota: { google: { remainingFraction: 0, resetTime: '2099-01-01T00:00:00Z' } },
+      cachedQuotaUpdatedAt: 1, // expired TTL
+    }
+    const b = {
+      ...account('b@x'),
+      cachedQuota: { google: { remainingFraction: 0, resetTime: '2099-01-01T00:00:00Z' } },
+      cachedQuotaUpdatedAt: 1, // expired TTL
+    }
+    const store = new InMemoryAccountStore(storage([a, b]))
+    const originalMutate = store.mutate.bind(store)
+    // Mutate throws an error (e.g. disk write failure)
+    store.mutate = async (fn) => {
+      const storageCopy = await store.load()
+      const isQuotaWrite = await (async () => {
+        try {
+          await fn(storageCopy)
+          return Boolean(storageCopy.accounts[0]?.cachedQuota?.google?.remainingFraction === 0.8)
+        } catch {
+          return false
+        }
+      })()
+      if (isQuotaWrite) {
+        throw new Error('disk locked: quota write failed')
+      }
+      return originalMutate(fn)
+    }
+
+    const sessions = new AgySessionManager({ store })
+    // getSession must NOT throw quota-exhausted — in-memory overlay provides the newly probed 0.8 headroom!
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session).toBeDefined()
+    expect(session!.auth.access).toBe('at-quota-ok')
+  })
+
+  it('throws transport AgyAuthError on transient token endpoint failure', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response('{"error":"internal_server_error"}', { status: 500, statusText: 'Internal Server Error' })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+
+    const store = new InMemoryAccountStore(storage([account('a@x')]))
+    const sessions = new AgySessionManager({ store })
+
+    await expect(sessions.getSession()).rejects.toMatchObject({
+      name: 'AgyAuthError',
+      kind: 'transport',
+    })
+  })
+
+  it('switches to another enabled account within the same request after invalid_grant', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (!url.includes('oauth2.googleapis.com/token')) throw new Error(`unexpected fetch: ${url}`)
+      const refresh = new URLSearchParams(String(init?.body)).get('refresh_token')
+      if (refresh === 'rt-revoked@x') {
+        return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })
+      }
+      return new Response(JSON.stringify({ access_token: 'healthy-token', expires_in: 3600 }), { status: 200 })
+    }))
+
+    const now = Date.now()
+    const revoked = { ...account('revoked@x'), cachedQuota: { google: { remainingFraction: 0.8 } }, cachedQuotaUpdatedAt: now }
+    const healthy = { ...account('healthy@x'), cachedQuota: { google: { remainingFraction: 0.8 } }, cachedQuotaUpdatedAt: now }
+    const store = new InMemoryAccountStore(storage([revoked, healthy]))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session?.account.email).toBe('healthy@x')
+    expect(session?.auth.access).toBe('healthy-token')
+    const after = await store.load()
+    expect(after.accounts[0]).toMatchObject({ enabled: false, verificationRequired: true })
+    expect(after.accounts[1]?.enabled).toBe(true)
+  })
+
+  it('classifies invalid_client as a permanent credential error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ error: 'invalid_client' }),
+      { status: 400, statusText: 'Bad Request' },
+    )))
+    const sessions = new AgySessionManager({
+      store: new InMemoryAccountStore(storage([account('invalid@x')])),
+    })
+
+    await expect(sessions.getSession()).rejects.toMatchObject({
+      name: 'AgyAuthError',
+      kind: 'invalid-credential',
+    } satisfies Partial<AgyAuthError>)
+  })
+
+  it('throws quota-exhausted AgyPoolBlockedError when all accounts are quota-exhausted', async () => {
+    stubTokenEndpoint()
+    const resetAt = Date.now() + 12 * 60 * 60 * 1000
+    const a = {
+      ...account('a@x'),
+      coolingDownUntil: resetAt,
+      cooldownReason: 'quota-exhausted' as const,
+    }
+    const b = {
+      ...account('b@x'),
+      cachedQuota: { google: { remainingFraction: 0, resetTime: new Date(resetAt).toISOString() } },
+      cachedQuotaUpdatedAt: Date.now(),
+    }
+    const store = new InMemoryAccountStore(storage([a, b]))
+    const sessions = new AgySessionManager({ store })
+
+    await expect(sessions.getSession('gemini-3.5-flash')).rejects.toMatchObject({
+      name: 'AgyPoolBlockedError',
+      kind: 'quota-exhausted',
+      blockedUntil: resetAt,
+    })
   })
 })
 

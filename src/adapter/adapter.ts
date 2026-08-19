@@ -20,7 +20,8 @@ import type {
   StreamChunk,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
-import type { FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
+import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
+import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
 import { classifyFetchError, classifyHttpError } from '../runtime/classify.ts'
@@ -28,19 +29,9 @@ import { deriveAntigravitySessionId, generateAntigravityRequestId } from '../run
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
 import { parseAgySse } from './parse.ts'
-import { AGY_PROVIDER, listAgyModels, resolveAgyModel } from './models.ts'
+import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
 
-export interface AgyAccountSession {
-  auth: OAuthAuthDetails
-  account: ManagedAccount
-  index: number
-  /** Fingerprint + randomized impersonation headers for this request. */
-  impersonation: {
-    'User-Agent': string
-    'X-Goog-Api-Client': string
-    'Client-Metadata': string
-  }
-}
+export type { AgyAccountSession }
 
 export interface AgyAdapterOptions {
   /** Resolve the active account for a request (model-aware: family-scoped quota ranking). */
@@ -90,8 +81,15 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
-    const session = await this.options.getSession()
-    return listAgyModels(session?.auth.access, session?.account.projectId)
+    try {
+      const session = await this.options.getSession()
+      return await listAgyModels(session?.auth.access, session?.account.projectId)
+    } catch (error) {
+      if (error instanceof AgyPoolBlockedError || error instanceof AgyAuthError) {
+        return catalogModelList()
+      }
+      throw error
+    }
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -99,7 +97,34 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const session = await this.options.getSession(options.model)
+    let session: AgyAccountSession | undefined
+    try {
+      session = await this.options.getSession(options.model)
+    } catch (error) {
+      if (error instanceof AgyAuthError) {
+        if (error.kind === 'transport') {
+          throw new LlmError(error.message, 'TRANSPORT', { cause: error })
+        }
+        if (error.kind === 'rate-limit') {
+          throw new LlmError(error.message, 'RATE_LIMIT', {
+            requestId: ProviderRequestId(generateAntigravityRequestId()),
+          })
+        }
+        throw new LlmError(error.message, 'INVALID_CREDENTIAL', { cause: error })
+      }
+      if (error instanceof AgyPoolBlockedError) {
+        if (error.kind === 'quota-exhausted') {
+          throw new LlmError(error.message, QUOTA_EXCEEDED_CODE)
+        }
+        const delta = Math.ceil(error.blockedUntil - Date.now())
+        const providerRetryAfterMs = Number.isFinite(delta) && delta > 0 ? delta : 1
+        throw new LlmError(error.message, 'RATE_LIMIT', {
+          providerRetryAfterMs,
+          requestId: ProviderRequestId(generateAntigravityRequestId()),
+        })
+      }
+      throw error
+    }
     if (!session) {
       throw new LlmError(
         'No agy account configured — run `dsh-agy login` to authenticate.',
