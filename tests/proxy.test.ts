@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EnvHttpProxyAgent } from 'undici'
-import { proxiedFetch, proxyAgent } from '../src/proxy.ts'
+import { normalizeProxyUrl, proxiedFetch, proxyAgent } from '../src/proxy.ts'
 
 describe('proxy env support', () => {
   afterEach(() => {
@@ -9,6 +9,15 @@ describe('proxy env support', () => {
 
   it('builds an EnvHttpProxyAgent that reads HTTP_PROXY/HTTPS_PROXY/NO_PROXY', () => {
     expect(proxyAgent).toBeInstanceOf(EnvHttpProxyAgent)
+  })
+
+  it('normalizes schemeless proxy values that undici would reject', () => {
+    expect(normalizeProxyUrl('127.0.0.1:7890')).toBe('http://127.0.0.1:7890')
+    expect(normalizeProxyUrl('localhost:7890')).toBe('http://localhost:7890')
+    expect(normalizeProxyUrl('http://127.0.0.1:7890')).toBe('http://127.0.0.1:7890')
+    expect(normalizeProxyUrl('socks5://127.0.0.1:1080')).toBe('socks5://127.0.0.1:1080')
+    expect(normalizeProxyUrl(undefined)).toBeUndefined()
+    expect(normalizeProxyUrl('')).toBeUndefined()
   })
 
   it('forwards the proxy dispatcher to the underlying fetch', async () => {

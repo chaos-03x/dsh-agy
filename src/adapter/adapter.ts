@@ -11,15 +11,18 @@ import {
   ProviderRequestId,
   QUOTA_EXCEEDED_CODE,
   attributionHeaders,
+  contentHasImage,
 } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  Message,
   StreamChunk,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
+import { Buffer } from 'node:buffer'
 import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
@@ -27,11 +30,26 @@ import { fetchAgyFirstOk } from '../oauth/constants.ts'
 import { classifyFetchError, classifyHttpError } from '../runtime/classify.ts'
 import { deriveAntigravitySessionId, generateAntigravityRequestId } from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
-import { toAgyRequestBody } from './translate.ts'
+import { catalogModel } from './catalog.ts'
+import { toAgyRequestBody, collectImageRefs } from './translate.ts'
+import type { AgyInlineImages } from './translate.ts'
 import { parseAgySse } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
 
 export type { AgyAccountSession }
+
+/**
+ * Structural view of the DSH attachment service (`ctx.attachments`), matching
+ * the pattern of the credentials seam (plugin-common.ts). Only the surface the
+ * agy adapter needs is named, so the optional dependency carries no runtime
+ * import of @deepseek-ai/dsh-attachment.
+ */
+export interface AgyAttachments {
+  readImage(
+    ref: { attachmentId: string; mediaType: string },
+    signal?: AbortSignal,
+  ): Promise<{ data: Uint8Array }>
+}
 
 export interface AgyAdapterOptions {
   /** Resolve the active account for a request (model-aware: family-scoped quota ranking). */
@@ -52,6 +70,8 @@ export interface AgyAdapterOptions {
   ): Promise<void>
   /** Report a clean stream completion (resets the failure counter). */
   markSuccess?(session: AgyAccountSession): Promise<void>
+  /** Durable image-byte resolver (optional: image requests fail without it). */
+  attachments?(): AgyAttachments | undefined
 }
 
 const UPSTREAM_ERROR_CODE = 'UPSTREAM'
@@ -66,6 +86,44 @@ export function buildRequestHeaders(session: AgyAccountSession): Record<string, 
     ...attributionHeaders(),
     ...session.impersonation,
   }
+}
+
+/**
+ * Resolve base64 image bytes for every image block the translation emits.
+ *
+ * Returns undefined when the request carries no images. Image-bearing requests
+ * fail with UNSUPPORTED_CONTENT instead of degrading silently: an image in a
+ * non-user message is not representable on the Gemini wire as a user part, a
+ * catalog entry declared text-only cannot take one, and without the DSH
+ * attachment service there is no byte source at all (dropping the block would
+ * answer a question the user believes the model has seen).
+ */
+async function resolveInlineImages(
+  messages: readonly Message[],
+  attachments: AgyAttachments | undefined,
+  model: string,
+  signal: AbortSignal | undefined,
+): Promise<AgyInlineImages | undefined> {
+  for (const message of messages) {
+    if (message.role !== 'user' && contentHasImage(message.content)) {
+      throw new LlmError(`agy cannot represent an image in an in-history ${message.role} message`, 'UNSUPPORTED_CONTENT')
+    }
+  }
+  const refs = collectImageRefs(messages)
+  if (refs.length === 0) return undefined
+  const meta = catalogModel(model)
+  if (meta !== undefined && meta.supportsVision !== true) {
+    throw new LlmError(`agy model "${model}" does not support image input`, 'UNSUPPORTED_CONTENT')
+  }
+  if (attachments === undefined) {
+    throw new LlmError('agy image input requires the DSH attachment service (ctx.attachments)', 'UNSUPPORTED_CONTENT')
+  }
+  const images = new Map<string, string>()
+  for (const ref of refs) {
+    const stored = await attachments.readImage(ref, signal)
+    images.set(ref.attachmentId, Buffer.from(stored.data).toString('base64'))
+  }
+  return images
 }
 
 export class AgyAdapter extends LlmAdapter {
@@ -132,10 +190,16 @@ export class AgyAdapter extends LlmAdapter {
       )
     }
 
+    const inlineImages = await resolveInlineImages(
+      options.messages,
+      this.options.attachments?.(),
+      options.model,
+      options.signal,
+    )
     const body = toAgyRequestBody(options, {
       projectId: session.account.projectId,
       sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
-    })
+    }, inlineImages)
     const headers = buildRequestHeaders(session)
 
     let response: Response

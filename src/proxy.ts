@@ -8,7 +8,36 @@
 
 import { EnvHttpProxyAgent } from 'undici'
 
-const agent = new EnvHttpProxyAgent()
+/**
+ * Normalize an env proxy value before handing it to undici: a schemeless
+ * value (`127.0.0.1:7890`) makes EnvHttpProxyAgent throw "Invalid URL" at
+ * construction time — which would take the whole plugin down at import, not
+ * just the proxied requests. Written-in schemes (http://, socks5://, ...)
+ * pass through untouched; empty values mean "not configured".
+ */
+export function normalizeProxyUrl(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw.length === 0) return undefined
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`
+}
+
+function readProxyEnv(name: string): string | undefined {
+  return process.env[name] ?? process.env[name.toLowerCase()]
+}
+
+function buildProxyAgent(): EnvHttpProxyAgent {
+  // Pass explicit values only when present; an unset variable must not leak
+  // an undefined override into the agent's own env reading.
+  const options: EnvHttpProxyAgent.Options = {}
+  const httpProxy = normalizeProxyUrl(readProxyEnv('HTTP_PROXY'))
+  if (httpProxy !== undefined) options.httpProxy = httpProxy
+  const httpsProxy = normalizeProxyUrl(readProxyEnv('HTTPS_PROXY'))
+  if (httpsProxy !== undefined) options.httpsProxy = httpsProxy
+  const noProxy = readProxyEnv('NO_PROXY')
+  if (noProxy !== undefined && noProxy.length > 0) options.noProxy = noProxy
+  return new EnvHttpProxyAgent(options)
+}
+
+const agent = buildProxyAgent()
 
 /** The proxy agent built from the environment (exported for tests). */
 export const proxyAgent = agent

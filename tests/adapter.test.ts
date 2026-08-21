@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_SCHEMA_ALLOWLIST, collectImageRefs, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AgyAdapter } from '../src/adapter/adapter.ts'
@@ -43,6 +43,46 @@ describe('translate', () => {
     expect(parts).toEqual([
       { thought: true, text: 'thinking...' },
       { text: 'answer' },
+    ])
+  })
+
+  it('maps top-level image blocks to inlineData parts with resolved bytes', () => {
+    const messages = [
+      { id: 'm1', role: 'user' as const, content: [
+        { type: 'text' as const, text: 'what is in this?' },
+        { type: 'image' as const, attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+    ]
+    const body = toAgyRequestBody(generateOptions({ messages }), {}, new Map([['img-1', 'UE5H']]))
+    expect(body.request.contents[0]!.parts).toEqual([
+      { text: 'what is in this?' },
+      { inlineData: { mimeType: 'image/png', data: 'UE5H' } },
+    ])
+  })
+
+  it('throws when an image block has no resolved bytes (invariant)', () => {
+    const messages = [
+      { id: 'm1', role: 'user' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+    ]
+    expect(() => toAgyRequestBody(generateOptions({ messages }), {}, new Map())).toThrow(/no inline bytes/)
+  })
+
+  it('collects top-level image refs for the adapter to resolve', () => {
+    const messages = [
+      { id: 'a', role: 'assistant' as const, content: [
+        { type: 'text' as const, text: 'x' },
+        { type: 'image' as const, attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+      { id: 'b', role: 'user' as const, content: [
+        { type: 'tool-result' as const, toolCallId: 'c1', content: [
+          { type: 'image' as const, attachment: { attachmentId: 'nested', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+        ]},
+      ]},
+    ]
+    expect(collectImageRefs(messages)).toEqual([
+      { attachmentId: 'img-1', mediaType: 'image/png' },
     ])
   })
 
@@ -93,6 +133,20 @@ describe('translate', () => {
       maxOutputTokens: 1024,
       stopSequences: ['END'],
     })
+  })
+
+  it('translates reasoningEffort to thinkingBudget for tiered models', () => {
+    const off = toAgyRequestBody(generateOptions({ reasoningEffort: 'off' as any }), {})
+    expect(off.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+
+    const low = toAgyRequestBody(generateOptions({ reasoningEffort: 'low' as any, maxTokens: 1000 }), {})
+    expect(low.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 2048 })
+    // maxOutputTokens adjusted to be greater than budget
+    expect(low.request.generationConfig?.maxOutputTokens).toBe(6144)
+
+    const high = toAgyRequestBody(generateOptions({ reasoningEffort: 'high' as any, maxTokens: 32000 }), {})
+    expect(high.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 24576 })
+    expect(high.request.generationConfig?.maxOutputTokens).toBe(32000)
   })
 
   it('keeps only allowlisted keywords in tool schemas (upstream 400)', () => {
@@ -513,19 +567,60 @@ describe('models', () => {
     expect(merged.find((m) => m.id === 'some-new-model')?.name).toBe('New')
   })
 
+  it('declares input modalities from the catalog; unknown ids stay unknown', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-3.6-flash-high': { displayName: 'Vision Gemini' },
+        'gpt-oss-120b-medium': { displayName: 'Text GPT-OSS' },
+        'gemini-2.5-flash': { displayName: 'Gemini 2.5 Flash' },
+        'some-new-model': { displayName: 'New' },
+      },
+    })
+    expect(merged.find((m) => m.id === 'gemini-3.6-flash-high')?.inputModalities).toEqual(['text', 'image'])
+    expect(merged.find((m) => m.id === 'gemini-2.5-flash')?.inputModalities).toEqual(['text', 'image'])
+    expect(merged.find((m) => m.id === 'gpt-oss-120b-medium')?.inputModalities).toEqual(['text'])
+    // Dynamic-only id: absent means unknown, never text-only (a newer
+    // multimodal model must not be projected/rejected by the runtime).
+    expect(merged.find((m) => m.id === 'some-new-model')?.inputModalities).toBeUndefined()
+  })
+
   it('falls back to catalog when the endpoint fails', async () => {
     const fetchImpl = vi.fn(async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch
     const models = await listAgyModels('at', 'p', fetchImpl)
     expect(models.length).toBeGreaterThan(0)
+    expect(models.find((m) => m.id === 'gemini-3.6-flash-high')?.inputModalities).toEqual(['text', 'image'])
   })
 
   it('resolves exact-model metadata from the catalog', () => {
     const resolved = resolveAgyModel('agy', 'claude-opus-4-6-thinking')
     expect(resolved.name).toContain('Claude Opus')
     expect(resolved.defaultMaxTokens).toBe(65536)
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
+    expect(resolved.reasoning?.efforts).toEqual([{
+      id: 'on',
+      name: 'Thinking',
+      description: 'Thinking is fixed by the model id; no per-request level.',
+    }])
+    expect(resolved.reasoning?.defaultEffort).toBe('on')
     const unknown = resolveAgyModel('agy', 'brand-new-model')
     expect(unknown.name).toBe('brand-new-model')
     expect(unknown.defaultMaxTokens).toBeUndefined()
+    expect(unknown.inputModalities).toBeUndefined()
+    expect(unknown.reasoning).toBeUndefined()
+  })
+
+  it('provides 4 reasoning tiers for dynamic models like gemini-3.7-flash-tiered', () => {
+    const resolved = resolveAgyModel('agy', 'gemini-3.7-flash-tiered')
+    expect(resolved.name).toBe('Gemini 3.7 Flash')
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['off', 'low', 'medium', 'high'])
+    expect(resolved.reasoning?.defaultEffort).toBe('medium')
+  })
+
+  it('gives non-reasoning catalog models no reasoning control', () => {
+    const resolved = resolveAgyModel('agy', 'gemini-2.5-flash')
+    expect(resolved.reasoning).toBeUndefined()
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
   })
 })
 
@@ -570,6 +665,76 @@ describe('AgyAdapter', () => {
     for await (const chunk of adapter.stream(generateOptions())) chunks.push(chunk)
     expect(chunks.some((c) => (c as { type: string }).type === 'text-delta')).toBe(true)
     expect(failures).toEqual([])
+  })
+
+  it('resolves image bytes and sends them as inlineData parts', async () => {
+    const fetchMock = vi.fn(async () => new Response(sseStream(['data: [DONE]']), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      attachments: () => ({
+        readImage: async () => ({ data: new TextEncoder().encode('PNG!') }),
+      }),
+    })
+    const messages = [
+      { id: 'm1', role: 'user' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+    ]
+    for await (const _ of adapter.stream(generateOptions({ messages }))) void _
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit
+    const body = JSON.parse(String(init.body)) as { request: { contents: Array<{ parts: unknown[] }> } }
+    expect(body.request.contents[0]!.parts).toEqual([
+      { inlineData: { mimeType: 'image/png', data: Buffer.from('PNG!').toString('base64') } },
+    ])
+  })
+
+  it('rejects images with UNSUPPORTED_CONTENT when the attachment service is absent', async () => {
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    const messages = [
+      { id: 'm1', role: 'user' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+    ]
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ messages }))) void _
+    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+  })
+
+  it('rejects images for catalog models declared text-only', async () => {
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      attachments: () => ({ readImage: async () => ({ data: new Uint8Array(0) }) }),
+    })
+    const messages = [
+      { id: 'm1', role: 'user' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+    ]
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ model: 'gpt-oss-120b-medium', messages }))) void _
+    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+  })
+
+  it('rejects images in non-user messages', async () => {
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      attachments: () => ({ readImage: async () => ({ data: new Uint8Array(0) }) }),
+    })
+    const messages = [
+      { id: 'a', role: 'assistant' as const, content: [
+        { type: 'image' as const, attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } },
+      ]},
+    ]
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions({ messages }))) void _
+    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
   })
 
   it('reports and throws QUOTA (terminal) on daily quota exhaustion', async () => {

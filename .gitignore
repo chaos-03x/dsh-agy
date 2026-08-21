@@ -11,6 +11,9 @@ tests/fixtures/recorded/
 # npm lockfile is not used — pnpm-lock.yaml is the source of truth
 package-lock.json
 
+# workspace-local pnpm store (used when the global store is not writable)
+.pnpm-store/
+
 # editor/agent tooling
 .serena/
 .rtk/

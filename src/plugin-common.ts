@@ -9,6 +9,7 @@
 import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { AgyAdapter } from './adapter/adapter.ts'
+import type { AgyAttachments } from './adapter/adapter.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { resolveAntigravityVersion } from './runtime/version.ts'
 import { AgySessionManager } from './session.ts'
@@ -80,6 +81,11 @@ export async function createAgyRuntime(ctx: Context): Promise<{
     getSession: (model) => sessions.getSession(model),
     reportFailure: (kind, session, info) => sessions.reportFailure(kind, session, info),
     markSuccess: (session) => sessions.markSuccess(session),
+    // Optional DSH seam (the same strict-ctx.get pattern as the credentials
+    // seam above): the attachment service activates before the llm service in
+    // the base bundle, so a lazy lookup at stream time is always live when it
+    // exists at all. Absent -> image requests fail loudly (UNSUPPORTED_CONTENT).
+    attachments: () => ctx.get('attachments') as unknown as AgyAttachments | undefined,
   })
   return { store, sessions, adapter }
 }

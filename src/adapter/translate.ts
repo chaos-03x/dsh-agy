@@ -24,6 +24,7 @@ export type AgyPart =
   | { thought: true; text: string }
   | { thoughtSignature: string; functionCall: { id: string; name: string; args: unknown } }
   | { functionResponse: { name: string; response: unknown } }
+  | { inlineData: { mimeType: string; data: string } }
 
 export interface AgyContent {
   role: 'user' | 'model'
@@ -45,6 +46,10 @@ export interface AgyRequestBody {
       temperature?: number
       maxOutputTokens?: number
       stopSequences?: string[]
+      thinkingConfig?: {
+        thinkingBudget?: number
+        includeThoughts?: boolean
+      }
     }
     sessionId?: string
   }
@@ -149,12 +154,57 @@ function buildToolNameIndex(messages: readonly Message[]): Map<string, string> {
   return index
 }
 
-function blockToParts(block: ContentBlock, toolNames: Map<string, string>): AgyPart[] {
+/** One image the translation can emit: top-level part of a user message. */
+export interface AgyImageRef {
+  attachmentId: string
+  mediaType: string
+}
+
+/**
+ * Collect the image blocks the translation emits as `inlineData` parts. Only
+ * top-level message parts are collected — an image nested inside a tool
+ * result stays text-only (the tool-result translation extracts text), and
+ * assistant-side images are rejected by the adapter before translation.
+ */
+export function collectImageRefs(messages: readonly Message[]): AgyImageRef[] {
+  const refs: AgyImageRef[] = []
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === 'image') {
+        refs.push({ attachmentId: block.attachment.attachmentId, mediaType: block.attachment.mediaType })
+      }
+    }
+  }
+  return refs
+}
+
+/**
+ * Adapter-resolved base64 image bytes keyed by attachment id; the adapter
+ * guarantees every block collected by {@link collectImageRefs} has an entry.
+ */
+export type AgyInlineImages = ReadonlyMap<string, string>
+
+function blockToParts(
+  block: ContentBlock,
+  toolNames: Map<string, string>,
+  inlineImages: AgyInlineImages | undefined,
+): AgyPart[] {
   switch (block.type) {
     case 'text':
       return [{ text: block.text }]
     case 'reasoning':
       return [{ thought: true, text: block.text }]
+    case 'image': {
+      // Gemini parts vocabulary (same camelCase contract as functionCall /
+      // thoughtSignature); media type comes from the attachment ref, bytes
+      // from the adapter-resolved map. Missing bytes are a translation
+      // invariant violation — the adapter resolves every collected image.
+      const data = inlineImages?.get(block.attachment.attachmentId)
+      if (data === undefined) {
+        throw new Error(`agy: no inline bytes for image attachment ${block.attachment.attachmentId}`)
+      }
+      return [{ inlineData: { mimeType: block.attachment.mediaType, data } }]
+    }
     case 'tool-call': {
       // Upstream parses functionCall.args as google.protobuf.Struct and
       // rejects a raw string with 400. Guarantee an object: parse the string
@@ -201,8 +251,12 @@ function blockToParts(block: ContentBlock, toolNames: Map<string, string>): AgyP
   }
 }
 
-function messageToContent(message: Message, toolNames: Map<string, string>): AgyContent | null {
-  const parts = message.content.flatMap((block) => blockToParts(block, toolNames))
+function messageToContent(
+  message: Message,
+  toolNames: Map<string, string>,
+  inlineImages: AgyInlineImages | undefined,
+): AgyContent | null {
+  const parts = message.content.flatMap((block) => blockToParts(block, toolNames, inlineImages))
   if (parts.length === 0) return null
   const role = message.role === 'assistant' ? 'model' : 'user'
   return { role, parts }
@@ -247,14 +301,22 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
   return [{ functionDeclarations: declarations }]
 }
 
+const DYNAMIC_BUDGET_BY_EFFORT: Record<string, number> = {
+  off: 0,
+  low: 2048,
+  medium: 8192,
+  high: 24576,
+}
+
 /** Build the wrapped Antigravity request body for one call. */
 export function toAgyRequestBody(
   options: GenerateOptions,
   context: { projectId?: string; sessionId?: string },
+  inlineImages?: AgyInlineImages,
 ): AgyRequestBody {
   const toolNames = buildToolNameIndex(options.messages)
   let contents = options.messages
-    .map((message) => messageToContent(message, toolNames))
+    .map((message) => messageToContent(message, toolNames, inlineImages))
     .filter((c): c is AgyContent => c !== null)
   if (isClaudeModel(options.model)) {
     contents = stripTrailingModelTurn(contents)
@@ -265,6 +327,15 @@ export function toAgyRequestBody(
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
+  if (options.reasoningEffort !== undefined && options.reasoningEffort in DYNAMIC_BUDGET_BY_EFFORT) {
+    const budget = DYNAMIC_BUDGET_BY_EFFORT[options.reasoningEffort]
+    if (budget !== undefined) {
+      generationConfig.thinkingConfig = { thinkingBudget: budget }
+      if (budget > 0 && generationConfig.maxOutputTokens !== undefined && generationConfig.maxOutputTokens <= budget) {
+        generationConfig.maxOutputTokens = budget + 4096
+      }
+    }
+  }
 
   return {
     project: context.projectId || undefined,
