@@ -58,7 +58,7 @@ export interface AgyRequestBody {
       temperature?: number
       maxOutputTokens?: number
       stopSequences?: string[]
-      thinkingConfig?: { thinkingLevel: string; includeThoughts: boolean }
+      thinkingConfig?: { thinkingLevel?: string; includeThoughts?: boolean; thinkingBudget?: number }
     }
     sessionId?: string
   }
@@ -329,9 +329,15 @@ export function toAgyRequestBody(
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
   // Level-thinking: map the DSH reasoning effort to thinkingConfig.
   // Id-bound models (thinking !== 'level') never emit it — default is UI hint, not wire default.
+  // When purpose is 'session-title' or reasoning is off, thinkingBudget: 0 prevents
+  // default thinking tokens from exhausting tight output caps (e.g. maxTokens: 64).
   const effort = options.reasoningEffort?.toLowerCase()
-  if (effort && isLevelThinkingModel(options.model) && LEVEL_THINKING_LEVELS.has(effort)) {
-    generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+  if (isLevelThinkingModel(options.model)) {
+    if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 }
+    } else if (effort && LEVEL_THINKING_LEVELS.has(effort)) {
+      generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+    }
   }
 
   return {

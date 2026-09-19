@@ -834,6 +834,16 @@ describe('models', () => {
     const noEffort = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered' }), {})
     expect(noEffort.request.generationConfig?.thinkingConfig).toBeUndefined()
 
+    // purpose: 'session-title' disables thinking to protect tight maxTokens budgets
+    const titleReq = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', purpose: 'session-title' as any }), {})
+    expect(titleReq.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+
+    // reasoningEffort 'none' or 'off' also sets thinkingBudget: 0
+    const noneEffort = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'none' as any }), {})
+    expect(noneEffort.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+    const offEffort = toAgyRequestBody(generateOptions({ model: 'gemini-3.8-flash-tiered', reasoningEffort: 'off' as any }), {})
+    expect(offEffort.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+
     const fixedModel = toAgyRequestBody(generateOptions({ model: 'gemini-3.6-flash-high', reasoningEffort: 'high' as any }), {})
     expect(fixedModel.request.generationConfig?.thinkingConfig).toBeUndefined()
 
