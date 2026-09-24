@@ -888,7 +888,7 @@ export function renderDashboardHtml(): string {
 
         for (const model of models) {
           try {
-            const r = await api('/test', { method: 'POST', body: JSON.stringify({ model }) });
+            const r = await api('/test', { method: 'POST', body: JSON.stringify({ model, index }) });
             if (r.ok) {
               okCount++;
               lines.push('OK   ' + model);
@@ -966,7 +966,7 @@ export function renderDashboardHtml(): string {
           btn.disabled = true;
           btn.textContent = '...';
           try {
-            const r = await api('/test', { method: 'POST', body: JSON.stringify({ model }) });
+            const r = await api('/test', { method: 'POST', body: JSON.stringify({ model, index: selectedIndex }) });
             if (r.ok) {
               toast('OK: ' + model, 'success');
             } else {

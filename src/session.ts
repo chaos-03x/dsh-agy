@@ -116,7 +116,7 @@ export class AgySessionManager {
   private readonly projectRetryFailed = new Set<string>()
 
   /** Bound for one quota poll so selection never stalls on a hung endpoint. */
-  private static readonly QUOTA_FETCH_TIMEOUT_MS = 3_000
+  static readonly QUOTA_FETCH_TIMEOUT_MS = 3_000
   /** Refresh the token this far ahead of expiry so a request never blocks on the token endpoint. */
   private static readonly REFRESH_SKEW_MS = 2 * 60 * 1000
 
@@ -406,34 +406,9 @@ export class AgySessionManager {
         continue
       }
 
-      const key = this.accountKey(picked.account)
-      if (!picked.account.projectId && !this.projectRetryFailed.has(key)) {
-        try {
-          const { loadCodeAssist } = await import('./oauth/exchange.ts')
-          const { projectId } = await loadCodeAssist(auth.access, { proxyUrl: picked.account.proxy })
-          if (projectId) {
-            await this.store.mutate((s) => {
-              const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
-              if (account) {
-                account.projectId = projectId
-                // Keep the packed refresh string in sync.
-                const parts = parseRefreshParts(account.refresh)
-                account.refresh = formatRefreshParts({
-                  refreshToken: parts.refreshToken,
-                  projectId,
-                  managedProjectId: parts.managedProjectId,
-                })
-              }
-            })
-            picked.account.projectId = projectId
-          } else {
-            this.projectRetryFailed.add(key)
-          }
-        } catch {
-          this.projectRetryFailed.add(key)
-        }
-      }
+      await this.healProjectId(picked.account, auth)
 
+      const key = this.accountKey(picked.account)
       this.lastUsed = { key, at: Date.now() }
       return {
         auth,
@@ -451,6 +426,82 @@ export class AgySessionManager {
     // ("no account configured") — misleading, and wrong for a transient blip.
     if (lastTransportError !== undefined) throw lastTransportError
     return undefined
+  }
+
+  /**
+   * Heal missing projectId at request time if not already attempted.
+   */
+  private async healProjectId(account: ManagedAccount, auth: OAuthAuthDetails): Promise<void> {
+    const key = this.accountKey(account)
+    if (account.projectId || this.projectRetryFailed.has(key)) return
+    try {
+      const { loadCodeAssist } = await import('./oauth/exchange.ts')
+      const { projectId } = await loadCodeAssist(auth.access, { proxyUrl: account.proxy })
+      if (projectId) {
+        await this.store.mutate((s) => {
+          const target = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+          if (target) {
+            target.projectId = projectId
+            // Keep the packed refresh string in sync.
+            const parts = parseRefreshParts(account.refresh)
+            target.refresh = formatRefreshParts({
+              refreshToken: parts.refreshToken,
+              projectId,
+              managedProjectId: parts.managedProjectId,
+            })
+          }
+        })
+        account.projectId = projectId
+      } else {
+        this.projectRetryFailed.add(key)
+      }
+    } catch {
+      this.projectRetryFailed.add(key)
+    }
+  }
+
+  /**
+   * Resolve session credentials for a specific account index (refreshing if needed
+   * and healing missing projectId). Does NOT update session affinity (lastUsed pin).
+   */
+  async getSessionForIndex(index: number): Promise<AgyAccountSession | undefined> {
+    const storage = await this.store.load()
+    const account = storage.accounts[index]
+    if (!account || account.enabled === false) return undefined
+
+    let auth: OAuthAuthDetails | undefined
+    try {
+      auth = await this.accessTokenFor(account)
+    } catch {
+      return undefined
+    }
+    if (!auth) return undefined
+
+    await this.healProjectId(account, auth)
+
+    return {
+      auth,
+      account,
+      index,
+      impersonation: impersonationHeadersFor(account),
+    }
+  }
+
+  /** Clear session affinity pin so the next call to getSession re-evaluates the active account. */
+  clearSessionPin(): void {
+    this.lastUsed = null
+  }
+
+  /**
+   * Set active account index in the store and clear session pin so the new active
+   * account is picked immediately for subsequent requests.
+   */
+  async activateAccount(index: number): Promise<void> {
+    this.clearSessionPin()
+    await this.store.mutate((storage) => {
+      if (index < 0 || index >= storage.accounts.length) throw new Error('account not found')
+      storage.activeIndex = index
+    })
   }
 
   /**
@@ -561,10 +612,19 @@ export class AgySessionManager {
    * Test call: one short streaming request against the live backend.
    * Returns the collected text or a structured error message.
    */
-  async testCall(model: string, prompt = 'Reply with exactly: OK', maxTokens = 1024): Promise<{ ok: boolean; text?: string; error?: string }> {
+  async testCall(model: string, prompt = 'Reply with exactly: OK', maxTokens = 1024, index?: number): Promise<{ ok: boolean; text?: string; error?: string }> {
     try {
-      const session = await this.getSession(model)
-      if (!session) return { ok: false, error: 'No agy account configured — run `dsh-agy login` first.' }
+      const session = index !== undefined
+        ? await this.getSessionForIndex(index)
+        : await this.getSession(model)
+      if (!session) {
+        return {
+          ok: false,
+          error: index !== undefined
+            ? `Account #${index + 1} unavailable or disabled`
+            : 'No agy account configured — run `dsh-agy login` first.',
+        }
+      }
       const { toAgyRequestBody } = await import('./adapter/translate.ts')
       const { fetchAgyFirstOk } = await import('./oauth/constants.ts')
       const { parseAgySse } = await import('./adapter/parse.ts')

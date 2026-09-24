@@ -195,16 +195,24 @@ async function statusCommand() {
     console.log(` ${marker} [${index}] ${account.email ?? '(no email)'} — ${state}${account.projectId ? ` (project: ${account.projectId})` : ''}${maskedProxy ? ` proxy: ${maskedProxy}` : ''}`)
 
     // Best-effort quota summary via fetchAvailableModels (fresh access token).
-    const session = await sessions.getSession().catch(() => undefined)
-    if (session && session.index === index) {
+    const session = await (typeof sessions.getSessionForIndex === 'function'
+      ? sessions.getSessionForIndex(index)
+      : sessions.getSession()
+    ).catch(() => undefined)
+    if (session) {
       try {
         const { fetchAvailableModels } = await import('../adapter/models.ts')
         // Account-scoped: route through the account's proxy so a status check
         // never reveals the host's real IP for a proxied account.
+        const timeoutMs = AgySessionManager.QUOTA_FETCH_TIMEOUT_MS ?? 3_000
         const discovered = await fetchAvailableModels(
           session.auth.access,
           session.account.projectId,
-          accountFetch({ proxyUrl: session.account.proxy }),
+          (input, init) => {
+            const timeout = AbortSignal.timeout(timeoutMs)
+            const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+            return accountFetch({ proxyUrl: session.account.proxy })(input, { ...init, signal })
+          },
         )
         const entries = Object.entries(discovered.models ?? {})
         if (entries.length > 0) {

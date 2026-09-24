@@ -103,6 +103,49 @@ describe('AgySessionManager', () => {
     expect(next!.index).toBe(1)
   })
 
+  it('activateAccount updates activeIndex and clears session affinity pin immediately', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // First pick lands on account 0 and pins it
+    const first = await sessions.getSession()
+    expect(first!.index).toBe(0)
+
+    // Second pick is still account 0 due to affinity
+    const second = await sessions.getSession()
+    expect(second!.index).toBe(0)
+
+    // Manual activation of account 1 clears affinity pin and sets activeIndex
+    await sessions.activateAccount(1)
+    const after = await store.load()
+    expect(after.activeIndex).toBe(1)
+
+    // Next getSession immediately picks account 1
+    const active = await sessions.getSession()
+    expect(active!.index).toBe(1)
+  })
+
+  it('getSessionForIndex resolves account by index without altering session affinity', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x'), { ...account('c@x'), enabled: false }], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // Resolving account 1 by index returns account 1
+    const s1 = await sessions.getSessionForIndex(1)
+    expect(s1).toBeDefined()
+    expect(s1!.index).toBe(1)
+    expect(s1!.account.email).toBe('b@x')
+
+    // getSession still respects activeIndex 0 (affinity was not altered)
+    const active = await sessions.getSession()
+    expect(active!.index).toBe(0)
+
+    // Disabled account or out of range returns undefined
+    expect(await sessions.getSessionForIndex(2)).toBeUndefined()
+    expect(await sessions.getSessionForIndex(99)).toBeUndefined()
+  })
+
   it('regenerates the fingerprint on repeated rate-limits (bounded history)', async () => {
     stubTokenEndpoint()
     const store = new InMemoryAccountStore(storage([account()]))

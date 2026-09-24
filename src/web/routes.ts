@@ -10,7 +10,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AccountStore } from '../store/accounts.ts'
-import type { AgySessionManager } from '../session.ts'
+import { AgySessionManager } from '../session.ts'
 import { authorizeAntigravity } from '../oauth/authorize.ts'
 import { exchangeAntigravity } from '../oauth/exchange.ts'
 import { decodeCredentialBlob } from '../oauth/blob.ts'
@@ -99,17 +99,25 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
       list.push(entry)
     }
     // Best-effort per-account quota via fetchAvailableModels (fresh token).
-    for (const entry of list) {
-      const session = await sessions.getSession().catch(() => undefined)
-      if (!session || session.index !== entry.index) continue
+    await Promise.all(list.map(async (entry) => {
       try {
+        const session = await (typeof sessions.getSessionForIndex === 'function'
+          ? sessions.getSessionForIndex(Number(entry.index))
+          : sessions.getSession()
+        ).catch(() => undefined)
+        if (!session) return
         const { fetchAvailableModels } = await import('../adapter/models.ts')
         // Account-scoped: route through the account's proxy (the quota panel
         // must not reveal the host's real IP for a proxied account).
+        const timeoutMs = AgySessionManager.QUOTA_FETCH_TIMEOUT_MS ?? 3_000
         const discovered = await fetchAvailableModels(
           session.auth.access,
           session.account.projectId,
-          accountFetch({ proxyUrl: session.account.proxy }),
+          (input, init) => {
+            const timeout = AbortSignal.timeout(timeoutMs)
+            const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+            return accountFetch({ proxyUrl: session.account.proxy })(input, { ...init, signal })
+          },
         )
         const models = Object.entries(discovered.models ?? {})
         if (models.length > 0) {
@@ -130,7 +138,7 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
       } catch {
         // quota stays null
       }
-    }
+    }))
     return list
   }
 
@@ -247,6 +255,7 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     try {
       const body = await readJson(req)
       const index = Number(body.index)
+      sessions.clearSessionPin?.()
       await store.mutate((storage) => {
         if (index < 0 || index >= storage.accounts.length) throw new Error('account not found')
         storage.accounts.splice(index, 1)
@@ -262,20 +271,31 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
     try {
       const body = await readJson(req)
       const index = Number(body.index)
-      await store.mutate((storage) => {
-        if (index < 0 || index >= storage.accounts.length) throw new Error('account not found')
-        storage.activeIndex = index
-      })
+      if (typeof sessions.activateAccount === 'function') {
+        await sessions.activateAccount(index)
+      } else {
+        sessions.clearSessionPin?.()
+        await store.mutate((storage) => {
+          if (index < 0 || index >= storage.accounts.length) throw new Error('account not found')
+          storage.activeIndex = index
+        })
+      }
       sendJson(res, 200, { ok: true, index })
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
     }
   }
 
-  const handleModels = async (_req: IncomingMessage, res: ServerResponse) => {
-    const session = await sessions.getSession().catch(() => undefined)
+  const handleModels = async (req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url ?? '/', baseUrl)
+    const indexParam = url.searchParams.get('index')
+    const index = indexParam !== null && indexParam !== '' ? Number(indexParam) : undefined
+    const session = await (index !== undefined && typeof sessions.getSessionForIndex === 'function'
+      ? sessions.getSessionForIndex(index)
+      : sessions.getSession()
+    ).catch(() => undefined)
     if (!session) {
-      sendJson(res, 400, { error: 'No agy account configured — run `dsh-agy login` first.' })
+      sendJson(res, 400, { error: index !== undefined ? `Account #${index + 1} unavailable` : 'No agy account configured — run `dsh-agy login` first.' })
       return
     }
     try {
@@ -302,7 +322,8 @@ export function createAgyWebRoutes(options: AgyWebOptions): WebRoute[] {
         sendJson(res, 400, { error: 'model is required' })
         return
       }
-      const result = await sessions.testCall(model)
+      const index = typeof body.index === 'number' ? body.index : undefined
+      const result = await sessions.testCall(model, undefined, undefined, index)
       sendJson(res, result.ok ? 200 : 400, result)
     } catch (error) {
       sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
