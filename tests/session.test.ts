@@ -286,7 +286,10 @@ describe('AgySessionManager', () => {
 describe('usage-driven selection', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  function quotaAccount(email: string, quota: Record<string, { remainingFraction?: number; resetTime?: string }>): ManagedAccount {
+  function quotaAccount(
+    email: string,
+    quota: Record<string, { remainingFraction?: number; resetTime?: string; weeklyFraction?: number; weeklyResetTime?: string }>,
+  ): ManagedAccount {
     return {
       ...account(email),
       cachedQuota: quota,
@@ -384,6 +387,9 @@ describe('usage-driven selection', () => {
           },
         }), { status: 200 })
       }
+      // The scheduling refresh reads the summary endpoint too; an empty summary
+      // means "no window information", NOT "the windows are empty".
+      if (url.includes('retrieveUserQuotaSummary')) return new Response(JSON.stringify({ groups: [] }), { status: 200 })
       throw new Error(`unexpected fetch: ${url}`)
     }))
 
@@ -397,6 +403,120 @@ describe('usage-driven selection', () => {
       anthropic: { remainingFraction: 0.6, modelCount: 1 },
     })
     expect(after.accounts[0]!.cachedQuotaUpdatedAt).toBeGreaterThan(0)
+  })
+
+  it('lands the weekly window in cachedQuota from the scheduling refresh', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({
+          groups: [
+            {
+              displayName: 'Gemini Models',
+              buckets: [
+                { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.8, resetTime: '2099-01-01T00:00:00Z' },
+                { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.02, resetTime: '2099-06-01T00:00:00Z' },
+              ],
+            },
+            {
+              displayName: 'Claude and GPT models',
+              buckets: [
+                { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.5, resetTime: '2099-06-01T00:00:00Z' },
+              ],
+            },
+          ],
+        }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({
+          models: { 'gemini-3.5-flash': { quotaInfo: { remainingFraction: 0.4, resetTime: '2098-01-01T00:00:00Z' } } },
+        }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')]))
+    const sessions = new AgySessionManager({ store })
+    await sessions.getSession('gemini-3.5-flash')
+
+    const after = await store.load()
+    // Both endpoints are read on the scheduling path: the per-model counter is
+    // the 5-hour window and the weekly budget has no per-model representation.
+    // The earlier reset wins the 5-hour field; the weekly fields are untouched
+    // by the per-model merge.
+    expect(after.accounts[0]!.cachedQuota?.google).toEqual({
+      remainingFraction: 0.4,
+      resetTime: '2098-01-01T00:00:00Z',
+      weeklyFraction: 0.02,
+      weeklyResetTime: '2099-06-01T00:00:00Z',
+      modelCount: 1,
+    })
+    // The shared 3p counter carries its weekly reading to BOTH families.
+    expect(after.accounts[0]!.cachedQuota?.anthropic).toEqual({
+      weeklyFraction: 0.5, weeklyResetTime: '2099-06-01T00:00:00Z',
+    })
+    expect(after.accounts[0]!.cachedQuota?.openai).toEqual({
+      weeklyFraction: 0.5, weeklyResetTime: '2099-06-01T00:00:00Z',
+    })
+  })
+
+  it('keeps the last known weekly window when the summary endpoint fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('retrieveUserQuotaSummary')) throw new TypeError('fetch failed')
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({
+          models: { 'gemini-3.5-flash': { quotaInfo: { remainingFraction: 0.7, resetTime: '2099-01-01T00:00:00Z' } } },
+        }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+
+    const spentWeek: ManagedAccount = {
+      ...account('a@x'),
+      cachedQuota: {
+        google: {
+          remainingFraction: 0.7,
+          resetTime: '2099-01-01T00:00:00Z',
+          weeklyFraction: 0.002,
+          weeklyResetTime: '2099-06-01T00:00:00Z',
+        },
+      },
+      cachedQuotaUpdatedAt: 1, // an expired TTL forces the refresh
+    }
+    const store = new InMemoryAccountStore(storage([spentWeek, account('b@x')]))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('gemini-3.5-flash')
+    const after = await store.load()
+    // A failed summary reports "unknown", not "no weekly limit": erasing the
+    // reading would hand a week-exhausted account straight back to selection.
+    expect(after.accounts[0]!.cachedQuota?.google?.weeklyFraction).toBe(0.002)
+    expect(after.accounts[0]!.cachedQuota?.google?.weeklyResetTime).toBe('2099-06-01T00:00:00Z')
+    expect(session!.index).toBe(1)
+  })
+
+  it('moves off a pinned account whose WEEKLY window is spent', async () => {
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([
+      quotaAccount('a@x', {
+        google: { remainingFraction: 0.9, weeklyFraction: 0.002, weeklyResetTime: '2099-01-01T00:00:00Z' },
+      }),
+      quotaAccount('b@x', {
+        google: { remainingFraction: 0.8, weeklyFraction: 0.8, weeklyResetTime: '2099-01-01T00:00:00Z' },
+      }),
+    ]))
+    const sessions = new AgySessionManager({ store })
+    // Account 0 has the HEALTHIER 5-hour bucket; only the weekly window says it
+    // is out of budget, which is exactly the reading that used to be invisible.
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session!.index).toBe(1)
   })
 
   it('keeps selection on rotation order when the quota fetch fails', async () => {

@@ -48,7 +48,7 @@
 | `store/accounts` | `load() / save(acc) / mutate(fn)` | 加密、proper-lockfile、迁移链、去重、0600 | **in-memory fake**（第二个 adapter，正当的 seam） |
 | `runtime/classify` | `classifyHttpError(status, headers, body) → Kind` / `classifyFetchError(error, routing?) → Kind` | 429/403/网络错误解析、Retry-After、resetTime；仅当失败的 `AccountRouting` 带显式代理时才 fail-closed；`describeFetchError()` 遍历 `error.cause` 链取脱敏后的错误码（凭据已抹除） | fixture |
 | `runtime/rotation` | `onFailure(acc, kind) → Action` | 冷却到服务端上报的真实 reset 时间（上限 30min/24h）、backoff 分级、activeIndex 切换、指纹再生触发 | 状态机单元测试 |
-| `runtime/quota` | `rank(accounts, model) → order` | fetchAvailableModels → 按模型族（google/anthropic/openai）聚合配额、drained/hot-window 护栏、required-drain 排名（对齐 OMP） | 纯单元 |
+| `runtime/quota` | `rank(accounts, model) → order` | fetchAvailableModels + retrieveUserQuotaSummary → 按模型族（google/anthropic/openai）聚合双桶配额（5 小时滚动 + 7 天周额度）、两个窗口各自的 drained/hot-window 护栏、周额度耗尽时阻塞至周重置时刻、required-drain 排名（对齐 OMP） | 纯单元 |
 | `runtime/risk` | `isDisabled() / fingerprintMode()` | 环境开关：总开关 + 固定身份模式（自备客户端凭据在 oauth/constants 解析） | 纯单元 |
 | `runtime/fingerprint` | `generate() → Fingerprint` | 随机平台/arch/SDK 池、历史管理（≤5）、版本同步；**数据外置 JSON** | 纯单元 |
 | `adapter/translate` | `toBody(generateOptions) → RequestBody` | DSH messages/tools → Gemini contents[]，thinking 原样携带 | fixture（录制请求） |

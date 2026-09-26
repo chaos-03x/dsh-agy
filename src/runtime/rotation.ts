@@ -12,6 +12,27 @@ export const BACKOFF_TIERS_MS = [5_000, 10_000, 20_000, 30_000, 60_000] as const
 export const SOFT_QUOTA_THRESHOLD = 0.15
 
 /**
+ * The WEEKLY window's exhaustion threshold, and deliberately NOT
+ * `SOFT_QUOTA_THRESHOLD`.
+ *
+ * The two numbers answer the same question — "how much work is left in this
+ * window?" — about windows of very different lengths, so they only look
+ * inconsistent when read side by side:
+ *
+ *   15% of a 5-hour window is ~45 minutes of runway.
+ *   1%  of a 7-day window  is ~1.7 hours of runway.
+ *
+ * The weekly bar is the stricter one where it matters, because being wrong is
+ * asymmetric: a drained 5-hour window refills within five hours, while a drained
+ * weekly window parks the account for DAYS. Treating an account as drained a
+ * little early costs one rotation; treating it as usable too late costs the user
+ * a failed request with no healthy fallback.
+ *
+ * Do not "unify" these two constants without re-deriving both runways above.
+ */
+export const WEEKLY_QUOTA_THRESHOLD = 0.01
+
+/**
  * Concurrent upstream requests one account may carry before selection prefers
  * another. A real Antigravity window serves one conversation at a time, so
  * several simultaneous streams from one account is a shape the official client
@@ -254,11 +275,27 @@ export function pickNextAccountIndex(
   return (after ?? enabled[0]!)!.index
 }
 
-/** Build the soft-quota cache TTL: short when low, long when healthy. */
-export function computeSoftQuotaCacheTtlMs(remainingFraction: number | undefined, now = Date.now()): number {
-  if (typeof remainingFraction !== 'number') return 10 * 60 * 1000
-  if (remainingFraction < SOFT_QUOTA_THRESHOLD) return 60 * 1000
-  if (remainingFraction < 0.5) return 5 * 60 * 1000
+/**
+ * Build the soft-quota cache TTL: short when low, long when healthy.
+ *
+ * Driven by the MOST pressured of the two windows, because they drain on
+ * different clocks: an account sitting at 90% of its 5-hour bucket but 2% of its
+ * week still has to be re-measured on the short interval, or a weekly exhaustion
+ * is discovered only when a request fails.
+ *
+ * `weeklyFraction` is the optional SECOND parameter, so the two fractions sit
+ * adjacent and `now` moved to third. No caller passes a timestamp.
+ */
+export function computeSoftQuotaCacheTtlMs(
+  remainingFraction: number | undefined,
+  weeklyFraction?: number,
+  now = Date.now(),
+): number {
+  if (typeof remainingFraction === 'number' && remainingFraction < SOFT_QUOTA_THRESHOLD) return 60 * 1000
+  if (typeof weeklyFraction === 'number' && weeklyFraction <= WEEKLY_QUOTA_THRESHOLD) return 60 * 1000
+  if (typeof remainingFraction !== 'number' && typeof weeklyFraction !== 'number') return 10 * 60 * 1000
+  if (typeof remainingFraction === 'number' && remainingFraction < 0.5) return 5 * 60 * 1000
+  if (typeof weeklyFraction === 'number' && weeklyFraction < 0.2) return 5 * 60 * 1000
   return 15 * 60 * 1000
 }
 

@@ -515,13 +515,25 @@ export class AgySessionManager {
           const auth = await this.accessTokenFor(account)
           if (!auth) return null
           const { fetchAvailableModels } = await import('./adapter/models.ts')
+          const { fetchQuotaSummary } = await import('./adapter/quota-summary.ts')
           const routed = accountFetch({ proxyUrl: account.proxy })
-          const discovered = await fetchAvailableModels(auth.access, account.projectId, (input, init) => {
+          // ONE timeout per probe, both bounded by the same budget the model
+          // probe already used; the account's proxy is honoured on both, or the
+          // summary call would egress direct and leak the account's real IP.
+          const bounded: typeof fetch = (input, init) => {
             const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
             const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
             return routed(input, { ...init, signal })
-          })
-          const quotas = ingestFamilyQuotas(discovered)
+          }
+          // The weekly window comes ONLY from the summary endpoint, so it is read
+          // HERE (the scheduling path) and never in `refreshLimits`: that one is
+          // display-only, and a display refresh must not reach `cachedQuota`,
+          // which decides blocking.
+          const [discovered, groups] = await Promise.all([
+            fetchAvailableModels(auth.access, account.projectId, bounded),
+            fetchQuotaSummary(auth.access, account.projectId, bounded),
+          ])
+          const quotas = ingestFamilyQuotas(discovered, groups, account.cachedQuota)
           return { key, quotas, updatedAt: Date.now() }
         } catch {
           return null

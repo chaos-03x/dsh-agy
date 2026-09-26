@@ -46,10 +46,37 @@ export type CooldownReason =
   | 'quota-exhausted'
   | 'validation-required'
 
-/** Per-account quota cache keyed by model id. */
+/**
+ * Per-account quota cache keyed by model FAMILY (`google` / `anthropic` /
+ * `openai`, or `unknown`) — never by model id. See `familyKeyOf` in
+ * `runtime/quota.ts`.
+ *
+ * The keying is load-bearing for the fields below: a family has exactly ONE
+ * record, so a family-scoped reading stored here cannot disagree with a
+ * per-model copy of itself, and there is no second key to keep in sync.
+ */
 export interface CachedQuota {
+  /** 0..1 left in the family's rolling 5-hour window. */
   remainingFraction?: number
+  /** When the 5-hour window refills (RFC3339). */
   resetTime?: string
+  /**
+   * 0..1 left in the family's 7-day window, when `retrieveUserQuotaSummary`
+   * reported one.
+   *
+   * A genuinely SEPARATE window, not a second view of `remainingFraction`: the
+   * 5-hour bucket refills four times a day while the weekly budget only drains,
+   * so an account can be comfortable on one and exhausted on the other.
+   *
+   * It always travels with its own `weeklyResetTime`, and that timestamp is what
+   * bounds the value's life: once it passes, every consumer ignores the reading
+   * (`isFamilyDrained`, `parseFutureResetMs`, `rankPoolCandidates`), so a weekly
+   * value carried forward across a failed probe cannot outlive its window.
+   */
+  weeklyFraction?: number
+  /** When the 7-day window refills (RFC3339). */
+  weeklyResetTime?: string
+  /** How many models the per-model probe contributed to this family's reading. */
   modelCount?: number
 }
 
@@ -81,7 +108,7 @@ export interface QuotaGroup {
 /**
  * The grouped 5-hour / weekly windows, cached per account.
  *
- * Deliberately SEPARATE from `cachedQuota`: that map is per-model and feeds the
+ * Deliberately SEPARATE from `cachedQuota`: that map is per-FAMILY and feeds the
  * rotation/ranking path (`familyQuotaFor`, `isFamilyDrained`), while this is
  * per-GROUP and display-only. Merging them would put two different shapes under
  * one key and let a display refresh influence scheduling.
