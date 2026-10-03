@@ -29,6 +29,7 @@ import type { AccountStore } from '../store/accounts.ts'
 import type { AgySessionManager } from '../session.ts'
 import type { ModelVisibility } from '../model-visibility.ts'
 import type { UsageStats } from '../stats.ts'
+import { UiPrefsStore } from '../ui-prefs.ts'
 import type {
   AccountState,
   AccountUsageView,
@@ -58,6 +59,7 @@ export interface AgyManagementOptions {
    */
   recentRequests: () => RecentActivity[]
   modelVisibility: ModelVisibility
+  uiPrefs?: UiPrefsStore
   /**
    * The global reasoning-level budget map (see `thinking-budget.ts`).
    *
@@ -148,6 +150,7 @@ function toAccountUsageView(
 export function createAgyManagement(options: AgyManagementOptions): AgyManagement {
   const { store, sessions, stats, recentRequests, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
   const thinkingBudget = options.thinkingBudget
+  const uiPrefs = options.uiPrefs ?? new UiPrefsStore()
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
   const pendingAuth = new Map<string, PendingAuth>()
@@ -617,6 +620,18 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
     },
 
     'stats.get': async () => statsView(),
+
+    'ui.prefs.get': async () => uiPrefs.get(),
+
+    'ui.prefs.set': async (payload) => {
+      const body = payload as { conversationBadge?: unknown } | undefined
+      if (body?.conversationBadge !== undefined && typeof body.conversationBadge !== 'boolean') {
+        fail('conversationBadge must be a boolean')
+      }
+      return uiPrefs.set({
+        conversationBadge: body?.conversationBadge as boolean | undefined,
+      })
+    },
   }
 
   return {

@@ -1,22 +1,55 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { expect, it, describe } from 'vitest'
 import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText, truncateIdentity } from '../src/client/index.ts'
+import { AgyQuotaBadge } from '../src/client/quota-badge.ts'
 import { installAgyStyles } from '../src/client/styles.ts'
 import { en, zh } from '../src/client/locales.ts'
 import { zeroCounters } from '../src/usage-types.ts'
 import type { AccountView, ModelView } from '../src/rpc-contract.ts'
 import type { UsageCounters } from '../src/usage-types.ts'
 
+/**
+ * The browser half's TypeScript sources.
+ *
+ * The i18n scans below are about the UI as a whole, not one file: the header
+ * badge lives in its own modules, and a scan pinned to `index.ts` would call
+ * every key it uses "unused" and every literal it holds "invisible".
+ */
+function clientFiles(): Array<{ name: string, source: string }> {
+  const dir = new URL('../src/client/', import.meta.url)
+  return readdirSync(dir)
+    .filter((name) => name.endsWith('.ts'))
+    .sort()
+    .map((name) => ({ name, source: readFileSync(new URL(name, dir), 'utf8') }))
+}
+
 /** Minimal client context: locale, connection (RPC transport), and the slot registry. */
-function makeContext(options: { withConnection?: boolean } = {}) {
+function makeContext(options: {
+  withConnection?: boolean
+  rpcHandler?: (method: string, payload: unknown) => Promise<unknown>
+  onRegister?: (registration: { id: string, name: string }, factory?: () => unknown) => void
+} = {}) {
   const entries: Array<{ id: string, name: string }> = []
   const dictionaries: string[] = []
-  let cleanup: (() => void) | undefined
+  // One cleanup per effect, in registration order: the plugin installs two
+  // (stylesheet, dictionaries) before it registers anything, and each slot
+  // registration is an effect of its own — keeping only the last would leave
+  // the earlier registration behind on dispose.
+  const cleanups: Array<() => void> = []
   const warnings: string[] = []
   const ctx = {
-    effect: (install: () => () => void) => { cleanup = install(); return cleanup },
+    effect: (install: () => () => void) => { cleanups.push(install()); return () => {} },
     get: (name: string) => (name === 'connection' && options.withConnection !== false
-      ? { rpc: { call: async () => ({ ok: true, value: {} }) } }
+      ? {
+          rpc: {
+            call: async (_channel: string, _endpoint: string, envelope: { method: string, payload: unknown }) => {
+              if (options.rpcHandler) {
+                return { ok: true, value: await options.rpcHandler(envelope.method, envelope.payload) }
+              }
+              return { ok: true, value: {} }
+            },
+          },
+        }
       : undefined),
     locale: {
       register: (ns: string) => { dictionaries.push(ns); return () => {} },
@@ -26,8 +59,9 @@ function makeContext(options: { withConnection?: boolean } = {}) {
     logger: { warn: (message: string) => { warnings.push(message) } },
     slots: {
       inject: (_slot: string, install: () => () => void) => install(),
-      register: (registration: { id: string, name: string }) => {
+      register: (registration: { id: string, name: string }, factory?: () => unknown) => {
         entries.push({ id: registration.id, name: registration.name })
+        options.onRegister?.(registration, factory)
         return () => {
           const at = entries.findIndex((entry) => entry.id === registration.id)
           if (at >= 0) entries.splice(at, 1)
@@ -35,27 +69,87 @@ function makeContext(options: { withConnection?: boolean } = {}) {
       },
     },
   }
-  return { ctx, entries, dictionaries, warnings, dispose: () => { cleanup?.() } }
+  return {
+    ctx,
+    entries,
+    dictionaries,
+    warnings,
+    dispose: () => { for (const undo of cleanups.reverse()) undo() },
+  }
 }
 
 describe('dsh-agy client plugin', () => {
-  it('registers the Antigravity Settings section, not a Plugins tab', () => {
-    // The old entry contributed a `settings.plugins.tab` link to the standalone
-    // /agy dashboard; that surface is gone and this is a first-class section.
+  it('registers only the Antigravity Settings section by default (opt-in disabled)', () => {
+    // #62 invariant: by default conversation header badge is NOT registered.
     const { ctx, entries, dictionaries } = makeContext()
     apply(ctx as never)
-    expect(entries).toEqual([{ id: 'agy', name: 'settings.section' }])
+    expect(entries).toEqual([
+      { id: 'agy', name: 'settings.section' },
+    ])
     // The section must own a dictionary, or its copy cannot follow the host's
     // language setting.
     expect(dictionaries).toEqual(['agy'])
   })
 
-  it('removes the section when the client fiber disposes', () => {
+  it('removes registration when the client fiber disposes', () => {
     const { ctx, entries, dispose } = makeContext()
     apply(ctx as never)
     expect(entries).toHaveLength(1)
     dispose()
     expect(entries).toEqual([])
+  })
+
+  it('registers quota badge when opt-in preference is enabled on startup', async () => {
+    let capturedFactory: (() => unknown) | undefined
+    const { ctx, entries, dispose } = makeContext({
+      rpcHandler: async (method) => {
+        if (method === 'ui.prefs.get') return { conversationBadge: true }
+        return {}
+      },
+      onRegister: (registration, factory) => {
+        if (registration.id === 'agy-quota-badge') capturedFactory = factory
+      },
+    })
+    apply(ctx as never)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(entries).toEqual([
+      { id: 'agy', name: 'settings.section' },
+      { id: 'agy-quota-badge', name: 'conversation.session.header.actions' },
+    ])
+    expect(capturedFactory).toBeDefined()
+    const element = capturedFactory!() as { type: unknown }
+    expect(element.type).toBe(AgyQuotaBadge)
+    dispose()
+    expect(entries).toEqual([])
+  })
+
+  it('dynamically registers and unregisters badge when toggled from settings', () => {
+    let capturedSettingsProps: Record<string, unknown> | undefined
+    const { ctx, entries } = makeContext({
+      onRegister: (registration, factory) => {
+        if (registration.id === 'agy' && factory) {
+          capturedSettingsProps = (factory() as { props: Record<string, unknown> }).props
+        }
+      },
+    })
+    apply(ctx as never)
+    expect(entries).toEqual([{ id: 'agy', name: 'settings.section' }])
+
+    const onBadgePrefChange = capturedSettingsProps?.onBadgePrefChange as ((enabled: boolean) => void) | undefined
+    expect(onBadgePrefChange).toBeDefined()
+
+    // Turn ON
+    onBadgePrefChange!(true)
+    expect(entries).toEqual([
+      { id: 'agy', name: 'settings.section' },
+      { id: 'agy-quota-badge', name: 'conversation.session.header.actions' },
+    ])
+
+    // Turn OFF
+    onBadgePrefChange!(false)
+    expect(entries).toEqual([
+      { id: 'agy', name: 'settings.section' },
+    ])
   })
 
   it('skips registration and warns when the connection service is absent', () => {
@@ -95,10 +189,10 @@ describe('agy section i18n', () => {
     //  - a dead key (its copy can never render, and it drifts from the UI);
     //  - a hardcoded label (Chinese string literals shipped into the English UI),
     //    which is why the Credentials tab's import buttons are checked here.
-    const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+    const source = clientFiles().map((file) => file.source).join('\n')
     const unused = (Object.keys(zh) as Array<keyof typeof zh>)
       .filter((key) => !source.includes(`'${key}'`))
-    expect(unused, `locale keys never referenced by index.ts: ${unused.join(', ')}`).toEqual([])
+    expect(unused, `locale keys never referenced by the client: ${unused.join(', ')}`).toEqual([])
   })
 
   it('passes every placeholder a key declares at every call site', () => {
@@ -107,7 +201,7 @@ describe('agy section i18n', () => {
     // literal braces to the user (`代理可达：{proxy}`) instead of failing. The
     // parity test above compares the two dictionaries and so cannot see this:
     // both sides agree on a placeholder that no caller ever supplies.
-    const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+    const source = clientFiles().map((file) => file.source).join('\n')
     const missing: string[] = []
     for (const [key, template] of Object.entries(zh)) {
       const names = [...template.matchAll(/\{(\w+)\}/g)].map((match) => match[1] as string)
@@ -131,15 +225,15 @@ describe('agy section i18n', () => {
   })
 
   it('has no CJK literals outside the dictionaries', () => {
-    // The UI's copy belongs in locales.ts; a literal here is untranslatable and
-    // invisible to every other i18n check. `styles.ts` carries no user-visible
-    // text at all, so it is held to the same rule.
-    const cjkIn = (file: string): string[] => {
-      const source = readFileSync(new URL(`../src/client/${file}`, import.meta.url), 'utf8')
-      return source.match(/[\u4e00-\u9fff]+/g) ?? []
+    // The UI's copy belongs in locales.ts; a literal anywhere in the browser half
+    // is untranslatable and invisible to every other i18n check. `styles.ts`
+    // carries no user-visible text at all, so it is held to the same rule, and
+    // every module added to the half is scanned without editing this list.
+    // `locales.ts` is the dictionary itself: the one file where CJK belongs.
+    for (const file of clientFiles().filter((entry) => entry.name !== 'locales.ts')) {
+      const literals = file.source.match(/[\u4e00-\u9fff]+/g) ?? []
+      expect(literals, `CJK copy in ${file.name} (belongs in locales.ts)`).toEqual([])
     }
-    expect(cjkIn('index.ts'), 'CJK copy in index.ts (belongs in locales.ts)').toEqual([])
-    expect(cjkIn('styles.ts'), 'CJK copy in styles.ts').toEqual([])
   })
 })
 
@@ -475,4 +569,6 @@ describe('installAgyStyles', () => {
       restore()
     }
   })
+
+
 })

@@ -6,7 +6,7 @@ import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
 import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
-import { AGY_PUBLIC_MODELS, formatTieredModelName } from '../src/adapter/catalog.ts'
+import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId } from '../src/adapter/catalog.ts'
 import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
@@ -983,6 +983,23 @@ describe('models', () => {
       audioTranscriptionModelIds: ['models/proactive-observer-v10'],
     })
     expect(merged.map((m) => m.id)).toEqual(['gemini-3.6-flash-high'])
+  })
+
+  it('treats a chat_ session id as non-chat even when no role list names it', () => {
+    // The role list is the primary signal, but it is optional in the payload:
+    // an account that omits `tabModelIds` must still not get a raw session id in
+    // the picker. Same rule the tab_ prefix already applied.
+    expect(isChatCallableModelId('chat_20706')).toBe(false)
+    expect(isChatCallableModelId('chat_23310')).toBe(false)
+    expect(isChatCallableModelId('tab_flash_lite_preview')).toBe(false)
+    // A chat-prefixed id that is NOT the session shape stays callable: the rule
+    // is the digits suffix, not the word.
+    expect(isChatCallableModelId('chat-flash')).toBe(true)
+    expect(isChatCallableModelId('gemini-3.8-flash-tiered')).toBe(true)
+
+    expect(mergeModelCatalog({
+      models: { 'gemini-3.6-flash-high': {}, 'chat_20706': {} },
+    }).map((m) => m.id)).toEqual(['gemini-3.6-flash-high'])
   })
 
   it('hides a deprecated id only when its replacement is present, chat-callable and visible', () => {

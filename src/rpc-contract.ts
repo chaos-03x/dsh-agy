@@ -16,8 +16,10 @@
 
 import type { ThinkingBudgets } from './thinking-types.ts'
 import type { QuotaGroup } from './types.ts'
+import type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 import type { UsageCounters, UsageSource } from './usage-types.ts'
 
+export type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 export type { QuotaGroup, QuotaWindow } from './types.ts'
 export type { ThinkingBudgets, ThinkingLevel } from './thinking-types.ts'
 
@@ -373,6 +375,8 @@ export interface AgyRpcMethods {
     result: { tieredBudget: number | null }
   }
   'stats.get': { payload: Record<string, never>; result: StatsView }
+  'ui.prefs.get': { payload: Record<string, never>; result: UiPrefsView }
+  'ui.prefs.set': { payload: SetUiPrefsPayload; result: UiPrefsView }
 }
 
 /** Every method name, for the host's dispatch guard and the client's typing. */

@@ -60,9 +60,19 @@ export function formatTieredModelName(modelId: string): string {
     .join(' ')
 }
 
-/** Tab-completion models are discoverable but not chat-callable. */
+/**
+ * Ids the picker must not offer: tab-completion helpers and the per-tab session
+ * ids that ride the same role lists.
+ *
+ * Both shapes are discoverable — they appear in \`models\` — but neither is an
+ * agent chat model. The \`tab_\` prefix is the older shape; \`chat_<digits>\` is
+ * the live one (\`chat_20706\`), and upstream names those under \`tabModelIds\`
+ * rather than by prefix, so an account whose discovery omits the role list would
+ * otherwise render a raw id with no metadata. Deciding it from the id here keeps
+ * the catalog-only fallback and the role-based hiding in agreement.
+ */
 export function isChatCallableModelId(modelId: string): boolean {
-  return !modelId.startsWith('tab_')
+  return !modelId.startsWith('tab_') && !/^chat_\d+$/.test(modelId)
 }
 
 export function catalogModel(modelId: string): CatalogModel | undefined {

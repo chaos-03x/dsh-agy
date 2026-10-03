@@ -6,6 +6,7 @@ import { createAgyManagement } from '../src/web/management.ts'
 import { UsageStats, noopStatsLock } from '../src/stats.ts'
 import { ModelVisibility } from '../src/model-visibility.ts'
 import { ThinkingBudgetStore } from '../src/thinking-budget.ts'
+import { UiPrefsStore } from '../src/ui-prefs.ts'
 import type { AccountStore } from '../src/store/accounts.ts'
 import type { AgySessionManager } from '../src/session.ts'
 import type { AccountStorageV4, ManagedAccount } from '../src/types.ts'
@@ -120,11 +121,14 @@ function makeHarness(options: {
   // host uses rather than a stub that could accept anything.
   const thinkingFile = join(mkdtempSync(join(tmpdir(), 'agy-thinking-rpc-')), 'agy-thinking.json')
   const thinkingBudget = new ThinkingBudgetStore({ file: thinkingFile })
+  const prefsFile = join(mkdtempSync(join(tmpdir(), 'agy-ui-prefs-rpc-')), 'agy-ui-prefs.json')
+  const uiPrefs = new UiPrefsStore(prefsFile)
   const management = createAgyManagement({
     store,
     sessions,
     stats,
     modelVisibility: visibility,
+    uiPrefs,
     thinkingBudget: {
       all: () => thinkingBudget.all(),
       set: (level, value) => thinkingBudget.setBudget(level, value),
@@ -806,6 +810,26 @@ describe('agy management RPC', () => {
       port = 54775
       const { url } = await management.call('auth.url', {}) as { url: string }
       expect(new URL(url).searchParams.get('redirect_uri')).toBe('http://127.0.0.1:54775/agy/oauth-callback')
+    })
+  })
+
+  describe('ui preferences', () => {
+    it('reads default preferences and updates them', async () => {
+      const { management } = makeHarness()
+      const initial = await management.call('ui.prefs.get', {}) as { conversationBadge: boolean }
+      expect(initial.conversationBadge).toBe(false)
+
+      const updated = await management.call('ui.prefs.set', { conversationBadge: true }) as { conversationBadge: boolean }
+      expect(updated.conversationBadge).toBe(true)
+
+      const readBack = await management.call('ui.prefs.get', {}) as { conversationBadge: boolean }
+      expect(readBack.conversationBadge).toBe(true)
+    })
+
+    it('rejects invalid preference values', async () => {
+      const { management } = makeHarness()
+      await expect(management.call('ui.prefs.set', { conversationBadge: 'invalid' as never }))
+        .rejects.toThrow(/must be a boolean/)
     })
   })
 })

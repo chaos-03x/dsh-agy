@@ -24,6 +24,10 @@ fingerprinting, and both CLI and web management.
   calls, fingerprint and proxy management), models (per-model visibility), usage
   (cumulative token and request statistics), and credentials (import/export).
   No separate page: the surface only exists where DSH Settings does.
+- **Quota badge in the session header**: the tightest of the active account's
+  tracked windows (5-hour vs weekly) as a single figure, with the per-window
+  breakdown and reset walls on hover. It reads the same grouped quota windows the
+  Settings section shows, so the header and the panel cannot disagree.
 - **Model visibility toggles**: hide individual models from the DSH model
   selector. Blacklist semantics — only models you switch off are hidden, so
   models the server adds later stay visible.
@@ -233,7 +237,7 @@ counter.
 
 | Env | Effect |
 |---|---|
-| `DSH_AGY_DISABLE=1` | Kill switch: the plugin registers nothing (provider + Settings section + OAuth callback) and the CLI refuses to run. |
+| `DSH_AGY_DISABLE=1` | Kill switch: the plugin registers nothing (provider + Settings section + header quota badge + OAuth callback) and the CLI refuses to run. |
 | `DSH_AGY_FINGERPRINT_MODE=stable` | One fixed client identity per account — no per-request header randomization, no fingerprint regeneration (OMP-style fixed-client posture). Default `dynamic` keeps per-request randomization. |
 | `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | Background batch health probe inside the harness (refresh + userinfo on the configured interval); off by default. |
 | `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | BYO OAuth app escape hatch: override the embedded public Antigravity client credentials. |
