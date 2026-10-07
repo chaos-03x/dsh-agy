@@ -1682,6 +1682,91 @@ describe('AgyAdapter', () => {
     expect(failures).toEqual(['request-error'])
   })
 
+  it('retries a stream ending in MALFORMED_FUNCTION_CALL and yields the recovered attempt', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      if (callCount === 1) {
+        return new Response(sseStream([
+          'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":"{bad"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+          'data: [DONE]',
+        ]), { status: 200 })
+      }
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash","args":{"command":"ls"}}}]},"finishReason":"STOP"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const records: unknown[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { records.push(record) },
+    })
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream(generateOptions())) {
+      chunks.push(chunk)
+    }
+
+    expect(callCount).toBe(2)
+    const toolCallDelta = chunks.find((c) => c.type === 'tool-call-delta') as { type: string; name?: string } | undefined
+    expect(toolCallDelta?.name).toBe('bash')
+    expect(records).toHaveLength(2)
+    expect(records[0]).toMatchObject({ ok: false, reason: 'request-error' })
+    expect(records[1]).toMatchObject({ ok: true })
+  })
+
+  it('retries up to 3 times on persistent MALFORMED_FUNCTION_CALL before failing with UPSTREAM', async () => {
+    let callCount = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      callCount++
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"functionCall":{"name":"bash"}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const failures: string[] = []
+    const records: unknown[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+      recordUsage: (record) => { records.push(record) },
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'UPSTREAM' })
+
+    expect(callCount).toBe(4)
+    expect(failures).toEqual(['request-error'])
+    expect(records).toHaveLength(4)
+    expect(records.every((r) => (r as { ok: boolean }).ok === false)).toBe(true)
+  })
+
+  it('streams text-delta directly to consumer without waiting for stream completion', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}]}]',
+      'data: [{"candidates":[{"content":{"parts":[{"text":"hello world"}]},"finishReason":"STOP"}]}]',
+      'data: [DONE]',
+    ]), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream(generateOptions())) {
+      chunks.push(chunk)
+    }
+
+    const textDelta = chunks.find((c) => c.type === 'text-delta') as { type: string; text?: string } | undefined
+    expect(textDelta?.text).toBe('hello world')
+  })
+
   it('fails image requests with UNSUPPORTED_CONTENT and no fetch when the attachment service is absent', async () => {
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)
