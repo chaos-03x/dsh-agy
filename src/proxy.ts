@@ -275,7 +275,9 @@ function createHttpDispatcher(proxyUrl: string, dispatcherOpts: Record<string, u
  * total transfer budget: it fires when NO bytes arrive for that long. The
  * control-plane calls want the short bound, but a generation stream may
  * legitimately stay silent for minutes mid-turn (reasoning), so streaming runs
- * with the timer disabled — the caller's own AbortSignal bounds it instead.
+ * with the timer disabled — the SSE read loop's own idle watchdog
+ * (`AGY_STREAM_IDLE_TIMEOUT_MS`, `adapter/parse.ts`) bounds a stalled body
+ * instead, which this timer could not tell apart from reasoning anyway.
  *
  * `keepAliveTimeout`/`keepAliveMaxTimeout` deliberately stay at 1ms and are NOT
  * loosened for streaming: undici applies them only when `pipelining` is

@@ -1176,6 +1176,65 @@ describe('parseAgySse', () => {
     ])))
     expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
+
+  it('fails a stalled body on the idle timeout instead of hanging forever', async () => {
+    // The streaming dispatcher runs with `bodyTimeout: 0` on purpose (a
+    // reasoning pause must not be killed mid-turn), so a body that stops
+    // producing bytes without closing has no transport-level reclaim: without
+    // the watchdog this read never settles and the turn hangs until the user
+    // cancels it.
+    const encoder = new TextEncoder()
+    const stalled = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}]\n'))
+        // ...and then nothing: no further byte, no close.
+      },
+    })
+    const iterator = parseAgySse(stalled, { idleTimeoutMs: 25 })[Symbol.asyncIterator]()
+    expect((await iterator.next()).value).toMatchObject({ type: 'block-start' })
+    expect((await iterator.next()).value).toMatchObject({ type: 'text-delta', text: 'partial' })
+    await expect(iterator.next()).rejects.toThrow(/idle timeout: no data received/)
+  })
+
+  it('keeps waiting on a silent-but-alive body when the watchdog is disabled', async () => {
+    const encoder = new TextEncoder()
+    let push!: (line: string) => void
+    let close!: () => void
+    const live = new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        close = () => controller.close()
+      },
+    })
+    const iterator = parseAgySse(live, { idleTimeoutMs: 0 })[Symbol.asyncIterator]()
+    const firstPull = iterator.next()
+    // Silence longer than the 25ms the watchdog above tolerates: with the
+    // watchdog disabled a slow-but-alive body must be given all the time it
+    // needs (a generator may legitimately stay silent while it reasons).
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    push('data: [{"candidates":[{"content":{"parts":[{"text":"late"}]},"finishReason":"STOP"}]}]')
+    push('data: [DONE]')
+    close()
+    const chunks: Array<{ type: string; text?: string }> = []
+    for (let next = await firstPull; next.done !== true; next = await iterator.next()) {
+      chunks.push(next.value as { type: string; text?: string })
+    }
+    expect(chunks.some((chunk) => chunk.text === 'late')).toBe(true)
+  })
+
+  it('stops waiting for a stalled body the moment the request is aborted', async () => {
+    // The read loop only checks `signal.aborted` BETWEEN reads, so without an
+    // abort leg a cancelled turn keeps waiting out the whole idle window.
+    const controller = new AbortController()
+    const stalled = new ReadableStream<Uint8Array>({ start() { /* never produces */ } })
+    const iterator = parseAgySse(stalled, {
+      idleTimeoutMs: 60_000,
+      signal: controller.signal,
+    })[Symbol.asyncIterator]()
+    const pull = iterator.next()
+    controller.abort()
+    await expect(pull).rejects.toMatchObject({ name: 'AbortError' })
+  })
 })
 
 describe('models', () => {
@@ -1991,6 +2050,66 @@ describe('AgyAdapter', () => {
     // Re-sampling now would replay a turn the consumer has already seen, so the
     // fail-safe fallthrough must fire with ZERO retries.
     expect(callCount).toBe(1)
+  })
+
+  it('surfaces a stalled stream as retryable TIMEOUT while nothing was delivered', async () => {
+    const failures: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      // Accepted, then silence: not a byte, not a close — the shape a proxy or
+      // a black-holed upstream leaves behind.
+      start() {},
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+      streamIdleTimeoutMs: 25,
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'TIMEOUT' })
+    // Nothing reached the consumer, so DSH's retry replays a turn the user never
+    // saw; the account still absorbs the transient, and the retry stays DSH's.
+    expect(failures).toEqual(['network-error'])
+  })
+
+  it('keeps a stall terminal once a text-delta was handed to the consumer', async () => {
+    const encoder = new TextEncoder()
+    const failures: string[] = []
+    let push!: (line: string) => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        streamReady()
+      },
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+      streamIdleTimeoutMs: 25,
+    })
+
+    const iterator = adapter.stream(generateOptions())[Symbol.asyncIterator]()
+    const firstPull = iterator.next()
+    // The fetch stub builds the body lazily, so wait for the stream to exist
+    // before feeding it (same shape as the buffered-reasoning test above).
+    await ready
+    push('data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}]')
+    const seen: string[] = []
+    for (let next = await firstPull; next.done !== true; next = await iterator.next()) {
+      seen.push(next.value.type)
+      if (seen.includes('text-delta')) break
+    }
+    expect(seen).toContain('text-delta')
+    // Past the hand-off the turn is content the consumer already holds, so
+    // retrying would replay a partially-delivered turn: it stays the same
+    // terminal UPSTREAM every other mid-body death produces.
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'UPSTREAM' })
+    expect(failures).toEqual(['network-error'])
   })
 
   it('persists the thought signature of a recovered attempt but never of a discarded one', async () => {
