@@ -41,6 +41,43 @@ export const name = 'dsh-agy-web'
 /** The one service every composition provides; the rest are resolved lazily. */
 export const inject = ['llm']
 
+/** Bind hosts that mean "this machine only". */
+const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1']
+
+/** Listen-any addresses, which are not a host a browser can follow a redirect to. */
+const WILDCARD_HOSTS = ['0.0.0.0', '::', '[::]', '*']
+
+/**
+ * Whether a socket peer is on the loopback interface.
+ *
+ * The OAuth callback is gated on the PEER rather than on the bind address: a
+ * LAN-bound server must still answer the redirect that completes a login
+ * started in the local GUI, and `0.0.0.0` listeners see loopback peers as
+ * `127.0.0.1` (or `::ffff:127.0.0.1` when the socket is dual-stack).
+ * @param address - `req.socket.remoteAddress`, undefined when unavailable.
+ * @returns true only for a loopback peer; an unknown address is refused.
+ */
+export function isLoopbackPeer(address: string | undefined): boolean {
+  if (address === undefined) return false
+  return address === '::1'
+    || address.startsWith('127.')
+    || address.startsWith('::ffff:127.')
+}
+
+/**
+ * The host an OAuth redirect must name.
+ *
+ * `webStartup.host` is the `--host` flag verbatim, and a wildcard listen
+ * address (`0.0.0.0` / `::`) is not something a browser can follow a redirect
+ * to; the wildcard listener answers the loopback literal all the same. A
+ * specific host — a NetBird address, say — is kept verbatim.
+ * @param host - the startup host.
+ * @returns the host to build the redirect from.
+ */
+export function redirectHostFor(host: string): string {
+  return WILDCARD_HOSTS.includes(host) ? '127.0.0.1' : host
+}
+
 /** The slice of the host's web-server service this entry uses. */
 interface WebServerLike {
   register(route: {
@@ -99,23 +136,34 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
   const webStartup = ctx.get('webStartup') as { host?: string; port?: number } | undefined
   const host = webStartup?.host ?? '127.0.0.1'
 
-  // The OAuth callback manages credentials with no authentication of its own,
-  // so it must never be reachable from the network. When the web server binds
-  // a non-loopback interface, refuse to register it (the loopback-only OAuth
-  // redirect would be unusable there anyway).
+  // Two transports, two trust anchors — neither of them the bind address.
+  //
+  // The management surface rides `/api/agy` (DSH's Connection RPC), which sits
+  // behind the host's browser-trust fence and BrowserAuth: anything that can
+  // reach it can already drive the Settings UI that exports the same blobs, and
+  // anything that cannot is refused there. Gating that on a LOOPBACK BIND
+  // instead shipped a Settings section whose every call failed with
+  // `transport failure for /api/agy: HTTP 404` on every LAN-bound profile
+  // (0.0.0.0 / NetBird), so it now registers on any bind.
+  //
+  // The OAuth callback is the one route with no authentication of its own, so
+  // ITS gate is the peer's address rather than the server's: the route has to
+  // exist for the browser redirect that completes a login started in the GUI on
+  // this machine, and the handler refuses every non-loopback peer.
   const bindHost = webServer.host ?? host
-  if (!['127.0.0.1', 'localhost', '::1'].includes(bindHost)) {
-    ctx.logger.warn(
-      '[dsh-agy] web server bound to "' + bindHost + '" (non-loopback): not registering the agy routes ' +
-      '(they manage account credentials and must stay loopback-only). Bind the web server to 127.0.0.1 to enable them.',
+  if (!LOOPBACK_HOSTS.includes(bindHost)) {
+    ctx.logger.info(
+      '[dsh-agy] web server bound to "' + bindHost + '": /agy management rides the authenticated /api RPC; ' +
+      'the OAuth callback answers loopback peers only.',
     )
-    return () => {}
   }
 
   const { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget } = await createAgyRuntime(ctx)
   // Read per use rather than once here: the bound port is only known after the
-  // server's listen callback has run.
-  const baseUrl = (): string => webBaseUrl(host, webServer, webStartup?.port)
+  // server's listen callback has run. The host goes through `redirectHostFor`
+  // because a wildcard bind is not a name the browser can follow.
+  const baseUrl = (): string =>
+    webBaseUrl(redirectHostFor(host), webServer, webStartup?.port)
   const management = createAgyManagement({
     store,
     sessions,
@@ -155,6 +203,16 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     kind: 'exact',
     path: '/agy/oauth-callback',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
+      // Loopback peers only: this route carries no authentication of its own,
+      // so a LAN-bound server must not answer it for the network. The local
+      // browser still completes a login (the wildcard listener accepts
+      // loopback), which is the only case where the loopback redirect works at
+      // all.
+      if (!isLoopbackPeer(req.socket.remoteAddress)) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('forbidden')
+        return
+      }
       const base = baseUrl()
       const url = new URL(req.url ?? '/', base)
       const result = await management.handleCallback(url.searchParams).catch((error: unknown) => ({

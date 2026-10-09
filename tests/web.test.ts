@@ -156,4 +156,35 @@ describe('OAuth redirect base URL', () => {
     expect(webBaseUrl('127.0.0.1', {}, 4000)).toBe('http://127.0.0.1:4000')
     expect(webBaseUrl('127.0.0.1', {}, undefined)).toBe('http://127.0.0.1:3080')
   })
+
+  it('answers the OAuth callback for loopback peers only', async () => {
+    // The route carries no authentication of its own, so a LAN-bound server must
+    // not answer it for the network. It is still REGISTERED on such a bind: the
+    // browser redirect that completes a local login has to land somewhere, and
+    // refusing every peer (as the old bind-address gate did) removed the whole
+    // management surface instead, leaving the Settings section calling
+    // `/api/agy` against a 404.
+    const { isLoopbackPeer } = await import('../src/web/plugin.ts')
+    expect(isLoopbackPeer('127.0.0.1')).toBe(true)
+    expect(isLoopbackPeer('127.0.0.5')).toBe(true)
+    expect(isLoopbackPeer('::1')).toBe(true)
+    expect(isLoopbackPeer('::ffff:127.0.0.1')).toBe(true)
+    expect(isLoopbackPeer('100.116.122.12')).toBe(false)
+    expect(isLoopbackPeer('192.168.1.20')).toBe(false)
+    expect(isLoopbackPeer('::ffff:100.116.122.12')).toBe(false)
+    // An absent address is refused rather than assumed local.
+    expect(isLoopbackPeer(undefined)).toBe(false)
+  })
+
+  it('builds the redirect from a followable host, not a wildcard bind', async () => {
+    // `--host 0.0.0.0` is a listen address: Google would send the browser to
+    // `http://0.0.0.0:3080/...`, which only some browsers map to loopback. Any
+    // specific host is kept verbatim so a NetBird-bound profile can still
+    // complete a login from a remote browser.
+    const { redirectHostFor } = await import('../src/web/plugin.ts')
+    expect(redirectHostFor('0.0.0.0')).toBe('127.0.0.1')
+    expect(redirectHostFor('::')).toBe('127.0.0.1')
+    expect(redirectHostFor('127.0.0.1')).toBe('127.0.0.1')
+    expect(redirectHostFor('100.116.122.12')).toBe('100.116.122.12')
+  })
 })
