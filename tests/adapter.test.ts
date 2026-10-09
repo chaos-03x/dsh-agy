@@ -2074,6 +2074,46 @@ describe('AgyAdapter', () => {
     expect(failures).toEqual(['network-error'])
   })
 
+  it('bills a stalled attempt with the totals the upstream already reported', async () => {
+    const encoder = new TextEncoder()
+    const billed: Array<{
+      reason?: string
+      usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+    }> = []
+    let push!: (line: string) => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        streamReady()
+      },
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      streamIdleTimeoutMs: 25,
+      recordUsage: (record) => { billed.push({ reason: record.reason, usage: record.usage }) },
+    })
+
+    const drain = (async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    })()
+    await ready
+    // Reasoning plus the totals the upstream reports alongside it: the adapter
+    // holds the reasoning, so nothing is committed and the attempt stays
+    // retryable — but those tokens were really spent, and the ledger accumulates
+    // per attempt. The stash reaches the caller only because the watchdog
+    // flushes it before propagating the timeout.
+    push('data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}]')
+    await expect(drain).rejects.toMatchObject({ code: 'TIMEOUT' })
+    expect(billed).toEqual([{
+      reason: 'network-error',
+      usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0 },
+    }])
+  })
+
   it('keeps a stall terminal once a text-delta was handed to the consumer', async () => {
     const encoder = new TextEncoder()
     const failures: string[] = []
