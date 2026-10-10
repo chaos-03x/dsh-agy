@@ -136,14 +136,20 @@ export interface AgyResolvedMultimodalFile {
 
 export interface ResolveMultimodalOptions {
   readFile?: (path: string) => Promise<Buffer | Uint8Array>
+  /**
+   * Effective per-file cap, in bytes. Defaults to
+   * `MAX_MULTIMODAL_FILE_BYTES`; the settings store supplies its own value
+   * through the adapter (`AgyAdapterOptions.maxInlineBytes`).
+   */
+  maxBytes?: number
 }
 
 /**
  * Resolve multimodal files referenced in user messages.
  *
- * Reads local files up to 20MB into base64 strings. Silently ignores
- * missing/unreadable files or files exceeding the size limit so the original
- * text handle block remains intact in the prompt.
+ * Reads local files up to the effective cap (20MB by default) into base64
+ * strings. Silently ignores missing/unreadable files or files exceeding the size
+ * limit so the original text handle block remains intact in the prompt.
  */
 export async function resolveMultimodalFiles(
   optionsOrMessages: GenerateOptions | readonly unknown[],
@@ -179,6 +185,10 @@ export async function resolveMultimodalFiles(
   }
 
   const readFn = customOptions?.readFile ?? readFile
+  // Both checks below use this SAME value: a handle that under-declares its
+  // size would otherwise pass the declared check and be caught by a different
+  // limit than the configured one.
+  const cap = customOptions?.maxBytes ?? MAX_MULTIMODAL_FILE_BYTES
 
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i]
@@ -190,14 +200,14 @@ export async function resolveMultimodalFiles(
 
       const handles = extractFileHandles(block.text)
       for (const handle of handles) {
-        if (handle.bytes > MAX_MULTIMODAL_FILE_BYTES) continue
+        if (handle.bytes > cap) continue
 
         const mimeType = getMultimodalMimeType(handle.name) ?? getMultimodalMimeType(handle.readonlyPath)
         if (!mimeType) continue
 
         try {
           const fileBuffer = await readFn(handle.readonlyPath)
-          if (fileBuffer.length > MAX_MULTIMODAL_FILE_BYTES) continue
+          if (fileBuffer.length > cap) continue
           resolvedForMessage.push({
             mimeType,
             data: Buffer.from(fileBuffer).toString('base64'),
