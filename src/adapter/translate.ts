@@ -134,9 +134,26 @@ const AGY_MISSING_ITEMS_SCHEMA: Record<string, unknown> = { type: 'string' }
  * nested schema that declares neither `type` nor `properties` one it accepts
  * (see the shape paragraph on the contract above). Purely additive: a schema
  * that already carries either stays byte-identical.
+ *
+ * The guard is a VALUE check, not a key-presence one: `items: undefined` keeps
+ * the key on the in-memory object and still serializes to nothing, so
+ * `'items' in node` would wave it through to the exact `missing field` 400 this
+ * function exists to prevent. `null` and a non-schema scalar take the same
+ * path. A JSON-Schema tuple (`items: [a, b]`) has no wire form at all —
+ * protobuf `Schema.items` is a single message, never repeated — so it degrades
+ * to its first element rather than going up as an array.
  */
 function ensureItemSchema(node: Record<string, unknown>): void {
-  if (node.type !== 'array' || 'items' in node) return
+  if (node.type !== 'array') return
+  const items = node.items
+  if (Array.isArray(items)) {
+    const first = items[0]
+    node.items = first !== null && typeof first === 'object' && !Array.isArray(first)
+      ? first
+      : { ...AGY_MISSING_ITEMS_SCHEMA }
+    return
+  }
+  if (items !== null && typeof items === 'object') return
   node.items = { ...AGY_MISSING_ITEMS_SCHEMA }
 }
 
