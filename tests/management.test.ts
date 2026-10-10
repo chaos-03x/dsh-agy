@@ -532,6 +532,64 @@ describe('agy management RPC', () => {
     })
   })
 
+  describe('multimodal inline cap', () => {
+    it('starts unset on the built-in default', async () => {
+      // Unset is the shipped state: `value` null with source 'default' means the
+      // resolver falls back to its 20MB constant, so nothing changes for a user
+      // who never opens this card.
+      const { management } = makeHarness()
+      expect(await management.call('multimodal.get', {})).toEqual({
+        value: null,
+        source: 'default',
+        max: 100,
+      })
+    })
+
+    it('sets, reads and clears the cap', async () => {
+      const { management } = makeHarness()
+      const set = await management.call('multimodal.set', { maxInlineMb: 30 }) as {
+        value: number | null
+        source: string
+      }
+      expect(set).toEqual({ value: 30, source: 'stored', max: 100 })
+      expect(await management.call('multimodal.get', {})).toEqual({ value: 30, source: 'stored', max: 100 })
+
+      // Clearing is its own action: `null` and an omitted value both mean "no
+      // stored override", which is distinct from storing 0 (which is rejected).
+      expect((await management.call('multimodal.set', { maxInlineMb: null }) as { value: number | null }).value).toBeNull()
+      await management.call('multimodal.set', { maxInlineMb: 30 })
+      expect((await management.call('multimodal.set', {}) as { value: number | null }).value).toBeNull()
+    })
+
+    it('rejects out-of-interval and non-numeric values with a legible message', async () => {
+      const { management } = makeHarness()
+      await expect(management.call('multimodal.set', { maxInlineMb: 0 })).rejects.toThrow(/\[1, 100\]/)
+      await expect(management.call('multimodal.set', { maxInlineMb: 101 })).rejects.toThrow(/\[1, 100\]/)
+      await expect(management.call('multimodal.set', { maxInlineMb: 1.5 })).rejects.toThrow(/\[1, 100\]/)
+      await expect(management.call('multimodal.set', { maxInlineMb: '30' }))
+        .rejects.toThrow(/maxInlineMb must be a number/)
+      // A rejected write must not have stored anything.
+      expect((await management.call('multimodal.get', {}) as { value: number | null }).value).toBeNull()
+    })
+
+    it('reports env as the effective source while keeping the stored value visible', async () => {
+      // The two fields answer different questions, which is why the view carries
+      // both: `value` is what the card's box edits, `source` is what the next
+      // request will actually use. Reporting only one makes a stored-but-
+      // overridden setting look either unset or in force.
+      const { management } = makeHarness()
+      await management.call('multimodal.set', { maxInlineMb: 30 })
+      vi.stubEnv('DSH_AGY_MULTIMODAL_MAX_INLINE_MB', '7')
+      try {
+        expect(await management.call('multimodal.get', {})).toEqual({ value: 30, source: 'env', max: 100 })
+      } finally {
+        vi.unstubAllEnvs()
+      }
+      // With the override gone the stored value is back in force.
+      expect(await management.call('multimodal.get', {})).toEqual({ value: 30, source: 'stored', max: 100 })
+    })
+  })
+
   describe('cooldown display', () => {
     it('reports no reason once the cooldown window has expired', async () => {
       // Regression: `clearExpiredState` only ran inside `pickAccount`, i.e. only
