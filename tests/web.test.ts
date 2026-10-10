@@ -177,15 +177,22 @@ describe('OAuth redirect base URL', () => {
   })
 
   it('builds the redirect from a followable host, not a wildcard bind', async () => {
-    // Wildcard listen addresses (`0.0.0.0` or `::`) map to loopback (`127.0.0.1`
-    // or `[::1]`) because the OAuth callback only accepts loopback peers.
-    // Bare IPv6 addresses (e.g. `::1`) are wrapped in brackets so `new URL` accepts them.
+    // Wildcard listen addresses (`0.0.0.0` or `::`, in either bracketed or bare
+    // form) map to loopback (`127.0.0.1` / `[::1]`) because the OAuth callback
+    // only accepts loopback peers. Bare IPv6 addresses (e.g. `::1`) are wrapped
+    // in brackets so `new URL` accepts them.
     const { redirectHostFor } = await import('../src/web/plugin.ts')
     expect(redirectHostFor('0.0.0.0')).toBe('127.0.0.1')
     expect(redirectHostFor('::')).toBe('[::1]')
+    expect(redirectHostFor('[::]')).toBe('[::1]')
     expect(redirectHostFor('::1')).toBe('[::1]')
     expect(redirectHostFor('127.0.0.1')).toBe('127.0.0.1')
     expect(redirectHostFor('localhost')).toBe('localhost')
+    // Whatever it returns must be a base `webBaseUrl` can hand to `new URL`:
+    // the bracketed form is the only one that parses.
+    for (const host of ['0.0.0.0', '::', '[::]', '::1', '127.0.0.1', 'localhost']) {
+      expect(() => new URL('/cb', `http://${redirectHostFor(host)}:3080`)).not.toThrow()
+    }
   })
 })
 

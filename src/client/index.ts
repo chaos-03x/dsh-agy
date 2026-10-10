@@ -1512,6 +1512,10 @@ function recentResultKind(entry: RecentEntry): 'ok' | 'fail' | 'limited' | 'rota
 /**
  * Localized label for a failure-classification token, falling back to the raw
  * token so a classification added upstream still reads as something.
+ *
+ * 'aborted' is the one token that is NOT an upstream classification (it marks a
+ * turn the consumer cancelled), and it is listed here so the ring reads
+ * "cancelled" rather than leaking the raw ledger token.
  */
 function failureReasonLabel(reason: string, t: T): string {
   switch (reason) {
@@ -1521,6 +1525,7 @@ function failureReasonLabel(reason: string, t: T): string {
     case 'verification-required': return t('cooldownReasonValidationRequired')
     case 'quota-exhausted': return t('cooldownReasonQuotaExhausted')
     case 'project-error': return t('cooldownReasonProjectError')
+    case 'aborted': return t('reasonAborted')
     default: return reason
   }
 }

@@ -68,14 +68,15 @@ export function isLoopbackPeer(address: string | undefined): boolean {
  * Format a host for an HTTP URL, mapping wildcard listeners to loopback.
  *
  * An OAuth redirect must name a reachable loopback address. Wildcard listen
- * addresses (`0.0.0.0` or IPv6 `::`) map to loopback (`127.0.0.1` and `[::1]`).
- * Bare IPv6 addresses (e.g. `::1`) are wrapped in brackets so `new URL` accepts them.
+ * addresses (`0.0.0.0`, or IPv6 `::` in either bracketed or bare form) map to
+ * loopback (`127.0.0.1` and `[::1]`). Bare IPv6 addresses (e.g. `::1`) are
+ * wrapped in brackets so `new URL` accepts them.
  * @param host - the bind host.
  * @returns the host to build the redirect from.
  */
 export function redirectHostFor(host: string): string {
   if (host === '0.0.0.0') return '127.0.0.1'
-  if (host === '::' || host === '::1') return '[::1]'
+  if (host === '::' || host === '[::]' || host === '::1') return '[::1]'
   if (host.includes(':') && !host.startsWith('[')) return `[${host}]`
   return host
 }

@@ -120,6 +120,7 @@ export const zh = {
   cooldownReasonQuotaExhausted: '额度耗尽',
   cooldownReasonValidationRequired: '需要验证',
   cooldownReasonProjectError: '项目错误',
+  reasonAborted: '已取消',
 
   fieldSources: '调用来源',
   fieldLatency: '延迟',
@@ -376,6 +377,7 @@ export const en: Record<AgyLocaleKey, string> = {
   cooldownReasonQuotaExhausted: 'quota exhausted',
   cooldownReasonValidationRequired: 'verification required',
   cooldownReasonProjectError: 'project error',
+  reasonAborted: 'cancelled',
 
   fieldSources: 'Call sources',
   fieldLatency: 'Latency',

@@ -151,9 +151,6 @@ export function resolveStreamIdleTimeoutMs(): number {
   return parsed
 }
 
-/** Idle timeout applied when the caller does not override it (`idleTimeoutMs`). */
-export const AGY_STREAM_IDLE_TIMEOUT_MS = DEFAULT_STREAM_IDLE_TIMEOUT_MS
-
 /**
  * Map the upstream `finishReason` vocabulary onto DSH's. WHITELIST, not
  * blacklist: the completable reasons map to their kinds and every other
@@ -239,7 +236,7 @@ export interface ParseAgySseOptions {
   signal?: AbortSignal
   /**
    * Milliseconds of silence on the body before the read is abandoned. Defaults
-   * to `AGY_STREAM_IDLE_TIMEOUT_MS`; 0 disables the watchdog.
+   * to `resolveStreamIdleTimeoutMs()`; 0 disables the watchdog.
    */
   idleTimeoutMs?: number
   /**
