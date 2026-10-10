@@ -56,12 +56,13 @@
 | `adapter/models` | `listModels() / resolveModel(id)` | fetchAvailableModels 拉取 + 目录元数据合并 + 过滤 + 降级 | fixture |
 | `stats` | `UsageStats.record() / flush() / snapshot()` | 累计账本：热路径内存累加、加锁合并落盘、滚动天窗口、防御式解析 | 单测（假锁 + 假时钟） |
 | `model-visibility` | `ModelVisibility.disabledFor(provider) / setDisabled()` | 被隐藏模型黑名单，内存读取供每次目录过滤使用 | 单测 |
+| `multimodal-config` | `MultimodalConfigStore.effectiveMaxInlineMb() / maxInlineBytes() / snapshot() / setMaxInlineMb()` | 非图片多模态文件的单文件内联上限：版本化 JSON，非法存储值丢弃（不裁剪），环境变量 > 存储值 > 20MB 默认值，热路径读取走共用的内容比对节流 | 单测 + RPC |
 | `proxy` | `normalizeProxyUrl(url) / proxyUrlForLogs(url) / isProxyUnreachableError(err) / dispatcherForAsync(url, {streaming}) / dispatcherOptsFor(streaming) / isProxyReachable(url) / proxiedFetch(input, init, {proxyUrl, streaming})` | URL 归一化（`socks://`→`socks5://`、`socks5h`→`socks5`、默认端口、`?family=`）、2s TCP fast-fail（健康 30s / 不健康 2s 缓存）、dispatcher 按调用类别缓存（`ProxyAgent` keepAlive:1；SOCKS5 走 undici 自带的 socks 路径 —— 它会丢弃 dispatcher 选项，故两类调用在 SOCKS 上均为 undici 默认的 ~300s 逐间隔，且其原样转发 `username`/`password` 选项，因此传入解码后的 userinfo）、loopback 强制直连、fail-closed（跳过账号不冷却）、落盘加密 + 脱敏展示（经 `store/accounts`）。两类调用：控制面（`bodyTimeout` 30s）与流式（`bodyTimeout` 0 —— 生成流在推理期间可合法静默数分钟，而 `bodyTimeout` 是逐*间隔*静默计时器，不是总时长预算） | 纯单元 + TCP 探测 stub |
 
 ## 3. 薄壳（刻意浅，不抽象）
 
 - `cli/` 各子命令：读 store → 调 oauth/runtime → 打印。不做"命令框架"，commander 直接驱动。
-- `web/plugin.ts`：用两种传输注册两样东西——`/api/agy` 的管理 RPC（`connection.fetch.register`，因此继承宿主的信任栅栏与 BrowserAuth），以及作为普通 HTTP 路由的 OAuth 回调（Google 会把浏览器重定向过去）。`web/management.ts` 持有方法表；`client/` 是浏览器半边。
+- `web/plugin.ts`：用两种传输注册两样东西——`/api/agy` 的管理 RPC（`connection.fetch.register`，因此继承宿主的信任栅栏与 BrowserAuth），以及作为普通 HTTP 路由的 OAuth 回调（Google 会把浏览器重定向过去）。`web/management.ts` 持有方法表（`account.*`、`pool.*`、`auth.url`、`model.*`、`thinking.*`、`multimodal.get/set`、`stats.get`、`ui.prefs.*`）；`client/` 是浏览器半边。
 - `adapter/adapter.ts`：`LlmAdapter` 子类做编排（取 token→刷新→翻译→流式→分类错误），翻译/解析在深模块里。两处重发按设计留在 adapter 内——累积墙重发与 `MALFORMED_FUNCTION_CALL` 重采样——两者都只在"账号健康且请求已被接受"时发生。
 
 ## 4. 排除项（为什么不做）
