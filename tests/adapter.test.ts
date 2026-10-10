@@ -708,8 +708,13 @@ describe('translate', () => {
     // rejected as `properties[<name>].items: missing field` (measured against
     // gemini-3.8-flash: `research_audit_derivation.steps`). JSON Schema itself
     // allows the omission, so the sanitizer supplies a typed one.
+    //
+    // The VALUE, not the key: `items: undefined` keeps the key on the object
+    // and still serializes to nothing, so `'items' in node` passes while the
+    // wire carries the very 400 this guards. A tuple keeps an ARRAY there,
+    // which the `toBe(false)` at the top of this function rejects.
     if (node.type === 'array') {
-      expect('items' in node, `${path}: array without items is rejected upstream`).toBe(true)
+      expect(node.items, `${path}: array without items is rejected upstream`).toBeTypeOf('object')
     }
     // The same "missing field" error is what a nested schema slot that
     // declares neither `type` nor `properties` produces — those slots are the
@@ -892,6 +897,78 @@ describe('translate', () => {
     expect(p.properties.tags.items).toEqual({ type: 'string', enum: ['a', 'b'] })
     // An `items: {}` is typeless too, so it gets the same fallback.
     expect(p.properties.empty_items.items).toEqual({ type: 'string' })
+  })
+
+  // Three shapes that reach the wire with no usable `items`, none of which the
+  // key-presence guard (`'items' in node`) could see: the key is there, the
+  // value is not something protobuf can parse. The first is the important one —
+  // `items: undefined` serializes to nothing, i.e. the exact
+  // `properties[<name>].items: missing field` 400 the guard exists for, and the
+  // old assertion passed it.
+  it('treats an absent, null or scalar items as missing', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [{
+          name: 'x',
+          description: 'd',
+          parameters: {
+            type: 'object',
+            properties: {
+              undefined_items: { type: 'array', items: undefined },
+              null_items: { type: 'array', items: null },
+              scalar_items: { type: 'array', items: 'string' as unknown as Record<string, unknown> },
+              absent_items: { type: 'array' },
+            },
+          },
+        }],
+      }),
+      {},
+    )
+    const p = body.request.tools![0].functionDeclarations[0].parameters as {
+      properties: Record<string, Record<string, unknown>>
+    }
+    assertUpstreamContract(p)
+    for (const name of ['undefined_items', 'null_items', 'scalar_items', 'absent_items']) {
+      expect(p.properties[name]!.items, `${name}: must reach the wire with a typed items`).toEqual({ type: 'string' })
+    }
+    // The wire form is what matters: a key that serializes away is the 400.
+    const wire = JSON.parse(JSON.stringify(p)) as { properties: Record<string, Record<string, unknown>> }
+    for (const name of ['undefined_items', 'null_items', 'scalar_items', 'absent_items']) {
+      expect(wire.properties[name]!.items, `${name}: serialized items`).toEqual({ type: 'string' })
+    }
+  })
+
+  // protobuf `Schema.items` is a single message, never repeated, so a JSON
+  // Schema tuple has no wire form and goes up as an array the parser rejects.
+  // Degrading to the first element is the same additive philosophy as the
+  // missing-`items` fallback: the alternative is a 400 for the whole request.
+  it('degrades a tuple items to its first element', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [{
+          name: 'x',
+          description: 'd',
+          parameters: {
+            type: 'object',
+            properties: {
+              pair: { type: 'array', items: [{ type: 'string' }, { type: 'number' }] },
+              empty_tuple: { type: 'array', items: [] },
+              nested_tuple: { type: 'array', items: [[{ type: 'string' }]] },
+            },
+          },
+        }],
+      }),
+      {},
+    )
+    const p = body.request.tools![0].functionDeclarations[0].parameters as {
+      properties: Record<string, Record<string, unknown>>
+    }
+    assertUpstreamContract(p)
+    expect(p.properties.pair!.items).toEqual({ type: 'string' })
+    // An empty tuple has no first element to keep, so it takes the fallback.
+    expect(p.properties.empty_tuple!.items).toEqual({ type: 'string' })
+    // A nested tuple degrades the same way, one level at a time.
+    expect(p.properties.nested_tuple!.items).toEqual({ type: 'string' })
   })
 
   it('sanitizes tool names to the upstream charset and dedupes', () => {
