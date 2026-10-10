@@ -1169,6 +1169,20 @@ function ThinkingSamples({ t }: { t: T }): ReactNode {
       : null)
 }
 
+/**
+ * The global reasoning-level token budgets, on the config tab.
+ *
+ * One row per level rather than per model: only `*-tiered` models send a
+ * `thinkingConfig` at all, and the level itself is already chosen in DSH's model
+ * selector. So this supplies the missing VALUE behind each level — the same three
+ * numbers for every such model.
+ *
+ * An EMPTY input is the meaningful default: the request then sends
+ * `thinkingLevel` and lets upstream pick, which is exactly the behaviour before
+ * this setting existed. That is why the field is not a `number` input with a
+ * zero fallback, and why clearing it is a real action rather than "set to 0"
+ * (measured: `0` reduces thinking but does not reliably disable it).
+ */
 function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const { rpc, t } = props
   const [budgets, setBudgets] = useState<ThinkingBudgets>({})
