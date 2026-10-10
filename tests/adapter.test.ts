@@ -4,7 +4,12 @@ import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
-import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  parseAgySse,
+  parseSseDataLine,
+  resolveStreamIdleTimeoutMs,
+} from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId } from '../src/adapter/catalog.ts'
 import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
@@ -1235,6 +1240,75 @@ describe('parseAgySse', () => {
     controller.abort()
     await expect(pull).rejects.toMatchObject({ name: 'AbortError' })
   })
+
+  it('flushes stashed usage when an in-flight read is aborted', async () => {
+    const encoder = new TextEncoder()
+    let push!: (line: string) => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    const controller = new AbortController()
+    const live = new ReadableStream<Uint8Array>({
+      start(c) {
+        push = (line) => c.enqueue(encoder.encode(line + '\n'))
+        streamReady()
+      },
+    })
+    const iterator = parseAgySse(live, { signal: controller.signal, idleTimeoutMs: 60_000 })[Symbol.asyncIterator]()
+    const pull = iterator.next()
+    await ready
+    push('data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}]')
+    const first = await pull
+    expect(first.value).toMatchObject({ type: 'block-start', blockType: 'reasoning' })
+    const second = await iterator.next()
+    expect(second.value).toMatchObject({ type: 'reasoning-delta', text: 'thinking' })
+    // Now that the first event is fully drained, the generator awaits the next read:
+    const abortPull = iterator.next()
+    controller.abort()
+    // The abort must flush the stashed usage before rejecting:
+    const usageChunk = await abortPull
+    expect(usageChunk.value).toMatchObject({
+      type: 'usage',
+      usage: { inputTokens: 10, outputTokens: 3 },
+    })
+    await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+describe('resolveStreamIdleTimeoutMs', () => {
+  afterEach(() => {
+    delete process.env.DSH_AGY_IDLE_TIMEOUT_MS
+    delete process.env.AGY_IDLE_TIMEOUT_MS
+  })
+
+  it('returns the default 180s when unset', () => {
+    expect(resolveStreamIdleTimeoutMs()).toBe(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+  })
+
+  it('parses valid positive values from DSH_AGY_IDLE_TIMEOUT_MS', () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '60000'
+    expect(resolveStreamIdleTimeoutMs()).toBe(60000)
+  })
+
+  it('allows explicit 0 to disable the watchdog', () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '0'
+    expect(resolveStreamIdleTimeoutMs()).toBe(0)
+  })
+
+  it('falls back to AGY_IDLE_TIMEOUT_MS when DSH_ prefix is unset or empty', () => {
+    process.env.AGY_IDLE_TIMEOUT_MS = '30000'
+    expect(resolveStreamIdleTimeoutMs()).toBe(30000)
+
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '   '
+    expect(resolveStreamIdleTimeoutMs()).toBe(30000)
+  })
+
+  it('falls back to default on negative or non-numeric values instead of disabling', () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '-1'
+    expect(resolveStreamIdleTimeoutMs()).toBe(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = 'invalid'
+    expect(resolveStreamIdleTimeoutMs()).toBe(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+  })
 })
 
 describe('models', () => {
@@ -1753,7 +1827,11 @@ describe('buildRequestHeaders', () => {
 })
 
 describe('AgyAdapter', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.DSH_AGY_IDLE_TIMEOUT_MS
+    delete process.env.AGY_IDLE_TIMEOUT_MS
+  })
 
   function session(overrides: Partial<AgyAccountSession> = {}): AgyAccountSession {
     return {
@@ -2053,6 +2131,7 @@ describe('AgyAdapter', () => {
   })
 
   it('surfaces a stalled stream as retryable TIMEOUT while nothing was delivered', async () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '25'
     const failures: string[] = []
     vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
       // Accepted, then silence: not a byte, not a close — the shape a proxy or
@@ -2063,7 +2142,6 @@ describe('AgyAdapter', () => {
     const adapter = new AgyAdapter({
       getSession: async () => session(),
       reportFailure: async (kind) => { failures.push(kind) },
-      streamIdleTimeoutMs: 25,
     })
 
     await expect(async () => {
@@ -2075,6 +2153,7 @@ describe('AgyAdapter', () => {
   })
 
   it('bills a stalled attempt with the totals the upstream already reported', async () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '25'
     const encoder = new TextEncoder()
     const billed: Array<{
       reason?: string
@@ -2093,7 +2172,6 @@ describe('AgyAdapter', () => {
     const adapter = new AgyAdapter({
       getSession: async () => session(),
       reportFailure: async () => {},
-      streamIdleTimeoutMs: 25,
       recordUsage: (record) => { billed.push({ reason: record.reason, usage: record.usage }) },
     })
 
@@ -2114,7 +2192,46 @@ describe('AgyAdapter', () => {
     }])
   })
 
+  it('bills an aborted attempt with the totals the upstream already reported', async () => {
+    const encoder = new TextEncoder()
+    const billed: Array<{
+      reason?: string
+      usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+    }> = []
+    let push!: (line: string) => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        streamReady()
+      },
+    }), { status: 200 })))
+
+    const controller = new AbortController()
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { billed.push({ reason: record.reason, usage: record.usage }) },
+    })
+
+    const drain = (async () => {
+      for await (const _ of adapter.stream(generateOptions({ signal: controller.signal }))) void _
+    })()
+    await ready
+    push('data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}]')
+    // Give parseAgySse time to process the SSE chunk and stash usage
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    controller.abort()
+    await expect(drain).rejects.toMatchObject({ code: 'ABORTED' })
+    expect(billed).toEqual([{
+      reason: 'aborted',
+      usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0 },
+    }])
+  })
+
   it('keeps a stall terminal once a text-delta was handed to the consumer', async () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '25'
     const encoder = new TextEncoder()
     const failures: string[] = []
     let push!: (line: string) => void
@@ -2130,7 +2247,6 @@ describe('AgyAdapter', () => {
     const adapter = new AgyAdapter({
       getSession: async () => session(),
       reportFailure: async (kind) => { failures.push(kind) },
-      streamIdleTimeoutMs: 25,
     })
 
     const iterator = adapter.stream(generateOptions())[Symbol.asyncIterator]()

@@ -133,26 +133,26 @@ export class AgyStreamIdleTimeoutError extends Error {
 }
 
 /** Silence budget for one body read before the stream is declared stalled. */
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000
 
 /**
- * Resolve the idle timeout from `DSH_AGY_IDLE_TIMEOUT_MS` (or the unprefixed
- * `AGY_IDLE_TIMEOUT_MS`). Deliberately generous: measured reasoning gaps on a
- * real tunnel reach ~35s, so the default is ~5x that and only a connection that
- * has genuinely stopped trips it. `0` disables the watchdog; a non-numeric
- * value falls back to the default rather than silently disabling the only
- * reclaim a stalled stream has.
+ * Resolve the idle timeout from `DSH_AGY_IDLE_TIMEOUT_MS` (or the `AGY_IDLE_TIMEOUT_MS` alias).
+ * Deliberately generous: measured reasoning gaps on a real tunnel reach ~35s, so the default is
+ * ~5x that and only a connection that has genuinely stopped trips it. `0` disables the watchdog;
+ * negative or non-numeric values fall back to the default rather than silently disabling it.
  */
-function resolveStreamIdleTimeoutMs(): number {
-  const raw = (process.env.DSH_AGY_IDLE_TIMEOUT_MS ?? process.env.AGY_IDLE_TIMEOUT_MS)?.trim()
-  if (raw === undefined || raw === '') return DEFAULT_STREAM_IDLE_TIMEOUT_MS
+export function resolveStreamIdleTimeoutMs(): number {
+  const dsh = process.env.DSH_AGY_IDLE_TIMEOUT_MS?.trim()
+  const agy = process.env.AGY_IDLE_TIMEOUT_MS?.trim()
+  const raw = dsh && dsh.length > 0 ? dsh : agy && agy.length > 0 ? agy : undefined
+  if (raw === undefined) return DEFAULT_STREAM_IDLE_TIMEOUT_MS
   const parsed = Number(raw)
-  if (!Number.isFinite(parsed)) return DEFAULT_STREAM_IDLE_TIMEOUT_MS
-  return parsed > 0 ? parsed : 0
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_STREAM_IDLE_TIMEOUT_MS
+  return parsed
 }
 
 /** Idle timeout applied when the caller does not override it (`idleTimeoutMs`). */
-export const AGY_STREAM_IDLE_TIMEOUT_MS = resolveStreamIdleTimeoutMs()
+export const AGY_STREAM_IDLE_TIMEOUT_MS = DEFAULT_STREAM_IDLE_TIMEOUT_MS
 
 /**
  * Map the upstream `finishReason` vocabulary onto DSH's. WHITELIST, not
@@ -174,6 +174,8 @@ function mapFinishReason(reason: string): FinishReason {
       throw new UnmappedFinishReasonError(reason)
   }
 }
+
+type StreamReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>
 
 /**
  * Await one body read, failing after `timeoutMs` of silence (0 = no watchdog)
@@ -198,7 +200,7 @@ async function readWithIdleTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   timeoutMs: number,
   signal?: AbortSignal,
-): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>> {
+): Promise<StreamReadResult> {
   const pending = reader.read()
   if (timeoutMs <= 0 && signal === undefined) return pending
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -253,7 +255,7 @@ export async function* parseAgySse(
   body: ReadableStream<Uint8Array>,
   options: ParseAgySseOptions = {},
 ): AsyncGenerator<StreamChunk> {
-  const { signal, idleTimeoutMs = AGY_STREAM_IDLE_TIMEOUT_MS } = options
+  const { signal, idleTimeoutMs = resolveStreamIdleTimeoutMs() } = options
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -455,17 +457,22 @@ export async function* parseAgySse(
   try {
     while (true) {
       if (signal?.aborted) {
+        if (lastUsage !== null) {
+          yield { type: 'usage', usage: lastUsage }
+        }
         throw new DOMException('aborted', 'AbortError')
       }
-      let read: Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>
+      let read: StreamReadResult
       try {
         read = await readWithIdleTimeout(reader, idleTimeoutMs, signal)
       } catch (error) {
         // Same rescue `drainLine` performs for an unmapped finishReason, for the
         // same reason: this attempt really did consume quota (the ledger
         // accumulates per attempt), and the totals the upstream already
-        // reported would otherwise be dropped with the stalled stream.
-        if (error instanceof AgyStreamIdleTimeoutError && lastUsage !== null) {
+        // reported would otherwise be dropped with the stalled or aborted stream.
+        const isTimeout = error instanceof AgyStreamIdleTimeoutError
+        const isAbort = error instanceof DOMException && error.name === 'AbortError'
+        if ((isTimeout || isAbort) && lastUsage !== null) {
           yield { type: 'usage', usage: lastUsage }
         }
         throw error

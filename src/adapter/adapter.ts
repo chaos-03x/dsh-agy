@@ -97,15 +97,6 @@ export interface AgyAdapterOptions {
   /** Report a clean stream completion (resets the failure counter). */
   markSuccess?(session: AgyAccountSession): Promise<void>
   /**
-   * Milliseconds of silence on an SSE body before the attempt is abandoned
-   * (defaults to `AGY_STREAM_IDLE_TIMEOUT_MS`; 0 disables the watchdog).
-   *
-   * Only reachable while nothing has been handed to the consumer — see the
-   * stream's catch block: the watchdog surfaces retryable `TIMEOUT` there and
-   * stays the terminal `UPSTREAM` past the first committed chunk.
-   */
-  streamIdleTimeoutMs?: number
-  /**
    * Configured token budget for a reasoning level (see `thinking-budget.ts`).
    *
    * Supplied as a resolver rather than a snapshot so an edit in the settings UI
@@ -696,7 +687,6 @@ export class AgyAdapter extends LlmAdapter {
       try {
         for await (const chunk of parseAgySse(response.body, {
           signal: options.signal,
-          idleTimeoutMs: this.options.streamIdleTimeoutMs,
           onToolSignature: (toolCallId, signature) => {
             pendingSignatures.push([toolCallId, signature])
           },
@@ -743,6 +733,8 @@ export class AgyAdapter extends LlmAdapter {
         return
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
+          this.recordUsage(session, options.model, { ok: false, reason: 'aborted', usage }, attemptStartedAt)
+          await response.body?.cancel().catch(() => {})
           throw new LlmError('agy stream aborted', 'ABORTED', { cause: error })
         }
 
