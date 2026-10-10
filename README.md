@@ -241,6 +241,7 @@ counter.
 | `DSH_AGY_DISABLE=1` | Kill switch: the plugin registers nothing (provider + Settings section + header quota badge + OAuth callback) and the CLI refuses to run. |
 | `DSH_AGY_FINGERPRINT_MODE=stable` | One fixed client identity per account — no per-request header randomization, no fingerprint regeneration (OMP-style fixed-client posture). Default `dynamic` keeps per-request randomization. |
 | `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | Background batch health probe inside the harness (refresh + userinfo on the configured interval); off by default. |
+| `DSH_AGY_IDLE_TIMEOUT_MS=<ms>` | Silence budget for one SSE body read (default `180000`, 3 min; `0` disables). A body that stops producing bytes is abandoned instead of hanging the turn; any byte resets it, so a long reasoning pause is untouched. `AGY_IDLE_TIMEOUT_MS` is accepted as an alias. |
 | `DSH_AGY_MULTIMODAL_MAX_INLINE_MB=<mb>` | Per-file cap for inlining non-image multimodal files, in MB (1–100). Overrides the Config tab setting; an unparseable or out-of-range value is ignored, leaving the stored value or the 20MB default in force. |
 | `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | BYO OAuth app escape hatch: override the embedded public Antigravity client credentials. |
 

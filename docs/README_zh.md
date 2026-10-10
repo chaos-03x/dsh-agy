@@ -204,6 +204,7 @@ reset 时间。
 | `DSH_AGY_DISABLE=1` | 总开关：插件不注册任何东西（provider + 设置分区 + 会话头部配额徽章 + OAuth 回调），CLI 拒绝运行。 |
 | `DSH_AGY_FINGERPRINT_MODE=stable` | 每账号固定一个客户端身份——不做逐请求随机头、不再生指纹（OMP 式固定客户端姿态）。默认 `dynamic` 保持逐请求随机。 |
 | `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | harness 内后台批量健康探测（按间隔 refresh + userinfo）；默认关闭。 |
+| `DSH_AGY_IDLE_TIMEOUT_MS=<ms>` | 单次 SSE 读的静默预算（默认 `180000`，即 3 分钟；`0` 关闭）。body 不再出字节时放弃该次读取，而不是让整轮挂死；每来一个字节即重置，因此长时间的推理停顿不受影响。亦接受 `AGY_IDLE_TIMEOUT_MS` 别名。 |
 | `DSH_AGY_MULTIMODAL_MAX_INLINE_MB=<mb>` | 非图片多模态文件的单文件内联上限（MB，1–100）。优先于「配置」标签页里的设置；无法解析或越界的值会被忽略，回落到已保存值或 20MB 默认值。 |
 | `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | 自备 OAuth App 逃生通道：覆盖内置的公开 Antigravity 客户端凭据。 |
 
