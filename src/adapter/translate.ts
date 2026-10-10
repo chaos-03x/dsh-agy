@@ -102,6 +102,19 @@ export function stripTrailingModelTurn(contents: AgyContent[]): AgyContent[] {
  * `["string","number"]` are rejected) and every `enum` item must be a
  * non-empty string (booleans/numbers/empty strings are rejected). Values are
  * normalized to the nearest valid form instead of being dropped wholesale.
+ *
+ * Schema SHAPE is constrained too: an `array` schema with no `items` is
+ * rejected outright — `GenerateContentRequest.tools[0].functionDeclarations
+ * [N].parameters.properties[steps].items: missing field` — because protobuf
+ * Schema has no "any item" form, so the field cannot be absent. JSON Schema
+ * itself allows it (DSH's enforced subset documents `items` as optional), and
+ * a hand-written tool parameter map drops it as easily as it writes it, so
+ * the sanitizer supplies `{"type":"string"}` for a missing `items` — the
+ * shape the register already declares by hand whenever an author spells it
+ * out (`{type:'array', items:{type:'string'}}`), and permissive in the same
+ * way a missing `items` is: the tool's own argument validation never depends
+ * on it. An `items` that EXISTS but carries no `type` is equally rejected, so
+ * a nested schema with neither `type` nor `properties` is typed `string` too.
  */
 // Exported for the contract invariant test (tests/adapter.test.ts); not part of
 // the package public API (translate.ts is an internal module).
@@ -112,6 +125,33 @@ export const AGY_SCHEMA_ALLOWLIST = new Set([
 const AGY_SCHEMA_MAP_KEYS = new Set(['properties'])
 const AGY_SCHEMA_NESTED_KEYS = new Set(['items', 'additionalProperties'])
 const AGY_SCHEMA_LIST_KEYS = new Set(['required', 'enum'])
+
+/** The item schema substituted for an `array` whose author declared no `items`. */
+const AGY_MISSING_ITEMS_SCHEMA: Record<string, unknown> = { type: 'string' }
+
+/**
+ * Give an `array` schema an `items` the protobuf parser accepts, and give a
+ * nested schema that declares neither `type` nor `properties` one it accepts
+ * (see the shape paragraph on the contract above). Purely additive: a schema
+ * that already carries either stays byte-identical.
+ */
+function ensureItemSchema(node: Record<string, unknown>): void {
+  if (node.type !== 'array' || 'items' in node) return
+  node.items = { ...AGY_MISSING_ITEMS_SCHEMA }
+}
+
+/**
+ * The `items` (or typed `additionalProperties`) slot must itself be typed;
+ * `{}`, `{description:'x'}` and a keywords-only union carrier all arrive here
+ * and are rejected as `missing field`. A `properties`-bearing schema is left
+ * alone — its `type` is inferred by the same rule that lets an untyped object
+ * schema through elsewhere. `additionalProperties: true|false` is a boolean
+ * and never reaches this function.
+ */
+function ensureNestedType(node: Record<string, unknown>): void {
+  if ('type' in node || 'properties' in node) return
+  node.type = 'string'
+}
 
 function sanitizeToolSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema
@@ -138,7 +178,13 @@ function sanitizeToolSchema(schema: unknown): unknown {
       continue
     }
     if (AGY_SCHEMA_NESTED_KEYS.has(key)) {
-      result[key] = sanitizeToolSchema(value)
+      const nested = sanitizeToolSchema(value)
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        const nestedRecord = nested as Record<string, unknown>
+        ensureNestedType(nestedRecord)
+        if (key === 'items') ensureItemSchema(nestedRecord)
+      }
+      result[key] = nested
       continue
     }
     if (AGY_SCHEMA_LIST_KEYS.has(key)) {
@@ -154,6 +200,7 @@ function sanitizeToolSchema(schema: unknown): unknown {
     }
     result[key] = value
   }
+  ensureItemSchema(result)
   return result
 }
 

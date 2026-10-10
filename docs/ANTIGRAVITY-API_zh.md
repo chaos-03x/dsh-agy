@@ -49,6 +49,7 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 
 - **关键字** — 只保留 `type, format, title, description, nullable, items, enum, default, properties, required, additionalProperties`。
 - **值** — `type` 必须是单个枚举字符串（union 数组归一化为首个非 `null` 类型，`"null"` 对应 `nullable`）；`enum` 项必须是非空字符串（非字符串与空字符串项都会被过滤——空项会 400 `cannot be empty`，已实测；全空的 enum 整体省略）；`properties` 是 name→schema 映射；`items` 是嵌套 schema；`additionalProperties` 接受嵌套 schema 或布尔（`false` = 禁止额外键；Antigravity 上游活体验证接受——OmniRoute 剥离仅因公共 Gemini API 拒绝）；`required` 是字符串数组。
+- **形状** — `type: 'array'` 节点 MUST 带 `items`：protobuf `Schema` 没有"任意元素"形态，该字段不可缺省，否则整个请求以 `GenerateContentRequest.tools[0].functionDeclarations[N].parameters.properties[<name>].items: missing field.` 失败（在 `gemini-3.8-flash` 上实测，触发者是 `research_audit_derivation.steps`——一个手写参数表，声明了 `type:'array'` 却没写 `items`；JSON Schema 本身允许缺省，DSH 自己的强制子集也把 `items` 记为可选，这正是它上线的路径）。`sanitizeToolSchema` 为缺失的 `items` 补 `{type:'string'}`，对既无 `type` 也无 `properties` 的 `items`/`additionalProperties` 嵌套 schema（`items: {}` 或只带关键字的 union 载体）补同样的兜底——纯增量：已声明的 `items` 绝不会被改写。
 - **工具名** — `functionDeclarations[].name` 只接受 `[a-zA-Z0-9_]` 且 ≤64 字符（MCP 工具名任意；清洗，超长/重名追加 sha256 尾）。内置 Gemini 工具名（`google_search`、`web_search`、`search_web`、`googleSearch`）整体剔除（上游将其视为原生工具）。
 - **测试** — `tests/adapter.test.ts` 的 `assertUpstreamContract` 递归断言清洗后输出的每个关键字与值形状均合规，任何新未知关键字或非法值形状都会在 CI 失败（不必等用户撞 400）；每个已知的 400 形状都以 fixture 钉住。真实 MCP schema（GitHub MCP `issue_write` 正是 #4 触发源：boolean enum + union type）应进入语料，以暴露手写测试看不到的形状。
 
