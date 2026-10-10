@@ -1,7 +1,7 @@
 /**
  * agy Settings section — the browser half.
  *
- * One `settings.section` page with four tabs (accounts, models, usage,
+ * One `settings.section` page with five tabs (accounts, models, config, usage,
  * credentials), replacing the standalone `/agy` dashboard. Every figure comes
  * from the `/api/agy` RPC over `ctx.connection`, so this section needs no
  * host-rendered page and there is no second UI to keep in step.
@@ -32,8 +32,9 @@ import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
 import { agoText, quotaColor, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
-import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
+import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, MultimodalView, StatsView, ThinkingBudgets } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
+import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -78,7 +79,7 @@ type RecentEntry = AgyRpcResult<'pool.recent'>['recent'][number]
 const RPC_CHANNEL = '/api'
 const RPC_ENDPOINT = 'agy'
 
-type TabId = 'accounts' | 'models' | 'usage' | 'credentials'
+type TabId = 'accounts' | 'models' | 'config' | 'usage' | 'credentials'
 
 /**
  * How long a one-shot action's verdict stays on screen.
@@ -957,11 +958,9 @@ function ModelsTab(props: {
   onToggle: (modelId: string, disabled: boolean) => void
   /** Fire one test call against this exact model on the active account. */
   onTestModel: (modelId: string) => void
-  /** RPC carrier for the thinking-budget block, which loads its own state. */
-  rpc: AgyRpcClient
   t: T
 }): ReactNode {
-  const { models, account, pending, testing, onToggle, onTestModel, rpc, t } = props
+  const { models, account, pending, testing, onToggle, onTestModel, t } = props
 
   // Hooks MUST run unconditionally: an early `return` above any hook changes
   // this component's hook count between renders, and React's renderer state —
@@ -1014,24 +1013,9 @@ function ModelsTab(props: {
   return h('div', { className: 'agy-root' },
     card(t('modelsTitle'), h('div', { className: 'agy-rows' }, ...rows),
       hidden > 0 ? t('modelsHiddenSuffix', { count: hidden }) : account ?? undefined),
-    hint(t('modelsHelp')),
-    h(ThinkingBudgetCard, { rpc, t }))
+    hint(t('modelsHelp')))
 }
 
-/**
- * The global reasoning-level token budgets.
- *
- * One row per level rather than per model: only `*-tiered` models send a
- * `thinkingConfig` at all, and the level itself is already chosen in DSH's model
- * selector. So this supplies the missing VALUE behind each level — the same three
- * numbers for every such model.
- *
- * An EMPTY input is the meaningful default: the request then sends
- * `thinkingLevel` and lets upstream pick, which is exactly the behaviour before
- * this setting existed. That is why the field is not a `number` input with a
- * zero fallback, and why clearing it is a real action rather than "set to 0"
- * (measured: `0` reduces thinking but does not reliably disable it).
- */
 /**
  * One budget row: label, input, and optional shortcut chips.
  *
@@ -1363,6 +1347,142 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
       : null)
 
   return card(t('thinkingTitle'), block)
+}
+
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+/**
+ * The config tab: a card container, not one component.
+ *
+ * Each card loads and saves its OWN state (the thinking card already had that
+ * shape), so a new knob is a new card rather than a field threaded through a
+ * shared form — and one card's failed load cannot blank the others. Nothing here
+ * holds cross-card state, which is the property that keeps that true.
+ */
+function ConfigTab(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+  const { rpc, t } = props
+  return h('div', { className: 'agy-root' },
+    h(ThinkingBudgetCard, { rpc, t }),
+    h(MultimodalCard, { rpc, t }))
+}
+
+/**
+ * The per-file inline cap for non-image multimodal files.
+ *
+ * A plain card, not a disclosure like the thinking block: it is one number, so
+ * there is nothing to collapse, and the same self-loading shape as the thinking
+ * card (load on mount, draft mirrored as a string, blur commits).
+ *
+ * The EMPTY semantics are inherited deliberately: an empty box means "no stored
+ * setting", which falls back to the env override or the 20MB default. That is
+ * why clearing has its own button rather than being reachable only by emptying
+ * the field — the destructive direction should be an explicit click, not the
+ * side effect of a blur on a field the user emptied while deciding.
+ */
+function MultimodalCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+  const { rpc, t } = props
+  const [view, setView] = useState<MultimodalView | null>(null)
+  const [draft, setDraft] = useState('')
+  const [error, setError] = useState<string | undefined>(undefined)
+  const [loaded, setLoaded] = useState(false)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+
+  const load = useCallback((): void => {
+    void (async () => {
+      try {
+        const result = await rpc.call('multimodal.get', {})
+        if (!alive.current) return
+        setView(result)
+        setDraft(result.value === null ? '' : String(result.value))
+        setError(undefined)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        if (alive.current) setLoaded(true)
+      }
+    })()
+  }, [rpc])
+
+  useEffect(() => { load() }, [load])
+
+  const commit = (value: number | null): void => {
+    void (async () => {
+      try {
+        const result = await rpc.call('multimodal.set', { maxInlineMb: value })
+        if (!alive.current) return
+        setView(result)
+        setDraft(result.value === null ? '' : String(result.value))
+        setError(undefined)
+      } catch (caught) {
+        // The host states the accepted interval, so its message beats a generic
+        // one; the draft is left as typed for the user to correct.
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      }
+    })()
+  }
+
+  const save = (raw: string): void => {
+    const trimmed = raw.trim()
+    if (trimmed === '') {
+      commit(null)
+      return
+    }
+    const value = Number(trimmed)
+    if (!Number.isInteger(value)) {
+      setError(t('multimodalInvalid'))
+      return
+    }
+    if (value < MULTIMODAL_MIN_MB || value > MULTIMODAL_MAX_MB) {
+      // Rejected locally rather than sent: the host would answer with the same
+      // interval, and a round trip for a message we can already write is noise.
+      setError(t('multimodalRange', { min: MULTIMODAL_MIN_MB, max: MULTIMODAL_MAX_MB }))
+      return
+    }
+    commit(value)
+  }
+
+  // The status line names the EFFECTIVE source, which is not the same question
+  // as what is stored: an env override wins, so a user staring at a number the
+  // requests ignore has to be told that rather than left to infer it.
+  const source = view === null
+    ? null
+    : view.source === 'env'
+      ? t('multimodalSourceEnv')
+      : view.source === 'stored' ? t('multimodalSourceStored') : t('multimodalSourceDefault', { default: MULTIMODAL_DEFAULT_MB })
+
+  return card(t('multimodalTitle'), [
+    h('div', { className: 'agy-thinking-row' },
+      h('span', { className: 'agy-thinking-k' }, t('multimodalLabel')),
+      h(Input, {
+        value: draft,
+        placeholder: t('multimodalAuto'),
+        inputMode: 'numeric',
+        disabled: !loaded,
+        onChange: (event: { target: { value: string } }) => { setDraft(event.target.value) },
+        onBlur: (event: { target: { value: string } }) => { save(event.target.value) },
+      }),
+      h('span', { className: 'agy-input-unit' },
+        t('multimodalUnit'),
+        h('button', {
+          type: 'button',
+          className: 'agy-thinking-chip',
+          // Clears AND commits in one step; the blur that follows sees the
+          // reloaded value and does not save a second time.
+          onClick: () => { setDraft(''); commit(null) },
+        }, t('multimodalClear')))),
+    // The status line names the EFFECTIVE source, which is not the same question
+    // as what is stored: an env override wins, and a user staring at a number the
+    // requests ignore needs to be told that rather than left to infer it.
+    source === null ? null : h('div', { className: 'agy-hint' }, source),
+    hint(t('multimodalHint')),
+    error === undefined ? null : h('div', { className: 'agy-error' }, error),
+  ])
 }
 
 // ─── Recent activity ─────────────────────────────────────────────────────────
@@ -2182,7 +2302,6 @@ export function AgySettings(props: {
           // queries (see management.ts listAccounts).
           pending: toggling,
           testing: modelTesting,
-          rpc,
           t,
           /**
            * Optimistic, per-model toggle.
@@ -2257,9 +2376,11 @@ export function AgySettings(props: {
         : h('div', { className: 'agy-root' },
           h('div', { className: 'agy-error' }, modelError),
           button(t('refresh'), () => { void loadModels() }, { size: 'sm' }))
-      : tab === 'usage'
-        ? h(UsageTab, { stats, lang: props.lang, t })
-        : h(CredentialsTab, {
+      : tab === 'config'
+        ? h(ConfigTab, { rpc, t })
+        : tab === 'usage'
+          ? h(UsageTab, { stats, lang: props.lang, t })
+          : h(CredentialsTab, {
           busy,
           t,
           onImport: (kind: 'json' | 'blob', sources: string[]) => {
@@ -2308,6 +2429,7 @@ export function AgySettings(props: {
     h('div', { className: 'agy-tabs' },
       tabButton('accounts', t('tabAccounts'), accounts.length),
       tabButton('models', t('tabModels'), models.length > 0 ? models.length : undefined),
+      tabButton('config', t('tabConfig')),
       tabButton('usage', t('tabUsage')),
       tabButton('credentials', t('tabCredentials'))),
     error === undefined ? null : h('div', { className: 'agy-error' }, error),
