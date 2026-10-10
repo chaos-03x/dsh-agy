@@ -284,6 +284,14 @@ export interface TokenExchangeSuccess {
 export interface TokenExchangeFailure {
   type: 'failed'
   error: string
+  /**
+   * True when the failure was a transport error of THIS process's own egress
+   * (DNS / refused / reset / timeout / TLS / unreachable proxy) rather than an
+   * upstream HTTP verdict or a local parse error. The browser leg of the login
+   * has already succeeded by then, so only network remediation applies — which
+   * is what a caller needs this flag to say (issue #108).
+   */
+  transport?: boolean
 }
 
 export type TokenExchangeResult = TokenExchangeSuccess | TokenExchangeFailure

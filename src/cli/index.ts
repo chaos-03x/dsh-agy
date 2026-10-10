@@ -94,6 +94,22 @@ function isRemoteSession(): boolean {
   return !!(process.env.SSH_CONNECTION || process.env.SSH_CLIENT || process.env.SSH_TTY)
 }
 
+/**
+ * Remediation hint for a transport-class login failure, printed after the
+ * failure itself. English on purpose: the terminal surface has no i18n, and
+ * the browser the user just came from may be on a proxy this process is not.
+ * ASCII only, because the audience that hits this is disproportionately on
+ * Windows PowerShell, where a non-ASCII dash can mojibake.
+ */
+export function transportFailureHint(): string {
+  return [
+    'Hint: authorization succeeded, but this machine could not reach Google directly.',
+    '      If your browser uses a proxy or VPN, this process needs it too. Retry with',
+    '      `dsh-agy login --proxy <url>` (e.g. http://127.0.0.1:7890), or set',
+    '      HTTPS_PROXY in this terminal before logging in (Node ignores the system proxy).',
+  ].join('\n')
+}
+
 async function loginCommand(options: { headless: boolean; blob: boolean; port: number; project?: string; timeout?: string; proxy?: string }) {
   const proxyInput = resolveProxyOption(options.proxy)
   // proxy "" sentinel means clear; normalizeProxyUrl already handled
@@ -170,6 +186,13 @@ async function loginCommand(options: { headless: boolean; blob: boolean; port: n
   })
   if (result.type === 'failed') {
     console.error(`Login failed: ${result.error}`)
+    // The browser leg already succeeded (the callback page was served), so a
+    // transport failure here means THIS process could not reach Google — the
+    // one case with a concrete remedy. Node's fetch reads only the
+    // HTTP_PROXY/HTTPS_PROXY env vars, never the Windows system proxy, which
+    // is exactly how a browser-on-proxy login gets this far and stops (issue
+    // #108: a screenshot of "fetch failed" with no diagnosable cause).
+    if (result.transport) console.error(transportFailureHint())
     process.exit(1)
   }
 
