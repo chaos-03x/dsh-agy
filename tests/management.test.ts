@@ -6,6 +6,7 @@ import { createAgyManagement } from '../src/web/management.ts'
 import { UsageStats, noopStatsLock } from '../src/stats.ts'
 import { ModelVisibility } from '../src/model-visibility.ts'
 import { ThinkingBudgetStore } from '../src/thinking-budget.ts'
+import { MultimodalConfigStore } from '../src/multimodal-config.ts'
 import { UiPrefsStore } from '../src/ui-prefs.ts'
 import type { AccountStore } from '../src/store/accounts.ts'
 import type { AgySessionManager } from '../src/session.ts'
@@ -121,6 +122,8 @@ function makeHarness(options: {
   // host uses rather than a stub that could accept anything.
   const thinkingFile = join(mkdtempSync(join(tmpdir(), 'agy-thinking-rpc-')), 'agy-thinking.json')
   const thinkingBudget = new ThinkingBudgetStore({ file: thinkingFile })
+  const multimodalFile = join(mkdtempSync(join(tmpdir(), 'agy-multimodal-rpc-')), 'agy-multimodal.json')
+  const multimodalConfig = new MultimodalConfigStore({ file: multimodalFile })
   const prefsFile = join(mkdtempSync(join(tmpdir(), 'agy-ui-prefs-rpc-')), 'agy-ui-prefs.json')
   const uiPrefs = new UiPrefsStore(prefsFile)
   const management = createAgyManagement({
@@ -136,6 +139,10 @@ function makeHarness(options: {
       setClaude: (value) => thinkingBudget.setClaudeBudget(value).claudeBudget,
       tiered: () => thinkingBudget.tieredBudget(),
       setTiered: (value) => thinkingBudget.setTieredBudget(value).tieredBudget,
+    },
+    multimodal: {
+      get: () => multimodalConfig.snapshot(),
+      set: (value) => multimodalConfig.setMaxInlineMb(value),
     },
     notifyModelsChanged: () => { notifications += 1 },
     invalidateModelCache: () => { cacheInvalidations += 1 },

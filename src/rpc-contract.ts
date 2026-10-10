@@ -14,6 +14,7 @@
  * and stays a real HTTP route: Google redirects a browser to it.
  */
 
+import type { MultimodalSource, MultimodalView } from './multimodal-types.ts'
 import type { ThinkingBudgets } from './thinking-types.ts'
 import type { QuotaGroup } from './types.ts'
 import type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
@@ -22,6 +23,7 @@ import type { UsageCounters, UsageSource } from './usage-types.ts'
 export type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 export type { QuotaGroup, QuotaWindow } from './types.ts'
 export type { ThinkingBudgets, ThinkingLevel } from './thinking-types.ts'
+export type { MultimodalSource, MultimodalView } from './multimodal-types.ts'
 
 /** Account lifecycle state as the UI presents it. */
 export type AccountState = 'active' | 'cooling' | 'verification-required' | 'disabled'
@@ -375,6 +377,30 @@ export interface AgyRpcMethods {
     result: { tieredBudget: number | null }
   }
   'stats.get': { payload: Record<string, never>; result: StatsView }
+  /**
+   * The per-file inline cap for non-image multimodal files (see
+   * `multimodal-config.ts`).
+   *
+   * `value` is the STORED setting (null when nothing is stored); `source` names
+   * which source is EFFECTIVE. The two can disagree, and deliberately:
+   * `DSH_AGY_MULTIMODAL_MAX_INLINE_MB` wins over a stored value, so the card
+   * must be able to say "20 stored, env is in force" rather than showing a
+   * number that no request uses.
+   */
+  'multimodal.get': { payload: Record<string, never>; result: MultimodalView }
+  /**
+   * Set or clear the stored cap.
+   *
+   * Omitting `maxInlineMb` (or passing null) CLEARS it, which is a distinct
+   * action: the effective cap falls back to the env override or the built-in
+   * default. A non-integer or out-of-interval number is rejected here rather
+   * than stored, because the store would drop it on the next read anyway and a
+   * silently ignored save is worse than a message.
+   */
+  'multimodal.set': {
+    payload: { maxInlineMb?: number | null }
+    result: MultimodalView
+  }
   'ui.prefs.get': { payload: Record<string, never>; result: UiPrefsView }
   'ui.prefs.set': { payload: SetUiPrefsPayload; result: UiPrefsView }
 }
