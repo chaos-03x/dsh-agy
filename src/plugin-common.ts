@@ -12,6 +12,7 @@ import { AgyAdapter } from './adapter/adapter.ts'
 import type { AgyAttachmentStore } from './adapter/adapter.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { ModelVisibility } from './model-visibility.ts'
+import { MultimodalConfigStore } from './multimodal-config.ts'
 import { ThinkingBudgetStore } from './thinking-budget.ts'
 import { UsageStats } from './stats.ts'
 import { RecentActivityStore } from './recent-store.ts'
@@ -97,6 +98,7 @@ export interface AgyRuntime {
   recentStore: RecentActivityStore
   modelVisibility: ModelVisibility
   thinkingBudget: ThinkingBudgetStore
+  multimodalConfig: MultimodalConfigStore
 }
 
 /**
@@ -176,6 +178,7 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   })
   const modelVisibility = new ModelVisibility()
   const thinkingBudget = new ThinkingBudgetStore()
+  const multimodalConfig = new MultimodalConfigStore()
   // The adapter's model-list cache is keyed to no account (see
   // `AgyAdapter.invalidateModelCache`), so every event that can switch the
   // account discovery rides must drop it. The adapter does not exist yet when
@@ -202,6 +205,7 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     thinkingBudgetFor: (level) => thinkingBudget.budgetFor(level),
     claudeBudgetFor: () => thinkingBudget.claudeBudget(),
     tieredBudgetFor: () => thinkingBudget.tieredBudget(),
+    maxInlineBytes: () => multimodalConfig.maxInlineBytes(),
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })
   invalidateModelCache = () => { adapter.invalidateModelCache() }
@@ -222,7 +226,7 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     stats.flushSync()
     recentStore.flushSync()
   })
-  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget }
+  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig }
 }
 
 export { AGY_PROVIDER }

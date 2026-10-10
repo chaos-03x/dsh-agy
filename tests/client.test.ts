@@ -262,6 +262,49 @@ describe('agy section i18n', () => {
   })
 })
 
+describe('settings tab layout', () => {
+  /** The source of one top-level function, from its `function` line to the next. */
+  function functionBody(name: string): string {
+    const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+    // Every component in the browser half is a TOP-LEVEL function, so the next
+    // top-level `function`/`const`/`export` line bounds the body. A regex is
+    // enough here because nothing nests a second top-level declaration inside a
+    // component body.
+    const start = source.indexOf(`function ${name}(`)
+    expect(start, `${name} not found in src/client/index.ts`).toBeGreaterThan(-1)
+    const rest = source.slice(start + 1)
+    const end = rest.search(/\n(?:export )?(?:function |const |\/\/ ───)/)
+    return end === -1 ? rest : rest.slice(0, end)
+  }
+
+  it('renders the thinking card on the config tab, not the models tab', () => {
+    // The test environment is `environment: 'node'`, so nothing renders; this is
+    // a source assertion instead. It is the issue's own acceptance condition —
+    // "the models tab no longer renders the thinking budget" — and the failure
+    // mode it guards is silent: leaving the card in ModelsTab and also adding
+    // ConfigTab would show the block on two tabs with no type error anywhere.
+    expect(functionBody('ModelsTab')).not.toContain('ThinkingBudgetCard')
+    expect(functionBody('ConfigTab')).toContain('h(ThinkingBudgetCard')
+    expect(functionBody('ConfigTab')).toContain('h(MultimodalCard')
+  })
+
+  it('carries the moved card into the tab body chain ahead of the credentials fallback', () => {
+    // The body ternary ends in a bare `else` for CredentialsTab, so a new tab
+    // that misses its branch renders credentials with no compile error.
+    const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+    const from = source.indexOf('const body = tab ===')
+    // Bound the slice at the ROOT element's return, searched from `from`: the
+    // same `return h('div', { className: 'agy-root' },` line occurs in every tab,
+    // so an unanchored `indexOf` would cut the chain off before its own start.
+    const to = source.indexOf("return h('div', { className: 'agy-root' },", from)
+    expect(from, 'the tab body chain moved — update this scan').toBeGreaterThan(-1)
+    expect(to, 'the root return moved — update this scan').toBeGreaterThan(from)
+    const chain = source.slice(from, to)
+    expect(chain).toContain("tab === 'config'")
+    expect(chain.indexOf("tab === 'config'")).toBeLessThan(chain.indexOf("tab === 'usage'"))
+  })
+})
+
 describe('usage table stylesheet', () => {
   const css = readFileSync(new URL('../src/client/styles.ts', import.meta.url), 'utf8')
 

@@ -19,10 +19,11 @@ fingerprinting, and both CLI and web management.
   selection (family-scoped quotas, OMP-aligned ranking), automatic rotation on
   rate limits, per-account cooldown to the real reset time, per-account device
   fingerprints.
-- **Inline Settings UI**: an Antigravity section inside DSH Settings with four
+- **Inline Settings UI**: an Antigravity section inside DSH Settings with five
   tabs — accounts (login, activation, grouped 5-hour/weekly quota windows, test
-  calls, fingerprint and proxy management), models (per-model visibility), usage
-  (cumulative token and request statistics), and credentials (import/export).
+  calls, fingerprint and proxy management), models (per-model visibility), config
+  (thinking budgets, multimodal inline limit), usage (cumulative token and request
+  statistics), and credentials (import/export).
   No separate page: the surface only exists where DSH Settings does.
 - **Quota badge in the session header**: the tightest of the active account's
   tracked windows (5-hour vs weekly) as a single figure, with the per-window
@@ -241,6 +242,7 @@ counter.
 | `DSH_AGY_FINGERPRINT_MODE=stable` | One fixed client identity per account — no per-request header randomization, no fingerprint regeneration (OMP-style fixed-client posture). Default `dynamic` keeps per-request randomization. |
 | `DSH_AGY_HEALTH_INTERVAL_MS=<ms>` | Background batch health probe inside the harness (refresh + userinfo on the configured interval); off by default. |
 | `DSH_AGY_IDLE_TIMEOUT_MS=<ms>` | Silence budget for one SSE body read (default `180000`, 3 min; `0` disables). A body that stops producing bytes is abandoned instead of hanging the turn; any byte resets it, so a long reasoning pause is untouched. `AGY_IDLE_TIMEOUT_MS` is accepted as an alias. |
+| `DSH_AGY_MULTIMODAL_MAX_INLINE_MB=<mb>` | Per-file cap for inlining non-image multimodal files, in MB (1–100). Overrides the Config tab setting; an unparseable or out-of-range value is ignored, leaving the stored value or the 20MB default in force. |
 | `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` | BYO OAuth app escape hatch: override the embedded public Antigravity client credentials. |
 
 ### About cache hits: why not 99% like DeepSeek V4?
@@ -285,6 +287,8 @@ folder afterwards, an old-version process is still running, and a warning says s
   `~/.dsh/agy/agy-fingerprint-data.json` — no code release needed to keep them current.
 - Model visibility: `~/.dsh/agy/agy-models.json` (0600) — the hidden-model blacklist.
   Holds only the models you switched off, so re-enabling one removes its entry.
+- Multimodal inline cap: `~/.dsh/agy/agy-multimodal.json` (0600) — the per-file inline
+  limit in MB. An absent field means the built-in 20MB default.
 - Usage statistics: `~/.dsh/agy/agy-stats.json` (0600) — cumulative counters plus a
   rolling 30-day window. Counts are merged under a file lock, so several
   processes (Desktop, a web-profile server, the CLI) record concurrently without

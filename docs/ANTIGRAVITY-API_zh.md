@@ -60,7 +60,7 @@ OAuth 端点（固定）：授权 `https://accounts.google.com/o/oauth2/v2/auth`
 - **Claude 对等** — Claude 系模型使用相同的 `streamGenerateContent` schema；请求侧 contents 原样通过（无需 Claude 特有的图片处理）。非图片多模态文件绝不发送给 Claude（见下）。
 - **executor 过滤安全** — 上游侧的 parts 归一化只丢弃空 `text`、无名 `functionCall` 与不可回放的 `thought` parts；`inlineData` parts 不受影响。
 - **插件行为——图片** — 用户消息中的 image block 由持久附件服务解析出字节，在翻译前预转换为 base64（`src/adapter/adapter.ts`）；服务缺失或读取失败以 `UNSUPPORTED_CONTENT`（终态）硬失败，绝不静默降级为纯文本。tool-result 内嵌图片不做翻译。
-- **插件行为——非图片多模态文件（仅 Gemini）** — `src/adapter/multimodal.ts` 还会把 DSH 文件句柄文本中的非图片文件解析为同一 `inlineData` part 形状，单文件上限 20MB。覆盖格式：`.pdf` → `application/pdf`（已对 Antigravity 用多页 PDF 实测通过）；音频 `.mp3/.wav/.m4a/.aac/.ogg/.flac`、视频 `.mp4/.mov/.webm` 与图片 `.bmp/.heic/.heif` 遵循 Gemini 公开的多模态支持，尚未实测。门控默认拒绝（`supportsMultimodalFiles`）：Claude 系模型一律排除（Vertex 对非图片 `inlineData` 返回 500）、catalog 模型必须具备视觉能力、catalog 未收录的 id 仅在 `gemini-` 前缀下放行。与图片路径不同，读取失败、超限或格式不受支持时静默回退：原文件句柄文本保留在 prompt 中，模型仍可用文件工具读取。
+- **插件行为——非图片多模态文件（仅 Gemini）** — `src/adapter/multimodal.ts` 还会把 DSH 文件句柄文本中的非图片文件解析为同一 `inlineData` part 形状，单文件上限可配置（默认 20MB，在 DSH 设置的「配置」标签页里改；生效优先级为环境变量 `DSH_AGY_MULTIMODAL_MAX_INLINE_MB` > 已保存设置 > 20MB 默认值，因此无头运行无需打开界面也能调整）。覆盖格式：`.pdf` → `application/pdf`（已对 Antigravity 用多页 PDF 实测通过）；音频 `.mp3/.wav/.m4a/.aac/.ogg/.flac`、视频 `.mp4/.mov/.webm` 与图片 `.bmp/.heic/.heif` 遵循 Gemini 公开的多模态支持，尚未实测。门控默认拒绝（`supportsMultimodalFiles`）：Claude 系模型一律排除（Vertex 对非图片 `inlineData` 返回 500）、catalog 模型必须具备视觉能力、catalog 未收录的 id 仅在 `gemini-` 前缀下放行。与图片路径不同，读取失败、超限或格式不受支持时静默回退：原文件句柄文本保留在 prompt 中，模型仍可用文件工具读取。
 - 证据来源：OmniRoute 的 OPENAI→ANTIGRAVITY 翻译器在同一端点上产出该形状（其 Claude 路径白名单对 contents 原样放行）；自录 fixture 待补——发版前用真实账号实测一次。
 
 ### 3.3 Claude 路径的 `contents[]` part 契约（实测）

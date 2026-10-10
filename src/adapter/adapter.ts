@@ -115,6 +115,16 @@ export interface AgyAdapterOptions {
   claudeBudgetFor?(): number | undefined
   /** Budget for the tiered slot (the selector's "Default" effort). */
   tieredBudgetFor?(): number | undefined
+  /**
+   * Configured per-file cap for non-image multimodal inlining, in bytes
+   * (see `multimodal-config.ts`).
+   *
+   * A resolver rather than a snapshot, for the same reason as
+   * `thinkingBudgetFor`: an edit in the settings UI applies to the next request
+   * without rebuilding the adapter. `undefined` means "not configured", which
+   * `resolveMultimodalFiles` answers with its built-in constant.
+   */
+  maxInlineBytes?(): number | undefined
   /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
   resolveAttachments?(): AgyAttachmentStore | undefined
   /**
@@ -438,7 +448,7 @@ export class AgyAdapter extends LlmAdapter {
       )
     }
 
-    const multimodalFiles = await resolveMultimodalFiles(options)
+    const multimodalFiles = await resolveMultimodalFiles(options, { maxBytes: this.options.maxInlineBytes?.() })
     // The account is now fixed for this request; take the in-flight slot that the
     // `stream` wrapper releases (see its comment for why release lives there).
     holder.account = session.account

@@ -160,7 +160,7 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     )
   }
 
-  const { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget } = await createAgyRuntime(ctx)
+  const { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig } = await createAgyRuntime(ctx)
   // Read per use rather than once here: the bound port is only known after the
   // server's listen callback has run. The host goes through `redirectHostFor`
   // so wildcard listeners map to loopback and bare IPv6 literals are bracketed.
@@ -181,6 +181,13 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
       setClaude: (value) => thinkingBudget.setClaudeBudget(value).claudeBudget,
       tiered: () => thinkingBudget.tieredBudget(),
       setTiered: (value) => thinkingBudget.setTieredBudget(value).tieredBudget,
+    },
+    // Same shape as `thinkingBudget`: the two operations the RPC needs, not the
+    // store. The setter returns the fresh snapshot so the card re-renders from
+    // what was stored rather than from its own optimistic guess.
+    multimodal: {
+      get: () => multimodalConfig.snapshot(),
+      set: (value) => multimodalConfig.setMaxInlineMb(value),
     },
     // The adapter's *unfiltered* catalog, so a hidden model still appears in
     // the settings list alongside the switch that un-hides it.

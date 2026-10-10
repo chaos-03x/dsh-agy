@@ -17,7 +17,7 @@ src/store/      Account storage: encrypted JSON file (accounts, proper-lockfile)
                 data-dir layout + one-shot legacy migration (paths)
 src/session.ts  Shared runtime glue: token caching, rotation execution, fingerprint lifecycle, verify/test/export
 src/web/        Web plugin entry: management RPC (`/api/agy`) + OAuth callback route (loopback peers only)
-src/client/     Inline Settings section (browser half): 4 tabs over the management RPC,
+src/client/     Inline Settings section (browser half): 5 tabs over the management RPC,
                 UI primitives + bilingual dictionaries (locales.ts, styles.ts)
 src/stats.ts    Cumulative usage ledger ($DSH_HOME/agy/agy-stats.json)
 src/recent-store.ts  Persisted recent-activity ring ($DSH_HOME/agy/agy-recent.json; 200-entry cap,
@@ -25,6 +25,9 @@ src/recent-store.ts  Persisted recent-activity ring ($DSH_HOME/agy/agy-recent.js
 src/model-visibility.ts  Hidden-model blacklist ($DSH_HOME/agy/agy-models.json)
 src/thinking-budget.ts   Global Low/Medium/High -> thinkingBudget map ($DSH_HOME/agy/agy-thinking.json);
                          types split into thinking-types.ts so the client bundle stays node:*-free
+src/multimodal-config.ts Per-file inline cap for non-image multimodal files
+                         ($DSH_HOME/agy/agy-multimodal.json; env > stored > 20MB default);
+                         types split into multimodal-types.ts for the same node:*-free reason
 src/cli/        Standalone CLI (login/status/import/verify/logout) + loopback callback server
 tests/          Vitest test suite: fixture-driven, zero network
 docs/           Architecture & API facts (EN + zh); maintenance-oriented, not bundled in npm package
@@ -95,6 +98,15 @@ redirects a browser to it with a GET.
   - `disabledFor()` MUST revalidate against the file mtime. The main plugin and the web entry each build their own instance in ONE process, and the toggle is written by the web instance while the model selector reads the main one — without the check the switch appears broken until the host restarts.
   - Persisted to agy's own JSON, not a `ctx.settings` namespace: that service requires a `@deepseek-ai/schemastery` schema, and the CLI must not import any `@deepseek-ai/*` package at runtime.
   - Ghost filtering lives only in `isChatCallableModelId` at the discovery-merge layer — the adapter is its one home (the #88 exemption to #62's "no adapter changes" is deliberate, and #62 cut the front-end list rewriting that did this job).
+- **Multimodal Inline Cap (`multimodal-config.ts`)**:
+  - Effective priority is env `DSH_AGY_MULTIMODAL_MAX_INLINE_MB` > stored value > the built-in 20MB default; an unrecognized env value is ignored exactly as a corrupt file is, because the fallback chain is always a valid state.
+  - `DSH_AGY_*` is this plugin's own runtime-knob namespace (`AGY_*` is the OAuth public-client-credential one), and this is the codebase's first NUMERIC env knob.
+  - The adapter takes a resolver (`maxInlineBytes: () => store.maxInlineBytes()`), never a snapshot, so a settings save reaches the next request without rebuilding the adapter; the hot-path read is a content-compare revalidation behind the shared `DEFAULT_REVALIDATE_INTERVAL_MS`, and the WRITE path bypasses the throttle.
+  - `[1, 100]` MB is a UI guardrail (an order of magnitude above the default, so a typo like `100000` is rejected at save time), NOT a measured upstream boundary — the real request-body limit is unprobed, and probing it is out of scope for #101.
+  - Both size checks in `resolveMultimodalFiles` compare against ONE effective cap: the declared-handle check is a pre-filter that saves a read, and a handle that under-declares is caught after the read by the same value.
+  - An empty box means "no stored setting", not 0, and clearing is its own explicit action — an empty draft reaching a destructive write is the trap the proxy card already recorded.
+  - `value` (stored) and `source` (effective) are separate fields on the wire because they disagree whenever env wins: a card showing only one makes a stored-but-overridden setting look unset or in force.
+  - A file over the limit silently keeps its text handle in the prompt, so the model can still read it with its file tools; the store is 0600 via tmp+rename and a read never creates the file.
 - **Management RPC (`web/management.ts`)**: a mutation that names an account (test call included) MUST carry its index end to end. Dropping it made "Test call" probe whichever account affinity picked and report the result as that row's.
 - **Classification Semantics**:
   - HTTP 403 responses containing quota / `RESOURCE_EXHAUSTED` phrasing MUST be classified as rate-limit (cooldown). Treating all 403s as auth-failures would permanently disable healthy accounts. Only true auth failures trigger account revocation, and a successful `verify` automatically re-enables the account. A 403 naming `VALIDATION_REQUIRED` is a third case: it parks the account for `VERIFICATION_COOLDOWN_MS` without disabling it and surfaces the appeal URL, and no `providerRetryAfterMs` may accompany it.
