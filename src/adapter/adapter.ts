@@ -41,7 +41,7 @@ import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
 import type { AgyResolvedImage } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
-import { parseAgySse, UnmappedFinishReasonError } from './parse.ts'
+import { AgyStreamIdleTimeoutError, parseAgySse, UnmappedFinishReasonError } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
 
 export type { AgyAccountSession }
@@ -733,7 +733,28 @@ export class AgyAdapter extends LlmAdapter {
         return
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
+          this.recordUsage(session, options.model, { ok: false, reason: 'aborted', usage }, attemptStartedAt)
+          await response.body?.cancel().catch(() => {})
           throw new LlmError('agy stream aborted', 'ABORTED', { cause: error })
+        }
+
+        // Idle watchdog (parse.ts): the streaming dispatcher runs with
+        // `bodyTimeout: 0` on purpose, so a body that stops producing bytes has
+        // no other reclaim. While nothing has been handed to the consumer, a
+        // retry replays a turn the user never saw — that one is worth DSH's
+        // retryable TIMEOUT, with the account still absorbing the transient
+        // through `reportFailure`. Past the first committed chunk the turn is
+        // content the consumer already holds, so it falls through to the same
+        // terminal UPSTREAM as any other mid-body death.
+        if (error instanceof AgyStreamIdleTimeoutError && !yieldedDirect) {
+          await this.options.reportFailure('network-error', session)
+          this.recordUsage(session, options.model, { ok: false, reason: 'network-error', usage }, attemptStartedAt)
+          await response.body?.cancel().catch(() => {})
+          throw new LlmError(
+            `${error.message} — nothing was delivered, retrying`,
+            'TIMEOUT',
+            { cause: error },
+          )
         }
 
         // MALFORMED_FUNCTION_CALL is a transient model syntax fluke during tool calling.
@@ -781,10 +802,11 @@ export class AgyAdapter extends LlmAdapter {
         const unmappedFinish = error instanceof UnmappedFinishReasonError
         await this.options.reportFailure(unmappedFinish ? 'request-error' : 'network-error', session)
         // `usage` is defined here exactly when the stream died with an unmapped
-        // finishReason: `parseAgySse` flushes its stashed totals before
-        // propagating that one error and no other. A mid-body socket death and
-        // the EOF completeness guard produce none, so the value is `undefined`
-        // there and passing it is a no-op — the retry path bills the same way.
+        // finishReason or the idle watchdog fired: `parseAgySse` flushes its
+        // stashed totals before propagating those two and no other. A mid-body
+        // socket death and the EOF completeness guard produce none, so the value
+        // is `undefined` there and passing it is a no-op — the retry path bills
+        // the same way.
         this.recordUsage(session, options.model, { ok: false, reason: unmappedFinish ? 'request-error' : 'network-error', usage }, attemptStartedAt)
         await response.body?.cancel().catch(() => {})
         // Deliberately UPSTREAM (terminal), not TRANSPORT: content may already
