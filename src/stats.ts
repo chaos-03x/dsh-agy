@@ -123,8 +123,10 @@ export interface UsageRecord {
   /**
    * The failure classification this record carries ('rate-limit',
    * 'network-error', 'auth-failure', 'verification-required', 'project-error',
-   * 'quota-exhausted'), when it failed. The counters ignore it: it exists for
-   * the recent-activity ring, where "why did it rotate" is the whole question.
+   * 'quota-exhausted'), when it failed — plus the one non-classification token
+   * 'aborted', which marks a turn the CONSUMER cancelled rather than one the
+   * upstream failed. The counters ignore it: it exists for the recent-activity
+   * ring, where "why did it rotate" is the whole question.
    */
   reason?: string
 }

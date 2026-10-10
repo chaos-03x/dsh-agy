@@ -52,7 +52,7 @@ Dependency direction: `oauth/` and `store/` are leaves (no internal deps); `runt
 | `runtime/risk` | `isDisabled() / fingerprintMode()` | env-gated kill switch + stable-identity mode (BYO client credentials resolve in oauth/constants) | pure unit |
 | `runtime/fingerprint` | `generate() -> Fingerprint` | random platform/arch/SDK pool, history mgmt (<=5), version sync; **data externalized to JSON** | pure unit |
 | `adapter/translate` | `toBody(generateOptions) -> RequestBody` | DSH messages/tools -> Gemini contents[], thinking carried verbatim | fixture (recorded requests) |
-| `adapter/parse` | `fromSSE(line) -> Chunk[]` | SSE line parsing, candidates[] -> StreamChunk, usage/error events, plus an idle/abort watchdog on the body read (`AGY_STREAM_IDLE_TIMEOUT_MS`) | fixture (recorded responses) |
+| `adapter/parse` | `fromSSE(line) -> Chunk[]` | SSE line parsing, candidates[] -> StreamChunk, usage/error events, plus an idle/abort watchdog on the body read (`resolveStreamIdleTimeoutMs`, default `DEFAULT_STREAM_IDLE_TIMEOUT_MS`) | fixture (recorded responses) |
 | `adapter/models` | `listModels() / resolveModel(id)` | fetchAvailableModels fetch + catalog metadata merge + filter + fallback | fixture |
 | `stats` | `UsageStats.record() / flush() / snapshot()` | cumulative ledger: in-memory accumulation on the hot path, lock-and-merge flush, rolling day window, defensive parse | unit (fake lock + clock) |
 | `model-visibility` | `ModelVisibility.disabledFor(provider) / setDisabled()` | hidden-model blacklist, in-memory read for per-catalog filtering | unit |

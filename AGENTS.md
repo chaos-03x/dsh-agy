@@ -47,6 +47,7 @@ redirects a browser to it with a GET.
 
 - **Security (Loopback Trust Model)**:
   - The OAuth callback route has no authentication of its own and answers loopback peers only (`isLoopbackPeer`, `web/plugin.ts` gate); management endpoints ride `/api/*` behind the host's browser-trust fence and BrowserAuth.
+  - The web entry builds the full runtime (`createAgyRuntime`) on ANY bind — master key, one-shot migration, ledger and recent ring, version warm-up included — because the management RPC needs it, and that is intended: the bind address was never the defence (see the rule above), so a LAN-bound profile creates the same local state a loopback one does and exposes nothing the fence does not already guard.
   - The callback page is served by the same web server, and therefore the same origin, as the DSH GUI, so anything injected into it can reach `/api/agy` (where `account.exportAll` returns live credential blobs). Every interpolation is escaped (`escapeHtml`), and inline-`<script>` payloads go through `jsonForInlineScript` — `JSON.stringify` alone escapes for a JS string, not for the HTML script-data state, so a value containing `</script>` still breaks out.
   - OAuth exchanges MUST bind to the exact PKCE verifier issued for that authorization attempt (`pendingAuth` Map in `web/management.ts`, local verifier in CLI); relaxing this verification is a security regression.
   - No request field or telemetry payload may ever transmit a raw refresh token — `sessionId` must be a derived identifier.
