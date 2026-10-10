@@ -17,7 +17,8 @@ import {
   resolveAgyClientCredentials,
 } from './constants.ts'
 import { decodeState } from './pkce.ts'
-import { proxiedFetch } from '../proxy.ts'
+import { isProxyUnreachableError, proxiedFetch } from '../proxy.ts'
+import { describeFetchError } from '../runtime/classify.ts'
 
 const FETCH_TIMEOUT_MS = 10_000
 
@@ -282,15 +283,25 @@ export async function exchangeAntigravity(
 
     const tokenPayload = (await tokenResponse.json()) as TokenPayload
 
-    const userInfoResponse = await proxiedFetch(`${OAUTH_USERINFO_URL}?alt=json`, {
-      headers: {
-        Authorization: `Bearer ${tokenPayload.access_token}`,
-        'User-Agent': getAgyBootstrapUserAgent(),
-      },
-    }, routing)
-    const userInfo: UserInfo = userInfoResponse.ok
-      ? ((await userInfoResponse.json()) as UserInfo)
-      : {}
+    // userinfo is enrichment, never fatal: the refresh token is already minted
+    // by the time this runs, so a transport failure here must leave the login
+    // succeeding with an unknown email rather than discarding a credential the
+    // upstream just issued (issue #108 — it surfaced as `Login failed: fetch
+    // failed` with the account one step from being stored).
+    let userInfo: UserInfo = {}
+    try {
+      const userInfoResponse = await proxiedFetch(`${OAUTH_USERINFO_URL}?alt=json`, {
+        headers: {
+          Authorization: `Bearer ${tokenPayload.access_token}`,
+          'User-Agent': getAgyBootstrapUserAgent(),
+        },
+      }, routing)
+      if (userInfoResponse.ok) {
+        userInfo = (await userInfoResponse.json()) as UserInfo
+      }
+    } catch {
+      // email stays unknown; the login itself already succeeded
+    }
 
     const refreshToken = tokenPayload.refresh_token
     if (!refreshToken) {
@@ -311,8 +322,26 @@ export async function exchangeAntigravity(
   } catch (error) {
     const failure: TokenExchangeFailure = {
       type: 'failed',
-      error: error instanceof Error ? error.message : 'Unknown error',
+      // The actionable code of a transport failure rides on `error.cause`
+      // (`TypeError: fetch failed` → `UND_ERR_SOCKET` / `ENOTFOUND` / …), so
+      // the bare message alone is the information-free "fetch failed" issue
+      // #108 arrived as. describeFetchError() is the repo's one sanitizer for
+      // exactly this and keeps proxy credentials out of the text.
+      error: describeFetchError(error),
+      transport: isTransportExchangeError(error),
     }
     return failure
   }
+}
+
+/**
+ * Whether a thrown exchange error is a transport failure of this process's own
+ * egress, as opposed to an upstream verdict or a local parse error: undici
+ * rejects every transport failure as `TypeError: fetch failed`, and the proxy
+ * fast-fail tags its own Error. A `SyntaxError` from `.json()` or
+ * `decodeState` is deliberately NOT transport — it is a malformed response,
+ * and no amount of proxy remediation fixes it.
+ */
+function isTransportExchangeError(error: unknown): boolean {
+  return error instanceof TypeError || isProxyUnreachableError(error)
 }

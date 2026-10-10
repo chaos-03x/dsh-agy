@@ -223,6 +223,72 @@ describe('exchangeAntigravity', () => {
     expect(result.type).toBe('failed')
     if (result.type === 'failed') expect(result.error).toContain('Missing refresh token')
   })
+
+  it('surfaces the transport cause instead of a bare "fetch failed" (issue #108)', async () => {
+    const { verifier } = generatePkcePair()
+    const state = encodeState({ verifier, projectId: '' })
+    // undici rejects every transport failure as `TypeError: fetch failed` with
+    // the actionable code on `cause`; printing only `error.message` is what
+    // made issue #108's screenshot information-free.
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+      })
+    }))
+    const result = await exchangeAntigravity('code123', state, redirectUri)
+    expect(result.type).toBe('failed')
+    if (result.type !== 'failed') return
+    expect(result.error).toContain('fetch failed')
+    expect(result.error).toContain('UND_ERR_SOCKET')
+    expect(result.transport).toBe(true)
+  })
+
+  it('flags a proxy fast-fail as transport so the CLI can hint at the remedy', async () => {
+    const { verifier } = generatePkcePair()
+    const state = encodeState({ verifier, projectId: '' })
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const err = new Error('[Proxy Fast-Fail] Proxy unreachable: http://127.0.0.1:7890') as Error & { code?: string; errorCode?: string }
+      err.code = 'PROXY_UNREACHABLE'
+      err.errorCode = 'proxy_unreachable'
+      throw err
+    }))
+    const result = await exchangeAntigravity('code123', state, redirectUri)
+    expect(result.type).toBe('failed')
+    if (result.type !== 'failed') return
+    expect(result.transport).toBe(true)
+  })
+
+  it('does not flag a malformed token response as transport — no proxy fixes it', async () => {
+    const { verifier } = generatePkcePair()
+    const state = encodeState({ verifier, projectId: '' })
+    mockFetch({
+      'oauth2.googleapis.com/token': () => new Response('not json', { status: 200 }),
+    })
+    const result = await exchangeAntigravity('code123', state, redirectUri)
+    expect(result.type).toBe('failed')
+    if (result.type !== 'failed') return
+    expect(result.transport).toBeFalsy()
+  })
+
+  it('keeps the login when userinfo fails — the refresh token is already minted (issue #108)', async () => {
+    const { verifier } = generatePkcePair()
+    const state = encodeState({ verifier, projectId: '' })
+    mockFetch({
+      'oauth2.googleapis.com/token': () =>
+        new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', expires_in: 3600 }), { status: 200 }),
+      'googleapis.com/oauth2/v1/userinfo': () => {
+        throw new TypeError('fetch failed')
+      },
+      'loadCodeAssist': () =>
+        new Response(JSON.stringify({ cloudaicompanionProject: { id: 'proj-1' } }), { status: 200 }),
+    })
+    const result = await exchangeAntigravity('code123', state, redirectUri)
+    expect(result.type).toBe('success')
+    if (result.type !== 'success') return
+    // The credential survives; only the email is unknown.
+    expect(result.refresh).toBe('rt|proj-1')
+    expect(result.email).toBeUndefined()
+  })
 })
 
 describe('parseOAuthErrorPayload', () => {

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { writeBlobFile } from '../src/cli/index.ts'
+import { transportFailureHint, writeBlobFile } from '../src/cli/index.ts'
 
 const dirs: string[] = []
 
@@ -42,5 +42,20 @@ describe('dsh-agy export blob file', () => {
     const file = join(tempDir(), 'dsh-agy-1.blob')
     writeBlobFile(file, 'AGY-BLOB-PAYLOAD')
     expect(readFileSync(file, 'utf8')).toBe('AGY-BLOB-PAYLOAD\n')
+  })
+})
+
+describe('login transport failure hint', () => {
+  // The terminal surface has no i18n, so the hint is English by construction.
+  // Issue #108 arrived as a screenshot of `Login failed: fetch failed`: the
+  // browser leg had succeeded, so the only useful thing left to say is the
+  // remedy the browser had and this process did not.
+  it('names both remedies and states that the authorization itself succeeded', () => {
+    const hint = transportFailureHint()
+    expect(hint).toContain('--proxy')
+    expect(hint).toContain('HTTPS_PROXY')
+    expect(hint).toContain('authorization succeeded')
+    // No template placeholder may survive into the terminal.
+    expect(hint).not.toMatch(/\{|\}/)
   })
 })
