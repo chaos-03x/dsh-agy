@@ -42,10 +42,10 @@ export const name = 'dsh-agy-web'
 export const inject = ['llm']
 
 /** Bind hosts that mean "this machine only". */
-const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1']
+const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1', '[::1]']
 
-/** Listen-any addresses, which are not a host a browser can follow a redirect to. */
-const WILDCARD_HOSTS = ['0.0.0.0', '::', '[::]', '*']
+/** Listen-any addresses. */
+const WILDCARD_HOSTS = ['0.0.0.0', '::']
 
 /**
  * Whether a socket peer is on the loopback interface.
@@ -65,17 +65,19 @@ export function isLoopbackPeer(address: string | undefined): boolean {
 }
 
 /**
- * The host an OAuth redirect must name.
+ * Format a host for an HTTP URL, mapping wildcard listeners to loopback.
  *
- * `webStartup.host` is the `--host` flag verbatim, and a wildcard listen
- * address (`0.0.0.0` / `::`) is not something a browser can follow a redirect
- * to; the wildcard listener answers the loopback literal all the same. A
- * specific host — a NetBird address, say — is kept verbatim.
- * @param host - the startup host.
+ * An OAuth redirect must name a reachable loopback address. Wildcard listen
+ * addresses (`0.0.0.0` or IPv6 `::`) map to loopback (`127.0.0.1` and `[::1]`).
+ * Bare IPv6 addresses (e.g. `::1`) are wrapped in brackets so `new URL` accepts them.
+ * @param host - the bind host.
  * @returns the host to build the redirect from.
  */
 export function redirectHostFor(host: string): string {
-  return WILDCARD_HOSTS.includes(host) ? '127.0.0.1' : host
+  if (host === '0.0.0.0') return '127.0.0.1'
+  if (host === '::' || host === '::1') return '[::1]'
+  if (host.includes(':') && !host.startsWith('[')) return `[${host}]`
+  return host
 }
 
 /** The slice of the host's web-server service this entry uses. */
@@ -152,18 +154,18 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
   // this machine, and the handler refuses every non-loopback peer.
   const bindHost = webServer.host ?? host
   if (!LOOPBACK_HOSTS.includes(bindHost)) {
-    ctx.logger.info(
-      '[dsh-agy] web server bound to "' + bindHost + '": /agy management rides the authenticated /api RPC; ' +
-      'the OAuth callback answers loopback peers only.',
+    ctx.logger.warn(
+      '[dsh-agy] web server bound to "' + bindHost + '" (non-loopback): management RPC registered via /api/*, ' +
+      'but OAuth callback accepts requests from loopback peers only.',
     )
   }
 
   const { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget } = await createAgyRuntime(ctx)
   // Read per use rather than once here: the bound port is only known after the
   // server's listen callback has run. The host goes through `redirectHostFor`
-  // because a wildcard bind is not a name the browser can follow.
+  // so wildcard listeners map to loopback and bare IPv6 literals are bracketed.
   const baseUrl = (): string =>
-    webBaseUrl(redirectHostFor(host), webServer, webStartup?.port)
+    webBaseUrl(redirectHostFor(bindHost), webServer, webStartup?.port)
   const management = createAgyManagement({
     store,
     sessions,
@@ -203,18 +205,32 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     kind: 'exact',
     path: '/agy/oauth-callback',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
+      const base = baseUrl()
       // Loopback peers only: this route carries no authentication of its own,
       // so a LAN-bound server must not answer it for the network. The local
       // browser still completes a login (the wildcard listener accepts
       // loopback), which is the only case where the loopback redirect works at
       // all.
       if (!isLoopbackPeer(req.socket.remoteAddress)) {
-        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-        res.end('forbidden')
+        ctx.logger.warn(
+          `[dsh-agy] rejected OAuth callback request from non-loopback peer ${req.socket.remoteAddress ?? 'unknown'}`,
+        )
+        res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(renderCallbackHtml({
+          ok: false,
+          error: 'Forbidden: OAuth callback only accepts requests from loopback peers.',
+          baseUrl: base,
+        }))
         return
       }
-      const base = baseUrl()
-      const url = new URL(req.url ?? '/', base)
+      let url: URL
+      try {
+        url = new URL(req.url ?? '/', base)
+      } catch {
+        res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(renderCallbackHtml({ ok: false, error: 'Invalid callback URL', baseUrl: base }))
+        return
+      }
       const result = await management.handleCallback(url.searchParams).catch((error: unknown) => ({
         ok: false as const,
         error: error instanceof Error ? error.message : String(error),

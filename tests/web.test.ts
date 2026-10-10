@@ -177,14 +177,105 @@ describe('OAuth redirect base URL', () => {
   })
 
   it('builds the redirect from a followable host, not a wildcard bind', async () => {
-    // `--host 0.0.0.0` is a listen address: Google would send the browser to
-    // `http://0.0.0.0:3080/...`, which only some browsers map to loopback. Any
-    // specific host is kept verbatim so a NetBird-bound profile can still
-    // complete a login from a remote browser.
+    // Wildcard listen addresses (`0.0.0.0` or `::`) map to loopback (`127.0.0.1`
+    // or `[::1]`) because the OAuth callback only accepts loopback peers.
+    // Bare IPv6 addresses (e.g. `::1`) are wrapped in brackets so `new URL` accepts them.
     const { redirectHostFor } = await import('../src/web/plugin.ts')
     expect(redirectHostFor('0.0.0.0')).toBe('127.0.0.1')
-    expect(redirectHostFor('::')).toBe('127.0.0.1')
+    expect(redirectHostFor('::')).toBe('[::1]')
+    expect(redirectHostFor('::1')).toBe('[::1]')
     expect(redirectHostFor('127.0.0.1')).toBe('127.0.0.1')
-    expect(redirectHostFor('100.116.122.12')).toBe('100.116.122.12')
+    expect(redirectHostFor('localhost')).toBe('localhost')
+  })
+})
+
+describe('non-loopback web registration behavior', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.DSH_HOME
+    _resetAgyRuntimeForTest()
+  })
+
+  it('registers the OAuth callback and management RPC on a non-loopback bind', async () => {
+    process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'agy-web-test-'))
+    const { apply } = await import('../src/web/plugin.ts')
+
+    let registeredRoute: { path: string; handler: (req: any, res: any) => Promise<void> } | undefined
+    let registeredRpc: { path: string; fetch: Function } | undefined
+    const warnings: string[] = []
+
+    const webServer = {
+      host: '0.0.0.0',
+      port: 3080,
+      register: (route: any) => {
+        if (route.path === '/agy/oauth-callback') registeredRoute = route
+        return () => {}
+      },
+    }
+
+    const connection = {
+      fetch: {
+        register: (route: any) => {
+          if (route.path === '/api/agy') registeredRpc = route
+          return () => {}
+        },
+      },
+    }
+
+    const ctx = {
+      get: (name: string) => {
+        if (name === 'webServer') return webServer
+        if (name === 'connection') return connection
+        if (name === 'webStartup') return { host: '0.0.0.0', port: 3080 }
+        return undefined
+      },
+      inject: (deps: string[], cb: (subCtx: any) => void) => cb(ctx),
+      effect: (fn: () => unknown) => fn(),
+      logger: { warn: (msg: string) => { warnings.push(msg) } },
+      emit: () => {},
+    }
+
+    apply(ctx as never)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // The core 404 fix: both the callback route and the management RPC MUST be registered on 0.0.0.0
+    expect(registeredRoute, 'OAuth callback route must be registered on non-loopback bind').toBeDefined()
+    expect(registeredRpc, 'management RPC must be registered on non-loopback bind').toBeDefined()
+    expect(warnings.some((w) => w.includes('non-loopback'))).toBe(true)
+
+    // Behavioral assertion: non-loopback peer is rejected with 403 HTML and a warning
+    let status: number | undefined
+    let headers: Record<string, string> | undefined
+    let body = ''
+    const res = {
+      writeHead: (s: number, h?: Record<string, string>) => { status = s; headers = h },
+      end: (b?: string) => { body = b ?? '' },
+    }
+
+    const remoteReq = {
+      socket: { remoteAddress: '192.168.1.100' },
+      url: '/agy/oauth-callback?code=abc',
+    }
+    await registeredRoute!.handler(remoteReq, res)
+    expect(status).toBe(403)
+    expect(headers?.['content-type']).toContain('text/html')
+    expect(body).toContain('Forbidden')
+    expect(warnings.some((w) => w.includes('rejected OAuth callback request from non-loopback peer'))).toBe(true)
+
+    // Behavioral assertion: loopback peer is admitted past the peer gate
+    let localStatus: number | undefined
+    let localBody = ''
+    const localRes = {
+      writeHead: (s: number) => { localStatus = s },
+      end: (b?: string) => { localBody = b ?? '' },
+    }
+    const localReq = {
+      socket: { remoteAddress: '127.0.0.1' },
+      url: '/agy/oauth-callback?code=abc',
+    }
+    await registeredRoute!.handler(localReq, localRes)
+    // Passes the peer check; returns 400 because there is no pending auth attempt (not 403)
+    expect(localStatus).toBe(400)
+    expect(localBody).not.toContain('Forbidden')
   })
 })
