@@ -6,6 +6,7 @@ import { createAgyManagement } from '../src/web/management.ts'
 import { UsageStats, noopStatsLock } from '../src/stats.ts'
 import { ModelVisibility } from '../src/model-visibility.ts'
 import { ThinkingBudgetStore } from '../src/thinking-budget.ts'
+import { MultimodalConfigStore } from '../src/multimodal-config.ts'
 import { UiPrefsStore } from '../src/ui-prefs.ts'
 import type { AccountStore } from '../src/store/accounts.ts'
 import type { AgySessionManager } from '../src/session.ts'
@@ -121,6 +122,8 @@ function makeHarness(options: {
   // host uses rather than a stub that could accept anything.
   const thinkingFile = join(mkdtempSync(join(tmpdir(), 'agy-thinking-rpc-')), 'agy-thinking.json')
   const thinkingBudget = new ThinkingBudgetStore({ file: thinkingFile })
+  const multimodalFile = join(mkdtempSync(join(tmpdir(), 'agy-multimodal-rpc-')), 'agy-multimodal.json')
+  const multimodalConfig = new MultimodalConfigStore({ file: multimodalFile })
   const prefsFile = join(mkdtempSync(join(tmpdir(), 'agy-ui-prefs-rpc-')), 'agy-ui-prefs.json')
   const uiPrefs = new UiPrefsStore(prefsFile)
   const management = createAgyManagement({
@@ -136,6 +139,10 @@ function makeHarness(options: {
       setClaude: (value) => thinkingBudget.setClaudeBudget(value).claudeBudget,
       tiered: () => thinkingBudget.tieredBudget(),
       setTiered: (value) => thinkingBudget.setTieredBudget(value).tieredBudget,
+    },
+    multimodal: {
+      get: () => multimodalConfig.snapshot(),
+      set: (value) => multimodalConfig.setMaxInlineMb(value),
     },
     notifyModelsChanged: () => { notifications += 1 },
     invalidateModelCache: () => { cacheInvalidations += 1 },
@@ -522,6 +529,64 @@ describe('agy management RPC', () => {
         .rejects.toThrow(/level is required/)
       await expect(management.call('thinking.set', { level: 'high', budget: '100' }))
         .rejects.toThrow(/must be a number/)
+    })
+  })
+
+  describe('multimodal inline cap', () => {
+    it('starts unset on the built-in default', async () => {
+      // Unset is the shipped state: `value` null with source 'default' means the
+      // resolver falls back to its 20MB constant, so nothing changes for a user
+      // who never opens this card.
+      const { management } = makeHarness()
+      expect(await management.call('multimodal.get', {})).toEqual({
+        value: null,
+        source: 'default',
+        max: 100,
+      })
+    })
+
+    it('sets, reads and clears the cap', async () => {
+      const { management } = makeHarness()
+      const set = await management.call('multimodal.set', { maxInlineMb: 30 }) as {
+        value: number | null
+        source: string
+      }
+      expect(set).toEqual({ value: 30, source: 'stored', max: 100 })
+      expect(await management.call('multimodal.get', {})).toEqual({ value: 30, source: 'stored', max: 100 })
+
+      // Clearing is its own action: `null` and an omitted value both mean "no
+      // stored override", which is distinct from storing 0 (which is rejected).
+      expect((await management.call('multimodal.set', { maxInlineMb: null }) as { value: number | null }).value).toBeNull()
+      await management.call('multimodal.set', { maxInlineMb: 30 })
+      expect((await management.call('multimodal.set', {}) as { value: number | null }).value).toBeNull()
+    })
+
+    it('rejects out-of-interval and non-numeric values with a legible message', async () => {
+      const { management } = makeHarness()
+      await expect(management.call('multimodal.set', { maxInlineMb: 0 })).rejects.toThrow(/\[1, 100\]/)
+      await expect(management.call('multimodal.set', { maxInlineMb: 101 })).rejects.toThrow(/\[1, 100\]/)
+      await expect(management.call('multimodal.set', { maxInlineMb: 1.5 })).rejects.toThrow(/\[1, 100\]/)
+      await expect(management.call('multimodal.set', { maxInlineMb: '30' }))
+        .rejects.toThrow(/maxInlineMb must be a number/)
+      // A rejected write must not have stored anything.
+      expect((await management.call('multimodal.get', {}) as { value: number | null }).value).toBeNull()
+    })
+
+    it('reports env as the effective source while keeping the stored value visible', async () => {
+      // The two fields answer different questions, which is why the view carries
+      // both: `value` is what the card's box edits, `source` is what the next
+      // request will actually use. Reporting only one makes a stored-but-
+      // overridden setting look either unset or in force.
+      const { management } = makeHarness()
+      await management.call('multimodal.set', { maxInlineMb: 30 })
+      vi.stubEnv('DSH_AGY_MULTIMODAL_MAX_INLINE_MB', '7')
+      try {
+        expect(await management.call('multimodal.get', {})).toEqual({ value: 30, source: 'env', max: 100 })
+      } finally {
+        vi.unstubAllEnvs()
+      }
+      // With the override gone the stored value is back in force.
+      expect(await management.call('multimodal.get', {})).toEqual({ value: 30, source: 'stored', max: 100 })
     })
   })
 

@@ -1460,6 +1460,29 @@ describe('pinned test call (management "Test call" per account row)', () => {
     expect(result.ok).toBe(true)
     expect(streams).toHaveLength(1)
   })
+
+  it('fails cleanly on stream idle timeout when the body stalls', async () => {
+    // If the stream produces no bytes, testCall bounds the gap via the idle
+    // watchdog rather than hanging the management RPC indefinitely.
+    const stalledStream = new ReadableStream<Uint8Array>({
+      start() { /* stalls without close */ },
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('token')) {
+        return new Response(JSON.stringify({ access_token: 'at-a', expires_in: 3600 }), { status: 200 })
+      }
+      return new Response(stalledStream, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }))
+    const store = new InMemoryAccountStore(storage([account('a@x')], 0))
+    const sessions = new AgySessionManager({ store })
+    const result = await sessions.testCall('gemini-3.6-flash-high', { idleTimeoutMs: 25 })
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/idle timeout: no data received/)
+  })
 })
 
 describe('project-healing routing (issue #29)', () => {

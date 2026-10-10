@@ -4,7 +4,12 @@ import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
-import { parseAgySse, parseSseDataLine } from '../src/adapter/parse.ts'
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  parseAgySse,
+  parseSseDataLine,
+  resolveStreamIdleTimeoutMs,
+} from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId } from '../src/adapter/catalog.ts'
 import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
@@ -1307,6 +1312,134 @@ describe('parseAgySse', () => {
     ])))
     expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
+
+  it('fails a stalled body on the idle timeout instead of hanging forever', async () => {
+    // The streaming dispatcher runs with `bodyTimeout: 0` on purpose (a
+    // reasoning pause must not be killed mid-turn), so a body that stops
+    // producing bytes without closing has no transport-level reclaim: without
+    // the watchdog this read never settles and the turn hangs until the user
+    // cancels it.
+    const encoder = new TextEncoder()
+    const stalled = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}]\n'))
+        // ...and then nothing: no further byte, no close.
+      },
+    })
+    const iterator = parseAgySse(stalled, { idleTimeoutMs: 25 })[Symbol.asyncIterator]()
+    expect((await iterator.next()).value).toMatchObject({ type: 'block-start' })
+    expect((await iterator.next()).value).toMatchObject({ type: 'text-delta', text: 'partial' })
+    await expect(iterator.next()).rejects.toThrow(/idle timeout: no data received/)
+  })
+
+  it('keeps waiting on a silent-but-alive body when the watchdog is disabled', async () => {
+    const encoder = new TextEncoder()
+    let push!: (line: string) => void
+    let close!: () => void
+    const live = new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        close = () => controller.close()
+      },
+    })
+    const iterator = parseAgySse(live, { idleTimeoutMs: 0 })[Symbol.asyncIterator]()
+    const firstPull = iterator.next()
+    // Silence longer than the 25ms the watchdog above tolerates: with the
+    // watchdog disabled a slow-but-alive body must be given all the time it
+    // needs (a generator may legitimately stay silent while it reasons).
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    push('data: [{"candidates":[{"content":{"parts":[{"text":"late"}]},"finishReason":"STOP"}]}]')
+    push('data: [DONE]')
+    close()
+    const chunks: Array<{ type: string; text?: string }> = []
+    for (let next = await firstPull; next.done !== true; next = await iterator.next()) {
+      chunks.push(next.value as { type: string; text?: string })
+    }
+    expect(chunks.some((chunk) => chunk.text === 'late')).toBe(true)
+  })
+
+  it('stops waiting for a stalled body the moment the request is aborted', async () => {
+    // The read loop only checks `signal.aborted` BETWEEN reads, so without an
+    // abort leg a cancelled turn keeps waiting out the whole idle window.
+    const controller = new AbortController()
+    const stalled = new ReadableStream<Uint8Array>({ start() { /* never produces */ } })
+    const iterator = parseAgySse(stalled, {
+      idleTimeoutMs: 60_000,
+      signal: controller.signal,
+    })[Symbol.asyncIterator]()
+    const pull = iterator.next()
+    controller.abort()
+    await expect(pull).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('flushes stashed usage when an in-flight read is aborted', async () => {
+    const encoder = new TextEncoder()
+    let push!: (line: string) => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    const controller = new AbortController()
+    const live = new ReadableStream<Uint8Array>({
+      start(c) {
+        push = (line) => c.enqueue(encoder.encode(line + '\n'))
+        streamReady()
+      },
+    })
+    const iterator = parseAgySse(live, { signal: controller.signal, idleTimeoutMs: 60_000 })[Symbol.asyncIterator]()
+    const pull = iterator.next()
+    await ready
+    push('data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}]')
+    const first = await pull
+    expect(first.value).toMatchObject({ type: 'block-start', blockType: 'reasoning' })
+    const second = await iterator.next()
+    expect(second.value).toMatchObject({ type: 'reasoning-delta', text: 'thinking' })
+    // Now that the first event is fully drained, the generator awaits the next read:
+    const abortPull = iterator.next()
+    controller.abort()
+    // The abort must flush the stashed usage before rejecting:
+    const usageChunk = await abortPull
+    expect(usageChunk.value).toMatchObject({
+      type: 'usage',
+      usage: { inputTokens: 10, outputTokens: 3 },
+    })
+    await expect(iterator.next()).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+describe('resolveStreamIdleTimeoutMs', () => {
+  afterEach(() => {
+    delete process.env.DSH_AGY_IDLE_TIMEOUT_MS
+    delete process.env.AGY_IDLE_TIMEOUT_MS
+  })
+
+  it('returns the default 180s when unset', () => {
+    expect(resolveStreamIdleTimeoutMs()).toBe(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+  })
+
+  it('parses valid positive values from DSH_AGY_IDLE_TIMEOUT_MS', () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '60000'
+    expect(resolveStreamIdleTimeoutMs()).toBe(60000)
+  })
+
+  it('allows explicit 0 to disable the watchdog', () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '0'
+    expect(resolveStreamIdleTimeoutMs()).toBe(0)
+  })
+
+  it('falls back to AGY_IDLE_TIMEOUT_MS when DSH_ prefix is unset or empty', () => {
+    process.env.AGY_IDLE_TIMEOUT_MS = '30000'
+    expect(resolveStreamIdleTimeoutMs()).toBe(30000)
+
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '   '
+    expect(resolveStreamIdleTimeoutMs()).toBe(30000)
+  })
+
+  it('falls back to default on negative or non-numeric values instead of disabling', () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '-1'
+    expect(resolveStreamIdleTimeoutMs()).toBe(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = 'invalid'
+    expect(resolveStreamIdleTimeoutMs()).toBe(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+  })
 })
 
 describe('models', () => {
@@ -1825,7 +1958,11 @@ describe('buildRequestHeaders', () => {
 })
 
 describe('AgyAdapter', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.DSH_AGY_IDLE_TIMEOUT_MS
+    delete process.env.AGY_IDLE_TIMEOUT_MS
+  })
 
   function session(overrides: Partial<AgyAccountSession> = {}): AgyAccountSession {
     return {
@@ -2122,6 +2259,144 @@ describe('AgyAdapter', () => {
     // Re-sampling now would replay a turn the consumer has already seen, so the
     // fail-safe fallthrough must fire with ZERO retries.
     expect(callCount).toBe(1)
+  })
+
+  it('surfaces a stalled stream as retryable TIMEOUT while nothing was delivered', async () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '25'
+    const failures: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      // Accepted, then silence: not a byte, not a close — the shape a proxy or
+      // a black-holed upstream leaves behind.
+      start() {},
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'TIMEOUT' })
+    // Nothing reached the consumer, so DSH's retry replays a turn the user never
+    // saw; the account still absorbs the transient, and the retry stays DSH's.
+    expect(failures).toEqual(['network-error'])
+  })
+
+  it('bills a stalled attempt with the totals the upstream already reported', async () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '25'
+    const encoder = new TextEncoder()
+    const billed: Array<{
+      reason?: string
+      usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+    }> = []
+    let push!: (line: string) => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        streamReady()
+      },
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { billed.push({ reason: record.reason, usage: record.usage }) },
+    })
+
+    const drain = (async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    })()
+    await ready
+    // Reasoning plus the totals the upstream reports alongside it: the adapter
+    // holds the reasoning, so nothing is committed and the attempt stays
+    // retryable — but those tokens were really spent, and the ledger accumulates
+    // per attempt. The stash reaches the caller only because the watchdog
+    // flushes it before propagating the timeout.
+    push('data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}]')
+    await expect(drain).rejects.toMatchObject({ code: 'TIMEOUT' })
+    expect(billed).toEqual([{
+      reason: 'network-error',
+      usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0 },
+    }])
+  })
+
+  it('bills an aborted attempt with the totals the upstream already reported', async () => {
+    const encoder = new TextEncoder()
+    const billed: Array<{
+      reason?: string
+      usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+    }> = []
+    let push!: (line: string) => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        streamReady()
+      },
+    }), { status: 200 })))
+
+    const controller = new AbortController()
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (record) => { billed.push({ reason: record.reason, usage: record.usage }) },
+    })
+
+    const drain = (async () => {
+      for await (const _ of adapter.stream(generateOptions({ signal: controller.signal }))) void _
+    })()
+    await ready
+    push('data: [{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}]')
+    // Give parseAgySse time to process the SSE chunk and stash usage
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    controller.abort()
+    await expect(drain).rejects.toMatchObject({ code: 'ABORTED' })
+    expect(billed).toEqual([{
+      reason: 'aborted',
+      usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0 },
+    }])
+  })
+
+  it('keeps a stall terminal once a text-delta was handed to the consumer', async () => {
+    process.env.DSH_AGY_IDLE_TIMEOUT_MS = '25'
+    const encoder = new TextEncoder()
+    const failures: string[] = []
+    let push!: (line: string) => void
+    let streamReady!: () => void
+    const ready = new Promise<void>((resolve) => { streamReady = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (line) => controller.enqueue(encoder.encode(line + '\n'))
+        streamReady()
+      },
+    }), { status: 200 })))
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+
+    const iterator = adapter.stream(generateOptions())[Symbol.asyncIterator]()
+    const firstPull = iterator.next()
+    // The fetch stub builds the body lazily, so wait for the stream to exist
+    // before feeding it (same shape as the buffered-reasoning test above).
+    await ready
+    push('data: [{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}]')
+    const seen: string[] = []
+    for (let next = await firstPull; next.done !== true; next = await iterator.next()) {
+      seen.push(next.value.type)
+      if (seen.includes('text-delta')) break
+    }
+    expect(seen).toContain('text-delta')
+    // Past the hand-off the turn is content the consumer already holds, so
+    // retrying would replay a partially-delivered turn: it stays the same
+    // terminal UPSTREAM every other mid-body death produces.
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'UPSTREAM' })
+    expect(failures).toEqual(['network-error'])
   })
 
   it('persists the thought signature of a recovered attempt but never of a discarded one', async () => {
@@ -2588,6 +2863,51 @@ describe('AgyAdapter', () => {
       })
     } finally {
       await fs.promises.unlink(tmpFile).catch(() => {})
+    }
+  })
+
+  it('caps inlining through the maxInlineBytes resolver, dropping the file from the body', async () => {
+    // End-to-end wiring proof: the adapter's RESOLVER (not a snapshot) reaches
+    // `resolveMultimodalFiles`, so a settings save applies to the next request.
+    // The cap is deliberately 1 byte here, so the real temp file below is over
+    // it and the assertion does not depend on how big the fixture happens to be.
+    let capturedBody: any
+    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: any) => {
+      capturedBody = JSON.parse(init.body as string)
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-adapter-cap-'))
+    const tmpFile = path.join(tmpDir, 'capped.pdf')
+    fs.writeFileSync(tmpFile, 'PDF dummy content')
+    const fileText = `[File "capped.pdf" (18 bytes, sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef): verbatim read-only copy saved at "${tmpFile}".]`
+    const messages = [
+      {
+        id: 'msg-1',
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: fileText }],
+      },
+    ]
+
+    try {
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+        maxInlineBytes: () => 1,
+      })
+      for await (const _ of adapter.stream(generateOptions({ model: 'gemini-3.8-flash-tiered', messages }))) {
+        void _
+      }
+      const parts = capturedBody.request.contents[0].parts
+      // The text handle survives — that is the whole contract for a skipped
+      // file: the model can still read it with its file tools.
+      expect(parts).toEqual([{ text: fileText }])
+      expect(JSON.stringify(parts)).not.toContain('inlineData')
+    } finally {
+      await fs.promises.rm(tmpDir, { recursive: true, force: true })
     }
   })
 

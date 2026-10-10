@@ -156,4 +156,133 @@ describe('OAuth redirect base URL', () => {
     expect(webBaseUrl('127.0.0.1', {}, 4000)).toBe('http://127.0.0.1:4000')
     expect(webBaseUrl('127.0.0.1', {}, undefined)).toBe('http://127.0.0.1:3080')
   })
+
+  it('answers the OAuth callback for loopback peers only', async () => {
+    // The route carries no authentication of its own, so a LAN-bound server must
+    // not answer it for the network. It is still REGISTERED on such a bind: the
+    // browser redirect that completes a local login has to land somewhere, and
+    // refusing every peer (as the old bind-address gate did) removed the whole
+    // management surface instead, leaving the Settings section calling
+    // `/api/agy` against a 404.
+    const { isLoopbackPeer } = await import('../src/web/plugin.ts')
+    expect(isLoopbackPeer('127.0.0.1')).toBe(true)
+    expect(isLoopbackPeer('127.0.0.5')).toBe(true)
+    expect(isLoopbackPeer('::1')).toBe(true)
+    expect(isLoopbackPeer('::ffff:127.0.0.1')).toBe(true)
+    expect(isLoopbackPeer('100.116.122.12')).toBe(false)
+    expect(isLoopbackPeer('192.168.1.20')).toBe(false)
+    expect(isLoopbackPeer('::ffff:100.116.122.12')).toBe(false)
+    // An absent address is refused rather than assumed local.
+    expect(isLoopbackPeer(undefined)).toBe(false)
+  })
+
+  it('builds the redirect from a followable host, not a wildcard bind', async () => {
+    // Wildcard listen addresses (`0.0.0.0` or `::`, in either bracketed or bare
+    // form) map to loopback (`127.0.0.1` / `[::1]`) because the OAuth callback
+    // only accepts loopback peers. Bare IPv6 addresses (e.g. `::1`) are wrapped
+    // in brackets so `new URL` accepts them.
+    const { redirectHostFor } = await import('../src/web/plugin.ts')
+    expect(redirectHostFor('0.0.0.0')).toBe('127.0.0.1')
+    expect(redirectHostFor('::')).toBe('[::1]')
+    expect(redirectHostFor('[::]')).toBe('[::1]')
+    expect(redirectHostFor('::1')).toBe('[::1]')
+    expect(redirectHostFor('127.0.0.1')).toBe('127.0.0.1')
+    expect(redirectHostFor('localhost')).toBe('localhost')
+    // Whatever it returns must be a base `webBaseUrl` can hand to `new URL`:
+    // the bracketed form is the only one that parses.
+    for (const host of ['0.0.0.0', '::', '[::]', '::1', '127.0.0.1', 'localhost']) {
+      expect(() => new URL('/cb', `http://${redirectHostFor(host)}:3080`)).not.toThrow()
+    }
+  })
+})
+
+describe('non-loopback web registration behavior', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.DSH_HOME
+    _resetAgyRuntimeForTest()
+  })
+
+  it('registers the OAuth callback and management RPC on a non-loopback bind', async () => {
+    process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'agy-web-test-'))
+    const { apply } = await import('../src/web/plugin.ts')
+
+    let registeredRoute: { path: string; handler: (req: any, res: any) => Promise<void> } | undefined
+    let registeredRpc: { path: string; fetch: Function } | undefined
+    const warnings: string[] = []
+
+    const webServer = {
+      host: '0.0.0.0',
+      port: 3080,
+      register: (route: any) => {
+        if (route.path === '/agy/oauth-callback') registeredRoute = route
+        return () => {}
+      },
+    }
+
+    const connection = {
+      fetch: {
+        register: (route: any) => {
+          if (route.path === '/api/agy') registeredRpc = route
+          return () => {}
+        },
+      },
+    }
+
+    const ctx = {
+      get: (name: string) => {
+        if (name === 'webServer') return webServer
+        if (name === 'connection') return connection
+        if (name === 'webStartup') return { host: '0.0.0.0', port: 3080 }
+        return undefined
+      },
+      inject: (deps: string[], cb: (subCtx: any) => void) => cb(ctx),
+      effect: (fn: () => unknown) => fn(),
+      logger: { warn: (msg: string) => { warnings.push(msg) } },
+      emit: () => {},
+    }
+
+    apply(ctx as never)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // The core 404 fix: both the callback route and the management RPC MUST be registered on 0.0.0.0
+    expect(registeredRoute, 'OAuth callback route must be registered on non-loopback bind').toBeDefined()
+    expect(registeredRpc, 'management RPC must be registered on non-loopback bind').toBeDefined()
+    expect(warnings.some((w) => w.includes('non-loopback'))).toBe(true)
+
+    // Behavioral assertion: non-loopback peer is rejected with 403 HTML and a warning
+    let status: number | undefined
+    let headers: Record<string, string> | undefined
+    let body = ''
+    const res = {
+      writeHead: (s: number, h?: Record<string, string>) => { status = s; headers = h },
+      end: (b?: string) => { body = b ?? '' },
+    }
+
+    const remoteReq = {
+      socket: { remoteAddress: '192.168.1.100' },
+      url: '/agy/oauth-callback?code=abc',
+    }
+    await registeredRoute!.handler(remoteReq, res)
+    expect(status).toBe(403)
+    expect(headers?.['content-type']).toContain('text/html')
+    expect(body).toContain('Forbidden')
+    expect(warnings.some((w) => w.includes('rejected OAuth callback request from non-loopback peer'))).toBe(true)
+
+    // Behavioral assertion: loopback peer is admitted past the peer gate
+    let localStatus: number | undefined
+    let localBody = ''
+    const localRes = {
+      writeHead: (s: number) => { localStatus = s },
+      end: (b?: string) => { localBody = b ?? '' },
+    }
+    const localReq = {
+      socket: { remoteAddress: '127.0.0.1' },
+      url: '/agy/oauth-callback?code=abc',
+    }
+    await registeredRoute!.handler(localReq, localRes)
+    // Passes the peer check; returns 400 because there is no pending auth attempt (not 403)
+    expect(localStatus).toBe(400)
+    expect(localBody).not.toContain('Forbidden')
+  })
 })

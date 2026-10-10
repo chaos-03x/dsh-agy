@@ -16,6 +16,7 @@ export const zh = {
 
   tabAccounts: '账号',
   tabModels: '模型',
+  tabConfig: '配置',
   tabUsage: '用量',
   tabCredentials: '凭据',
 
@@ -119,6 +120,7 @@ export const zh = {
   cooldownReasonQuotaExhausted: '额度耗尽',
   cooldownReasonValidationRequired: '需要验证',
   cooldownReasonProjectError: '项目错误',
+  reasonAborted: '已取消',
 
   fieldSources: '调用来源',
   fieldLatency: '延迟',
@@ -240,6 +242,25 @@ export const zh = {
   thinkingClaudeMaxTokens: '必须小于单次回复上限，否则不发送。',
   thinkingClaudeNoReport: '上游不回报实际思考量，故无参考表。',
   thinkingInvalid: '请填整数。',
+  multimodalTitle: '多模态内联上限',
+  multimodalLabel: '单文件上限',
+  // A bare unit, not "MB per file": the label beside it already says what the
+  // number counts, and repeating it made the row read as two labels.
+  multimodalUnit: 'MB',
+  multimodalAuto: '默认',
+  multimodalClear: '清除',
+  // States the CONTRACT, not the mechanism: a skipped file keeps its handle in
+  // the prompt, so the model can still open it with its file tools — which is
+  // the reassurance a user needs, since nothing in the chat says a file was not
+  // attached.
+  multimodalHint: '超过上限的文件不会被内联发送，但它的文件句柄仍留在对话里，模型依然可以用文件工具读取。',
+  multimodalInvalid: '请填整数。',
+  multimodalRange: '请填 {min}–{max} 之间的整数。',
+  multimodalSourceDefault: '未设置 · 默认 {default} MB',
+  multimodalSourceStored: '已保存的设置生效中',
+  // Names the env var: a GUI user who set it (headless/scripted) otherwise has
+  // no way to see WHY the box they just saved to has no effect.
+  multimodalSourceEnv: '环境变量 DSH_AGY_MULTIMODAL_MAX_INLINE_MB 优先于此处设置。',
   modelsTitle: '模型可见性',
   modelsHelp: '关闭开关后，该模型不再出现在对话框的模型选择里。黑名单制：只有被关闭的才隐藏，服务端新增的模型一律默认显示。',
   modelsHiddenSuffix: '当前已隐藏 {count} 个。',
@@ -266,6 +287,7 @@ export const en: Record<AgyLocaleKey, string> = {
 
   tabAccounts: 'Accounts',
   tabModels: 'Models',
+  tabConfig: 'Config',
   tabUsage: 'Usage',
   tabCredentials: 'Credentials',
 
@@ -355,6 +377,7 @@ export const en: Record<AgyLocaleKey, string> = {
   cooldownReasonQuotaExhausted: 'quota exhausted',
   cooldownReasonValidationRequired: 'verification required',
   cooldownReasonProjectError: 'project error',
+  reasonAborted: 'cancelled',
 
   fieldSources: 'Call sources',
   fieldLatency: 'Latency',
@@ -472,6 +495,17 @@ export const en: Record<AgyLocaleKey, string> = {
   thinkingClaudeMaxTokens: 'Must be below the reply limit, or it is not sent.',
   thinkingClaudeNoReport: 'Upstream does not report thinking tokens, so there is no reference table.',
   thinkingInvalid: 'Enter a whole number.',
+  multimodalTitle: 'Multimodal inline limit',
+  multimodalLabel: 'Per file',
+  multimodalUnit: 'MB',
+  multimodalAuto: 'default',
+  multimodalClear: 'Clear',
+  multimodalHint: 'A file over the limit is not inlined, but its file handle stays in the conversation and the model can still read it with its file tools.',
+  multimodalInvalid: 'Enter a whole number.',
+  multimodalRange: 'Enter a whole number between {min} and {max}.',
+  multimodalSourceDefault: 'Unset · default {default} MB',
+  multimodalSourceStored: 'Your saved setting is in force',
+  multimodalSourceEnv: 'The DSH_AGY_MULTIMODAL_MAX_INLINE_MB environment variable overrides the setting here.',
   modelsTitle: 'Model visibility',
   modelsHelp: 'Switching a model off removes it from the model picker. Blacklist semantics: only models you switch off are hidden, so models the server adds later stay visible.',
   modelsHiddenSuffix: '{count} hidden right now.',

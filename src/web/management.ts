@@ -36,6 +36,7 @@ import type {
   AccountView,
   AgyRpcMethod,
   ModelView,
+  MultimodalView,
   RangeBreakdown,
   StatsView,
   ThinkingBudgets,
@@ -73,6 +74,20 @@ export interface AgyManagementOptions {
     setClaude: (value: number | undefined) => number | undefined
     tiered: () => number | undefined
     setTiered: (value: number | undefined) => number | undefined
+  }
+  /**
+   * The per-file inline cap for non-image multimodal files (see
+   * `multimodal-config.ts`).
+   *
+   * A duck-typed accessor pair, like `thinkingBudget` above, and REQUIRED rather
+   * than optional: this one has exactly two call sites in the codebase (the web
+   * entry and the test harness), so an omitted wiring would silently leave the
+   * card reading a second store's default instead of the runtime's — a mistake
+   * the compiler catches only while the field is required.
+   */
+  multimodal: {
+    get: () => MultimodalView
+    set: (value: number | undefined) => MultimodalView
   }
   /**
    * The adapter's *unfiltered* model catalog.
@@ -150,6 +165,7 @@ function toAccountUsageView(
 export function createAgyManagement(options: AgyManagementOptions): AgyManagement {
   const { store, sessions, stats, recentRequests, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
   const thinkingBudget = options.thinkingBudget
+  const multimodal = options.multimodal
   const uiPrefs = options.uiPrefs ?? new UiPrefsStore()
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
@@ -620,6 +636,24 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
     },
 
     'stats.get': async () => statsView(),
+
+    'multimodal.get': async () => multimodal.get(),
+
+    'multimodal.set': async (payload) => {
+      const body = payload as { maxInlineMb?: unknown } | undefined
+      // `undefined` and explicit null BOTH clear: the field means "no stored
+      // override", and a JSON null is how a cleared input arrives.
+      const raw = body?.maxInlineMb
+      if (raw !== undefined && raw !== null && typeof raw !== 'number') fail('maxInlineMb must be a number')
+      const value = raw === undefined || raw === null ? undefined : raw
+      try {
+        return multimodal.set(value)
+      } catch (error) {
+        // Surface the interval violation verbatim, like `thinking.set*`: the
+        // message names the accepted range, so the caller can correct it.
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    },
 
     'ui.prefs.get': async () => uiPrefs.get(),
 

@@ -292,6 +292,89 @@ describe('resolveMultimodalFiles', () => {
     expect(resolved.size).toBe(0)
   })
 
+  it('skips an over-cap file by declaration under an INJECTED cap, without reading it', async () => {
+    // The declared size is checked BEFORE the read, so an oversized file costs
+    // no I/O at all — and the check must use the INJECTED cap, not the 20MB
+    // constant, or a lowered setting would still inline up to 20MB.
+    const readFile = vi.fn()
+    const messages = [
+      {
+        id: 'msg-1',
+        role: 'user' as const,
+        content: [
+          {
+            type: 'text' as const,
+            text: makeDshFileText('big.pdf', 3 * 1024 * 1024, '/path/to/big.pdf'),
+          },
+        ],
+      },
+    ]
+
+    const resolved = await resolveMultimodalFiles(
+      { provider: 'agy', model: 'gemini-3.8-flash-tiered', messages } as GenerateOptions,
+      { readFile, maxBytes: 1024 * 1024 },
+    )
+
+    expect(readFile).not.toHaveBeenCalled()
+    expect(resolved.size).toBe(0)
+  })
+
+  it('allows a file exactly at the injected cap', async () => {
+    // `>` and not `>=`: the boundary is the largest file that may be inlined,
+    // and an off-by-one silently rejects the very value the user typed.
+    const cap = 1024
+    const readFile = vi.fn().mockResolvedValue(Buffer.alloc(cap))
+    const messages = [
+      {
+        id: 'msg-1',
+        role: 'user' as const,
+        content: [
+          {
+            type: 'text' as const,
+            text: makeDshFileText('exact.pdf', cap, '/path/to/exact.pdf'),
+          },
+        ],
+      },
+    ]
+
+    const resolved = await resolveMultimodalFiles(
+      { provider: 'agy', model: 'gemini-3.8-flash-tiered', messages } as GenerateOptions,
+      { readFile, maxBytes: cap },
+    )
+
+    expect(readFile).toHaveBeenCalledWith('/path/to/exact.pdf')
+    expect(resolved.get('msg-1')).toHaveLength(1)
+  })
+
+  it('catches a handle that under-declares its size with the SAME injected cap', async () => {
+    // The declared-size check is a cheap pre-filter, not a guarantee: the real
+    // bytes arrive only after the read. Both checks must therefore compare
+    // against one effective value — using the 20MB constant post-read would let
+    // a 2MB file through a 1MB setting.
+    const readFile = vi.fn().mockResolvedValue(Buffer.alloc(2 * 1024 * 1024))
+    const messages = [
+      {
+        id: 'msg-1',
+        role: 'user' as const,
+        content: [
+          {
+            type: 'text' as const,
+            // Declares 10 bytes; the read returns 2MB.
+            text: makeDshFileText('liar.pdf', 10, '/path/to/liar.pdf'),
+          },
+        ],
+      },
+    ]
+
+    const resolved = await resolveMultimodalFiles(
+      { provider: 'agy', model: 'gemini-3.8-flash-tiered', messages } as GenerateOptions,
+      { readFile, maxBytes: 1024 * 1024 },
+    )
+
+    expect(readFile).toHaveBeenCalledWith('/path/to/liar.pdf')
+    expect(resolved.size).toBe(0)
+  })
+
   it('silently ignores files when readFile throws (error resilience)', async () => {
     const readFile = vi.fn().mockRejectedValue(new Error('ENOENT: no such file or directory'))
     const messages = [

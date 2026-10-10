@@ -316,6 +316,11 @@ export const AGY_STYLES_CSS = `
   align-items: center; gap: 14px; padding: 8px 0;
 }
 .agy-thinking-k { font: var(--dsw-font-xxs-12); color: ${aliasVar('label-secondary')}; }
+/* The unit sits INSIDE the third column, left of the chips: that auto column is
+   what holds "what the number counts" next to the field it counts, and a unit
+   drifting to the input's far edge would read as a separate label. */
+.agy-input-unit { display: flex; align-items: center; gap: 8px;
+  font: var(--dsw-font-xxs-12); color: ${aliasVar('label-tertiary')}; }
 /* Shortcut chips, not a second control: they fill the field beside them. */
 .agy-thinking-chips { display: flex; gap: 6px; }
 .agy-thinking-chip {
