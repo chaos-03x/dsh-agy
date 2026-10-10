@@ -2460,6 +2460,51 @@ describe('AgyAdapter', () => {
     }
   })
 
+  it('caps inlining through the maxInlineBytes resolver, dropping the file from the body', async () => {
+    // End-to-end wiring proof: the adapter's RESOLVER (not a snapshot) reaches
+    // `resolveMultimodalFiles`, so a settings save applies to the next request.
+    // The cap is deliberately 1 byte here, so the real temp file below is over
+    // it and the assertion does not depend on how big the fixture happens to be.
+    let capturedBody: any
+    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: any) => {
+      capturedBody = JSON.parse(init.body as string)
+      return new Response(sseStream([
+        'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
+        'data: [DONE]',
+      ]), { status: 200 })
+    }))
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-adapter-cap-'))
+    const tmpFile = path.join(tmpDir, 'capped.pdf')
+    fs.writeFileSync(tmpFile, 'PDF dummy content')
+    const fileText = `[File "capped.pdf" (18 bytes, sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef): verbatim read-only copy saved at "${tmpFile}".]`
+    const messages = [
+      {
+        id: 'msg-1',
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: fileText }],
+      },
+    ]
+
+    try {
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+        maxInlineBytes: () => 1,
+      })
+      for await (const _ of adapter.stream(generateOptions({ model: 'gemini-3.8-flash-tiered', messages }))) {
+        void _
+      }
+      const parts = capturedBody.request.contents[0].parts
+      // The text handle survives — that is the whole contract for a skipped
+      // file: the model can still read it with its file tools.
+      expect(parts).toEqual([{ text: fileText }])
+      expect(JSON.stringify(parts)).not.toContain('inlineData')
+    } finally {
+      await fs.promises.rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it('reports and throws QUOTA (terminal) on daily quota exhaustion', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"status":"RESOURCE_EXHAUSTED"}}', { status: 429 })))
     const failures: Array<{ kind: string; session: AgyAccountSession }> = []
