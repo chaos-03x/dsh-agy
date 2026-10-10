@@ -699,6 +699,23 @@ describe('translate', () => {
     for (const nested of ['items']) {
       if (nested in node) assertUpstreamContract(node[nested], `${path}.${nested}`)
     }
+    // protobuf `Schema` has no "any item" form, so an array without `items` is
+    // rejected as `properties[<name>].items: missing field` (measured against
+    // gemini-3.8-flash: `research_audit_derivation.steps`). JSON Schema itself
+    // allows the omission, so the sanitizer supplies a typed one.
+    if (node.type === 'array') {
+      expect('items' in node, `${path}: array without items is rejected upstream`).toBe(true)
+    }
+    // The same "missing field" error is what a nested schema slot that
+    // declares neither `type` nor `properties` produces — those slots are the
+    // ones reached through `properties.*.items` / `.additionalProperties`.
+    const isNestedSlot = /\.(items|additionalProperties)(\.|$)/.test(path)
+    if (isNestedSlot) {
+      expect(
+        'type' in node || 'properties' in node,
+        `${path}: nested schema without type/properties is rejected upstream`,
+      ).toBe(true)
+    }
     // additionalProperties accepts a boolean (false = no extra keys) or a
     // nested schema — live-verified accepted by the Antigravity upstream.
     if ('additionalProperties' in node) {
@@ -756,6 +773,120 @@ describe('translate', () => {
       const body = toAgyRequestBody(generateOptions({ tools: [tool] }), {})
       assertUpstreamContract(body.request.tools![0].functionDeclarations[0].parameters)
     }
+  })
+
+  // Trigger: gemini-3.8-flash rejected the whole request with
+  // `GenerateContentRequest.tools[0].functionDeclarations[135].parameters
+  // .properties[steps].items: missing field.` The declaration is this
+  // register's own `research_audit_derivation` (`@suxeca/dsh-research-core`),
+  // whose parameter map declares `steps: {type:'array', required:true}` with
+  // no `items` — valid JSON Schema (DSH's enforced subset documents `items`
+  // as optional), impossible in protobuf Schema. Every shape below is copied
+  // from a LIVE registered tool schema, not invented:
+  //   research_audit_derivation.steps  — array, no items
+  //   research_audit_derivation.symbols — array, no items
+  //   research_hostile_review.claims    — array, no items
+  //   mcp__firecrawl__firecrawl_search.sources — items present, no `type`
+  //     (a keyword-only union carrier: `{anyOf:[...]}` — no `oneOf` keyword
+  //     survives the allowlist, so it reaches upstream typeless)
+  const ARRAY_ITEM_SHAPES = [{
+    name: 'research_audit_derivation',
+    description: '第一性原理推导审查',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '推导主题或命题名称' },
+        steps: {
+          type: 'array',
+          description: '推导步骤列表 [{ stepIndex, rawText, equation, classification, assumptions }]',
+        },
+        invariantObject: {
+          type: 'object',
+          description: '考察的组织对象',
+          additionalProperties: true,
+        },
+        symbols: { type: 'array', description: '符号与物理量纲列表 [{ symbol, dimension, rawUnit }]' },
+        axioms: { type: 'array', description: '显式公理起点/哈密顿量定义（Axioms/Postulates）', items: { type: 'string' } },
+      },
+      required: ['steps'],
+    },
+  }, {
+    name: 'mcp__firecrawl__firecrawl_search',
+    description: 'Search web, news, or image sources',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', minLength: 1, description: 'Query' },
+        sources: {
+          description: 'Search sources',
+          type: 'array',
+          items: {
+            anyOf: [
+              { type: 'string', enum: ['web', 'images', 'news', 'alexandria', 'exchange'] },
+              {
+                type: 'object',
+                properties: { type: { type: 'string', enum: ['web', 'images', 'news', 'alexandria', 'exchange'] } },
+                required: ['type'],
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
+      },
+      required: ['query'],
+    },
+  }]
+
+  it('gives an array without items a typed item schema (missing-field 400)', () => {
+    for (const tool of ARRAY_ITEM_SHAPES) {
+      const body = toAgyRequestBody(generateOptions({ tools: [tool] }), {})
+      const parameters = body.request.tools![0].functionDeclarations[0].parameters as {
+        properties: Record<string, Record<string, unknown>>
+      }
+      assertUpstreamContract(parameters)
+
+      const steps = parameters.properties.steps
+      if (steps) {
+        expect(steps.type).toBe('array')
+        expect(steps.items).toEqual({ type: 'string' })
+      }
+      for (const [name, child] of Object.entries(parameters.properties)) {
+        if (child.type !== 'array') continue
+        expect(child.items, `${name}: array must carry items upstream`).toBeDefined()
+        const items = child.items as Record<string, unknown>
+        // A declared `items` is preserved (never rewritten to the fallback),
+        // and it can never reach upstream typeless.
+        expect(typeof items.type, `${name}.items: must be typed upstream`).toBe('string')
+        if (name === 'sources') expect(items.type).toBe('string')
+      }
+    }
+  })
+
+  it('preserves a declared items schema byte-for-byte', () => {
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [{
+          name: 'x',
+          description: 'd',
+          parameters: {
+            type: 'object',
+            properties: {
+              steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              tags: { type: 'array', items: { type: 'string', enum: ['a', 'b'] } },
+              empty_items: { type: 'array', items: {} },
+            },
+          },
+        }],
+      }),
+      {},
+    )
+    const p = body.request.tools![0].functionDeclarations[0].parameters as {
+      properties: Record<string, Record<string, unknown>>
+    }
+    expect(p.properties.steps.items).toEqual({ type: 'object', additionalProperties: true })
+    expect(p.properties.tags.items).toEqual({ type: 'string', enum: ['a', 'b'] })
+    // An `items: {}` is typeless too, so it gets the same fallback.
+    expect(p.properties.empty_items.items).toEqual({ type: 'string' })
   })
 
   it('sanitizes tool names to the upstream charset and dedupes', () => {
