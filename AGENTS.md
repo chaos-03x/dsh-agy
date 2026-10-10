@@ -16,7 +16,7 @@ src/runtime/    State machine: 429 classification (classify), rotation decisions
 src/store/      Account storage: encrypted JSON file (accounts, proper-lockfile), master key / keyring doc (keyring),
                 data-dir layout + one-shot legacy migration (paths)
 src/session.ts  Shared runtime glue: token caching, rotation execution, fingerprint lifecycle, verify/test/export
-src/web/        Web plugin entry: management RPC (`/api/agy`) + OAuth callback route (loopback only)
+src/web/        Web plugin entry: management RPC (`/api/agy`) + OAuth callback route (loopback peers only)
 src/client/     Inline Settings section (browser half): 4 tabs over the management RPC,
                 UI primitives + bilingual dictionaries (locales.ts, styles.ts)
 src/stats.ts    Cumulative usage ledger ($DSH_HOME/agy/agy-stats.json)
@@ -43,7 +43,7 @@ redirects a browser to it with a GET.
 ## Non-negotiable Invariants (Violations are Regressions; all have test/code anchors)
 
 - **Security (Loopback Trust Model)**:
-  - The OAuth callback route has no authentication of its own and is ONLY allowed to register on loopback host bindings (`web/plugin.ts` gate). Management endpoints ride `/api/*`, which sits behind the host's browser-trust fence and BrowserAuth — that fence IS the defence, so a "confirm before export" parameter is deliberately absent: anything that can reach `/api/*` can already drive the Settings UI that exports the same blobs.
+  - The OAuth callback route has no authentication of its own and answers loopback peers only (`isLoopbackPeer`, `web/plugin.ts` gate); management endpoints ride `/api/*` behind the host's browser-trust fence and BrowserAuth.
   - The callback page is served by the same web server, and therefore the same origin, as the DSH GUI, so anything injected into it can reach `/api/agy` (where `account.exportAll` returns live credential blobs). Every interpolation is escaped (`escapeHtml`), and inline-`<script>` payloads go through `jsonForInlineScript` — `JSON.stringify` alone escapes for a JS string, not for the HTML script-data state, so a value containing `</script>` still breaks out.
   - OAuth exchanges MUST bind to the exact PKCE verifier issued for that authorization attempt (`pendingAuth` Map in `web/management.ts`, local verifier in CLI); relaxing this verification is a security regression.
   - No request field or telemetry payload may ever transmit a raw refresh token — `sessionId` must be a derived identifier.
