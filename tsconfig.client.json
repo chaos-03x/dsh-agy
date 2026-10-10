@@ -8,6 +8,6 @@
     "declarationMap": false,
     "sourceMap": false
   },
-  "include": ["src/client", "src/rpc-contract.ts", "src/usage-types.ts", "src/thinking-types.ts"],
+  "include": ["src/client", "src/rpc-contract.ts", "src/usage-types.ts", "src/thinking-types.ts", "src/multimodal-types.ts"],
   "exclude": ["src/stats.ts", "src/store"]
 }
