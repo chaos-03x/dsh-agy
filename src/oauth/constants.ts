@@ -84,12 +84,47 @@ export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403, 503])
 
 /** Routing of the requests being tried (see {@link AccountRouting}). */
 export type AgyFallbackOptions = Pick<AccountRouting, 'proxyUrl'>
+
+/**
+ * Endpoints that can speak for a consumer account.
+ *
+ * MEASURED 2026-10-25 (`scripts/diag-endpoints.mts`, both accounts, ~2s):
+ *   daily-cloudcode-pa.googleapis.com           200 in ~1.5-1.9s
+ *   daily-cloudcode-pa.sandbox.googleapis.com   200 in ~1.5s
+ *   cloudcode-pa.googleapis.com                 429 RESOURCE_EXHAUSTED, EVERY request
+ *   autopush-cloudcode-pa.sandbox...            403 HTML "no license", EVERY request
+ *
+ * The two tail hosts reject this class of account BY DESIGN, so a response from
+ * them must never become the request's verdict. Before this split, one transient
+ * 429/503 on `daily` walked the chain, and prod's permanent RESOURCE_EXHAUSTED
+ * ("Resource has been exhausted (e.g. check quota).") was classified as a daily
+ * quota wall: the account was parked for 24 hours and the user got a terminal
+ * QUOTA error, with the account's real quota at 85%.
+ */
+export const AGY_AUTHORITATIVE_ENDPOINTS: ReadonlySet<string> = new Set([
+  AGY_ENDPOINT_DAILY,
+  AGY_ENDPOINT_DAILY_SANDBOX,
+])
+
+/** Which endpoint produced a response, and whether it may speak for the account. */
+export interface AgyEndpointResponse {
+  response: Response
+  /** Base URL that produced `response`. */
+  endpoint: string
+  /** False for a tail host, whose rejection says nothing about this credential. */
+  authoritative: boolean
+}
+
 /**
  * Try each runtime endpoint in order, skipping unusable ones (429/403/503/network).
- * Returns the first other response (2xx or a real error like 400/401); when
- * every endpoint is unusable, returns the last skipped response so the caller's
- * classifier can still produce a meaningful error (a returned 503 becomes a
- * retryable SERVER failure rather than being swallowed here).
+ * Returns the first other response (2xx or a real error like 400/401), tagged
+ * with the endpoint that produced it.
+ *
+ * When every endpoint is unusable, returns the LAST SKIPPED response — but an
+ * authoritative endpoint's verdict wins over any tail endpoint's, so prod's
+ * permanent RESOURCE_EXHAUSTED can never overwrite `daily`'s real answer. The
+ * caller's classifier turns the returned response into a failure, and
+ * `authoritative` tells it how much weight that verdict deserves.
  *
  * When every endpoint fails at the network level, the LAST error is rethrown so
  * its cause survives (a generic "all endpoints failed" hid DNS/TLS/timeout).
@@ -99,18 +134,21 @@ export async function fetchAgyFirstOk(
   init: RequestInit,
   fetchImpl: typeof fetch = proxiedFetch,
   options: AgyFallbackOptions = {},
-): Promise<Response> {
-  let lastSkipped: Response | null = null
+): Promise<AgyEndpointResponse> {
+  let lastSkipped: AgyEndpointResponse | null = null
   let lastNetworkError: unknown
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
+    const authoritative = AGY_AUTHORITATIVE_ENDPOINTS.has(baseEndpoint)
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
-      if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
-      // Prefer keeping a 429 or 503 response from earlier production endpoints
-      // rather than letting the internal autopush sandbox 403 (which always fails for
-      // consumer accounts with "no license") overwrite the real rate-limit/capacity signal.
-      if (!lastSkipped || (baseEndpoint !== AGY_ENDPOINT_AUTOPUSH && (response.status === 429 || response.status === 503))) {
-        lastSkipped = response
+      if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) {
+        return { response, endpoint: baseEndpoint, authoritative }
+      }
+      // Keep the verdict a real endpoint gave us: the first authoritative skip
+      // wins (daily over daily-sandbox), and a tail host's 403/RESOURCE_EXHAUSTED
+      // never displaces it.
+      if (!lastSkipped || (authoritative && !lastSkipped.authoritative)) {
+        lastSkipped = { response, endpoint: baseEndpoint, authoritative }
       }
     } catch (error) {
       lastNetworkError = error

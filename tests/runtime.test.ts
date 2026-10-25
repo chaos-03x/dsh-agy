@@ -15,6 +15,7 @@ import {
   pickNextAccountIndex,
   pickProbeProxyUrl,
   recordRateLimit,
+  PROJECT_ERROR_COOLDOWN_MS,
   VERIFICATION_COOLDOWN_MS,
   WEEKLY_QUOTA_THRESHOLD,
 } from '../src/runtime/rotation.ts'
@@ -76,8 +77,11 @@ describe('classifyHttpError', () => {
     expect(rate.rateLimitCategory).toBe('rate_limited')
     const unknown = classifyHttpError(429, new Headers(), '{}')
     expect(unknown.rateLimitCategory).toBe('unknown')
+    // MEASURED: a bare RESOURCE_EXHAUSTED ("Resource has been exhausted (e.g.
+    // check quota).") is prod's permanent answer for this class of account, NOT
+    // a spent quota — reading it as one parked a healthy 85% account for 24h.
     const resource = classifyHttpError(429, new Headers(), JSON.stringify({ error: { status: 'RESOURCE_EXHAUSTED' } }))
-    expect(resource.rateLimitCategory).toBe('quota_exhausted')
+    expect(resource.rateLimitCategory).toBe('rate_limited')
   })
 
   it('classifies 401 and plain 403 as auth-failure', () => {
@@ -95,6 +99,42 @@ describe('classifyHttpError', () => {
     expect(quota.rateLimitCategory).toBe('quota_exhausted')
     const plain = classifyHttpError(403, new Headers(), '{"error":"access_denied"}')
     expect(plain.kind).toBe('auth-failure')
+  })
+
+  it('classifies GRANT-wall 403 wording as project-error, never as a dead credential', () => {
+    // Issue #114: seven measured wordings plus a bare PERMISSION_DENIED on a live
+    // token. auth-failure is TERMINAL (enabled=false, action 'revoke'), so a
+    // misread here revokes a healthy account and forces a re-login.
+    const bodies = [
+      'You are not eligible for this model',
+      'The caller is not entitled to this model',
+      'no active entitlement for this project',
+      'onboarding required before using this model',
+      'premium provisioning pending',
+      'a valid license is required',
+      'subscription_required',
+      JSON.stringify({ error: { status: 'PERMISSION_DENIED' } }),
+    ]
+    for (const body of bodies) {
+      expect(classifyHttpError(403, new Headers(), body).kind, body).toBe('project-error')
+    }
+  })
+
+  it('degrades a non-authoritative endpoint verdict before it reaches the account', () => {
+    // prod / autopush reject this credit class BY DESIGN (measured 2026-10-25),
+    // so their answer must never revoke or quota-park an account.
+    const fromProd = classifyHttpError(
+      429,
+      new Headers(),
+      JSON.stringify({ error: { status: 'RESOURCE_EXHAUSTED', message: 'Individual quota reached.' } }),
+      { authoritative: false },
+    )
+    expect(fromProd.kind).toBe('rate-limit')
+    expect(fromProd.rateLimitCategory).toBe('rate_limited')
+    // A 401 only a tail host reported is equally untrustworthy...
+    expect(classifyHttpError(401, new Headers(), '', { authoritative: false }).kind).toBe('project-error')
+    // ...while a real 401 from an authoritative endpoint still revokes.
+    expect(classifyHttpError(401, new Headers(), '').kind).toBe('auth-failure')
   })
 
   it('separates a verification challenge from dead credentials', () => {
@@ -297,6 +337,19 @@ describe('rotation state machine', () => {
     const decision = decideRotation('rate-limit', acc, 0, undefined, 'quota_exhausted')
     expect(decision.action).toBe('cool')
     expect(acc.coolingDownUntil! - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1000)
+  })
+
+  it('parks a project-error for the floor without disabling the account', () => {
+    const acc = account()
+    const before = Date.now()
+    const decision = decideRotation('project-error', acc, 0)
+    expect(decision.action).toBe('cool')
+    // Never the revoke path: a project verdict says nothing about the credential.
+    expect(acc.enabled).not.toBe(false)
+    expect(acc.verificationRequired).not.toBe(true)
+    expect(acc.cooldownReason).toBe('project-error')
+    expect((acc.coolingDownUntil ?? 0) - before).toBeGreaterThanOrEqual(PROJECT_ERROR_COOLDOWN_MS)
+    expect(decision.backoffMs).toBeGreaterThanOrEqual(PROJECT_ERROR_COOLDOWN_MS)
   })
 
   it('revokes on auth-failure and disables the account', () => {

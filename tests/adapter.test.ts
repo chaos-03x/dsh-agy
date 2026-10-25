@@ -3084,7 +3084,16 @@ describe('AgyAdapter', () => {
   })
 
   it('reports and throws QUOTA (terminal) on daily quota exhaustion', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"status":"RESOURCE_EXHAUSTED"}}', { status: 429 })))
+    // A REAL daily-quota wall: one of the five measured QUOTA_EXHAUSTED wordings.
+    // A bare RESOURCE_EXHAUSTED 429 is NOT one of them (it is prod's permanent
+    // answer) and stays a retryable rate limit — see the test below.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: {
+        code: 429,
+        status: 'RESOURCE_EXHAUSTED',
+        message: 'Individual quota reached. Contact your administrator to enable overages.',
+      },
+    }), { status: 429 })))
     const failures: Array<{ kind: string; session: AgyAccountSession }> = []
     const adapter = new AgyAdapter({
       getSession: async () => session(),
@@ -3095,6 +3104,34 @@ describe('AgyAdapter', () => {
     }).rejects.toMatchObject({ code: 'QUOTA' })
     expect(failures[0]?.kind).toBe('rate-limit')
     expect(failures[0]?.session.account.email).toBe('a@b.c')
+  })
+
+  it('keeps a bare RESOURCE_EXHAUSTED 429 retryable instead of locking the account for 24h', async () => {
+    // MEASURED 2026-10-25: prod returns this exact body for EVERY request from
+    // this class of account while the account's real quota sits at 85%.
+    // Classifying it as a spent quota set coolingDownUntil = now + 24h with
+    // cooldownReason 'quota-exhausted' AND reported a terminal QUOTA to the user.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: {
+        code: 429,
+        status: 'RESOURCE_EXHAUSTED',
+        message: 'Resource has been exhausted (e.g. check quota).',
+      },
+    }), { status: 429 })))
+    const seen: Array<{ kind: string; category?: string }> = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind, _s, info) => { seen.push({ kind, category: info?.rateLimitCategory }) },
+    })
+    let thrown: { code?: string } | undefined
+    try {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    } catch (error) {
+      thrown = error as { code?: string }
+    }
+    expect(thrown?.code).toBe('RATE_LIMIT')
+    expect(seen[0]?.kind).toBe('rate-limit')
+    expect(seen[0]?.category).not.toBe('quota_exhausted')
   })
 
   it('throws RATE_LIMIT with retry delay on soft/rate limits (harness retries)', async () => {
@@ -3168,7 +3205,7 @@ describe('AgyAdapter', () => {
     }
   })
 
-  it('converts retryable pool blockage into RATE_LIMIT with a positive integer delay', async () => {
+  it('converts a retryable pool blockage into RATE_LIMIT without a retry hint', async () => {
     const resetAt = Date.now() + 5000
     const adapter = new AgyAdapter({
       getSession: async () => {
@@ -3183,21 +3220,13 @@ describe('AgyAdapter', () => {
     } catch (error) {
       thrown = error
     }
-    expect(thrown).toMatchObject({
-      code: 'RATE_LIMIT',
-      failure: { providerRetryAfterMs: expect.any(Number) },
-    })
-    expect(thrown && typeof thrown === 'object' && 'failure' in thrown).toBe(true)
-    if (!thrown || typeof thrown !== 'object' || !('failure' in thrown)) throw new Error('missing failure')
-    const failure = thrown.failure
-    expect(failure && typeof failure === 'object' && 'providerRetryAfterMs' in failure).toBe(true)
-    if (!failure || typeof failure !== 'object' || !('providerRetryAfterMs' in failure)) throw new Error('missing retry delay')
-    const retryMs = failure.providerRetryAfterMs
-    expect(typeof retryMs).toBe('number')
-    if (typeof retryMs !== 'number') throw new Error('retry delay is not numeric')
-    expect(Number.isFinite(retryMs)).toBe(true)
-    expect(Number.isInteger(retryMs)).toBe(true)
-    expect(retryMs).toBeGreaterThan(0)
+    expect(thrown).toMatchObject({ code: 'RATE_LIMIT' })
+    // Deliberately NO providerRetryAfterMs: the pool block is a local cooldown,
+    // and DSH's normal retry mode calls next() — giving up the turn — as soon as
+    // the hint exceeds its 10s maxDelayMs. A 24h quota park used to mean "one
+    // attempt, then the turn dies", which is what the screenshots show.
+    const failure = (thrown as { failure?: { providerRetryAfterMs?: number } }).failure
+    expect(failure?.providerRetryAfterMs).toBeUndefined()
   })
 
   it('treats a 403 verification challenge as recoverable, not as a dead credential', async () => {

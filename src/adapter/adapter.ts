@@ -163,6 +163,13 @@ export interface AgyAdapterOptions {
 }
 
 const UPSTREAM_ERROR_CODE = 'UPSTREAM'
+/**
+ * Local copy of dsh-llm's retryable `EMPTY_RESPONSE` code (the package does not
+ * re-export the constant from its root). A turn that yields no chunk at all used
+ * to be reported as a successful empty answer, which DSH persisted as a
+ * contentless turn; it is retryable and the account is innocent.
+ */
+const EMPTY_RESPONSE_CODE = 'EMPTY_RESPONSE'
 /** First-class DSH retryable code: the default retry policy honors SERVER (5xx), not UPSTREAM. */
 const SERVER_ERROR_CODE = 'SERVER'
 
@@ -432,10 +439,12 @@ export class AgyAdapter extends LlmAdapter {
         if (error.kind === 'quota-exhausted') {
           throw new LlmError(error.message, QUOTA_EXCEEDED_CODE)
         }
-        const delta = Math.ceil(error.blockedUntil - Date.now())
-        const providerRetryAfterMs = Number.isFinite(delta) && delta > 0 ? delta : 1
+        // Deliberately NO `providerRetryAfterMs`: the pool is blocked by a
+        // cooldown, not by an upstream instruction, and DSH's 10s `maxDelayMs`
+        // turns any longer delay into `next()` — an immediate give-up with no
+        // retry at all. Without the hint DSH backs off locally, which is the only
+        // way the blocking cooldown ever expires mid-turn.
         throw new LlmError(error.message, 'RATE_LIMIT', {
-          providerRetryAfterMs,
           requestId: ProviderRequestId(generateAntigravityRequestId()),
         })
       }
@@ -478,7 +487,9 @@ export class AgyAdapter extends LlmAdapter {
      * `attemptStartedAt` is the clock of the outer attempt that owns this send,
      * so a transport failure is billed to that attempt rather than to the call.
      */
-    const sendAttempt = async (attemptStartedAt: number): Promise<{ response: Response; bodyText?: string }> => {
+    const sendAttempt = async (
+      attemptStartedAt: number,
+    ): Promise<{ response: Response; bodyText?: string; authoritative: boolean }> => {
       for (let attempt = 0; ; attempt++) {
         const generation = conversationKey !== undefined && conversationAccount !== undefined
           ? currentSessionGeneration(conversationAccount, conversationKey)
@@ -504,8 +515,13 @@ export class AgyAdapter extends LlmAdapter {
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
         })
         let response: Response
+        // Which host answered decides how much weight the failure carries later:
+        // prod/autopush reject this class of account by design (see
+        // AGY_AUTHORITATIVE_ENDPOINTS), so their verdict must not become a
+        // credential verdict.
+        let authoritative = true
         try {
-          response = await fetchAgyFirstOk(
+          const fetched = await fetchAgyFirstOk(
             '/v1internal:streamGenerateContent?alt=sse',
             {
               method: 'POST',
@@ -516,6 +532,8 @@ export class AgyAdapter extends LlmAdapter {
             accountFetch(routing),
             routing,
           )
+          response = fetched.response
+          authoritative = fetched.authoritative
         } catch (error) {
           const classified = classifyFetchError(error, { proxyUrl: session.account.proxy })
           await this.options.reportFailure(classified.kind, session)
@@ -524,7 +542,7 @@ export class AgyAdapter extends LlmAdapter {
           this.recordUsage(session, options.model, { ok: false, reason: 'network-error' }, attemptStartedAt)
           throw new LlmError(classified.message ?? 'agy fetch failed', 'TRANSPORT', { cause: error })
         }
-        if (response.ok) return { response }
+        if (response.ok) return { response, authoritative }
         const bodyText = await response.text().catch(() => undefined)
         if (
           attempt === 0
@@ -535,7 +553,7 @@ export class AgyAdapter extends LlmAdapter {
           bumpSessionGeneration(conversationAccount, conversationKey)
           continue
         }
-        return { response, bodyText }
+        return { response, bodyText, authoritative }
       }
     }
 
@@ -556,10 +574,12 @@ export class AgyAdapter extends LlmAdapter {
 
     for (let malformedAttempt = 0; ; malformedAttempt++) {
       const attemptStartedAt = Date.now()
-      const { response, bodyText } = await sendAttempt(attemptStartedAt)
+      const { response, bodyText, authoritative } = await sendAttempt(attemptStartedAt)
 
       if (!response.ok) {
-        const classified = classifyHttpError(response.status, response.headers, bodyText)
+        const classified = classifyHttpError(response.status, response.headers, bodyText, {
+          authoritative,
+        })
         await this.options.reportFailure(classified.kind, session, {
           retryAfterMs: classified.retryAfterMs,
           status: response.status,
@@ -610,6 +630,23 @@ export class AgyAdapter extends LlmAdapter {
             {
               requestId: ProviderRequestId(generateAntigravityRequestId()),
             },
+          )
+        }
+        if (classified.kind === 'project-error') {
+          // A GRANT wall (issue #114): the token is live and the project is not
+          // entitled to this model — the seven "not eligible / no active
+          // entitlement / valid license" wordings, or a bare PERMISSION_DENIED on
+          // a live token. It says nothing about the credential, so it must never
+          // reach `auth-failure`'s revoke path (that disabled a healthy account and
+          // forced a re-login). Rotation parks the account for
+          // PROJECT_ERROR_COOLDOWN_MS and the next pick moves on, which is a
+          // retryable shape — again WITHOUT `providerRetryAfterMs`, because the
+          // park IS the cooldown and a longer delay makes DSH give up instead of
+          // rotating.
+          throw new LlmError(
+            `agy project not entitled (${response.status}): ${classified.message ?? ''}`,
+            'RATE_LIMIT',
+            { requestId: ProviderRequestId(generateAntigravityRequestId()) },
           )
         }
         if (classified.kind === 'auth-failure') {
@@ -733,6 +770,15 @@ export class AgyAdapter extends LlmAdapter {
           }
         }
 
+        // A stream that produced no chunk at all (no text, no thought, no tool
+        // call) is not a successful answer: the turn is contentless and the user
+        // sees silence. Nothing was delivered, so a retry replays a turn the
+        // consumer never saw — EMPTY_RESPONSE is retryable and no failure is
+        // reported, because an empty body is not an account fault.
+        if (!yieldedDirect && bufferedChunks.length === 0) {
+          await response.body?.cancel().catch(() => {})
+          throw new LlmError('agy returned an empty response', EMPTY_RESPONSE_CODE)
+        }
         // Commit whatever the turn left buffered (a tool-call or completed
         // reasoning turn never emits a text-delta, so it ends up here).
         if (ttftMs === undefined) ttftMs = Date.now() - attemptStartedAt
@@ -743,6 +789,10 @@ export class AgyAdapter extends LlmAdapter {
         this.recordUsage(session, options.model, { ok: true, usage, ttftMs }, attemptStartedAt)
         return
       } catch (error) {
+        // Already a finished verdict: the empty-response check above threw it from
+        // INSIDE this try, so re-classifying it here would relabel an innocent
+        // account's EMPTY_RESPONSE as a network failure.
+        if (error instanceof LlmError && error.code === EMPTY_RESPONSE_CODE) throw error
         if (error instanceof DOMException && error.name === 'AbortError') {
           this.recordUsage(session, options.model, { ok: false, reason: 'aborted', usage }, attemptStartedAt)
           await response.body?.cancel().catch(() => {})
@@ -820,14 +870,17 @@ export class AgyAdapter extends LlmAdapter {
         // the same way.
         this.recordUsage(session, options.model, { ok: false, reason: unmappedFinish ? 'request-error' : 'network-error', usage }, attemptStartedAt)
         await response.body?.cancel().catch(() => {})
-        // Deliberately UPSTREAM (terminal), not TRANSPORT: content may already
-        // have been emitted, and DSH's retry policy honours TRANSPORT, so retrying
-        // here would replay a partially-delivered turn. The account-level report
-        // above already absorbs the transient case by cooling/rotating. The cause
-        // code is still surfaced so the socket failure is legible in session events.
+        // UPSTREAM (terminal) once ANY chunk reached the consumer: DSH's retry
+        // policy honours TRANSPORT, and replaying there would duplicate a
+        // partially-delivered turn. Before that first chunk nothing is visible, so
+        // a socket death ("terminated (UND_ERR_SOCKET: other side closed)") is an
+        // ordinary transport failure and may be retried — the case that used to
+        // kill a turn with five retries still on the clock. A content-level verdict
+        // (`unmappedFinish`) stays terminal either way: the same request would hit
+        // the same wall.
         throw new LlmError(
           error instanceof Error ? describeFetchError(error) : 'agy stream parse failed',
-          UPSTREAM_ERROR_CODE,
+          unmappedFinish || yieldedDirect ? UPSTREAM_ERROR_CODE : 'TRANSPORT',
           { cause: error },
         )
       }

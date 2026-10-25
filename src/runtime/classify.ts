@@ -115,8 +115,76 @@ export function classifyRateLimit(
   if (retryAfterMs !== undefined) {
     return 'rate_limited'
   }
-  // No explicit retry hint: "quota" wording → daily quota, otherwise unknown.
-  return text.includes('quota') || text.includes('resource_exhausted') ? 'quota_exhausted' : 'unknown'
+  // No explicit retry hint and no explicit quota-exhausted wording. What is left
+  // is Google's generic hard-limit body:
+  //
+  //   {"error":{"code":429,"status":"RESOURCE_EXHAUSTED",
+  //             "message":"Resource has been exhausted (e.g. check quota)."}}
+  //
+  // MEASURED 2026-10-25 with `scripts/diag-endpoints.mts`: the production host
+  // cloudcode-pa.googleapis.com answers exactly this for BOTH accounts on every
+  // request while their real quota sat at 85%, so this text cannot identify an
+  // account-level quota wall. Reading it as `quota_exhausted` parked a healthy
+  // account for FULL_QUOTA_COOLDOWN_MS (24h) and surfaced a TERMINAL `QUOTA`
+  // ("当前请求的额度已用尽") for a request that had merely walked the endpoint
+  // chain. The same wording is also what the live host returns for an ordinary
+  // per-minute burst.
+  //
+  // So an ambiguous hard-limit body is a SHORT rate limit: rotate, cool for
+  // minutes, retry. Only the explicit quota-exhausted wording above may reach
+  // the 24-hour branch.
+  return text.includes('quota') || text.includes('resource_exhausted') ? 'rate_limited' : 'unknown'
+}
+
+/**
+ * Whether a body mentions throttling at all, without deciding which kind.
+ *
+ * Used by the 403 path, where the QUESTION is only "is this a wall or a dead
+ * credential?": any rate/quota wording means a wall. The 429 path does not need
+ * it because a 429 is already unambiguous.
+ */
+export function isRateLimitWording(bodyText: string | undefined): boolean {
+  if (!bodyText) return false
+  const text = bodyText.toLowerCase()
+  return RATE_LIMIT_WORDING.some((phrase) => text.includes(phrase))
+}
+
+const RATE_LIMIT_WORDING = [
+  'resource_exhausted',
+  'resource exhausted',
+  'quota',
+  'rate limit',
+  'rate-limit',
+  'too many requests',
+  'throttl',
+] as const
+
+/**
+ * Phrases that mean "this account is not entitled to the product", NOT "this
+ * credential is dead" (issue #114). Each one was observed coming off the
+ * endpoint chain for a credential that `dsh-agy verify` then confirmed valid.
+ *
+ * They are matched only in the 403 branch, after the verification and
+ * rate-limit gates, so an ordinary permission error on a rejected credential is
+ * unaffected — and a bare `PERMISSION_DENIED` counts: Google reports bad
+ * credentials as 401 `invalid_grant`, never as 403 `PERMISSION_DENIED`.
+ */
+const GRANT_WALL_PHRASES = [
+  'not eligible',
+  'not entitled',
+  'no active entitlement',
+  'onboarding required',
+  'premium provisioning',
+  'valid license',
+  'subscription_required',
+  'permission_denied',
+] as const
+
+/** Whether a 403 body is an entitlement/grant wall rather than dead credentials. */
+export function isGrantWall(bodyText: string | undefined): boolean {
+  if (!bodyText) return false
+  const text = bodyText.toLowerCase()
+  return GRANT_WALL_PHRASES.some((phrase) => text.includes(phrase))
 }
 
 const RATE_LIMIT_RESET_FIELDS = ['resetTime', 'reset_time', 'resetAt', 'quotaResetTime'] as const
@@ -150,8 +218,8 @@ function parseRetryAfter(header: string | null): number | undefined {
   return undefined
 }
 
-/** Classify a completed HTTP response (non-2xx). */
-export function classifyHttpError(
+/** Classify a completed HTTP response (non-2xx) on its own terms. */
+function classifyByStatus(
   status: number,
   headers: Headers,
   bodyText?: string,
@@ -187,15 +255,14 @@ export function classifyHttpError(
         message: bodyText ? bodyText.slice(0, 200) : undefined,
       }
     }
-    // Google also reports quota walls as 403 RESOURCE_EXHAUSTED, and the
-    // endpoint fallback chain ends on hosts answering 403 for "no license"
-    // (not bad auth). Only treat a 403 as auth-failure when the body carries
-    // no quota wording — a false revoke permanently disables the account.
-    const category = classifyRateLimit(bodyText, undefined)
-    if (category === 'quota_exhausted') {
+    // Google also reports quota/rate walls as 403, and the endpoint fallback
+    // chain ends on hosts answering 403 for "no license" (not bad auth). Only
+    // treat a 403 as auth-failure when the body carries no throttling wording at
+    // all — a false revoke permanently disables the account.
+    if (isRateLimitWording(bodyText)) {
       return {
         kind: 'rate-limit',
-        rateLimitCategory: category,
+        rateLimitCategory: classifyRateLimit(bodyText, undefined),
         status,
         message: bodyText ? bodyText.slice(0, 200) : undefined,
       }
@@ -208,6 +275,17 @@ export function classifyHttpError(
         kind: 'transient',
         status,
         message: bodyText.slice(0, 200),
+      }
+    }
+    // An entitlement/grant wall (issue #114): the credential is fine, this
+    // account simply is not allowed to use the product. Disabling it revoked a
+    // healthy credential, so it is `project-error` — park and rotate, never
+    // `enabled = false`.
+    if (isGrantWall(bodyText)) {
+      return {
+        kind: 'project-error',
+        status,
+        message: bodyText ? bodyText.slice(0, 200) : undefined,
       }
     }
     return { kind: 'auth-failure', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
@@ -237,6 +315,57 @@ export function classifyHttpError(
   }
   // 400-range others (401 handled above): request-level errors, no rotation semantics.
   return { kind: 'transient', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
+}
+
+/**
+ * Authority context for a response produced by the endpoint fallback chain.
+ *
+ * `authoritative: false` means a TAIL endpoint answered (prod / autopush)
+ * rather than a host that can speak for the account. Those hosts reject
+ * consumer accounts by design — prod answers `RESOURCE_EXHAUSTED`, autopush an
+ * HTML "no license" — so neither may issue a terminal verdict against the
+ * credential: a 401/403 there is a project/entitlement answer (park and rotate)
+ * and its RESOURCE_EXHAUSTED is a rate limit, never a quota reading.
+ */
+export interface ClassifyContext {
+  authoritative?: boolean
+}
+
+/**
+ * Rewrite a tail endpoint's verdict into its non-terminal equivalent.
+ * @param classified - the body-level classification.
+ * @returns the same verdict, or the downgraded one.
+ */
+function degradeNonAuthoritative(classified: ClassifiedError): ClassifiedError {
+  if (classified.kind === 'auth-failure') {
+    return {
+      kind: 'project-error',
+      status: classified.status,
+      message: classified.message ?? 'rejected by a fallback endpoint',
+    }
+  }
+  if (classified.kind === 'rate-limit' && classified.rateLimitCategory === 'quota_exhausted') {
+    return { ...classified, rateLimitCategory: 'rate_limited' }
+  }
+  return classified
+}
+
+/**
+ * Classify a completed HTTP response (non-2xx).
+ * @param status - HTTP status.
+ * @param headers - response headers (Retry-After).
+ * @param bodyText - response body, when readable.
+ * @param context - endpoint authority; omit for a response whose origin needs
+ *   no qualification (a direct control-plane call, a test fixture).
+ */
+export function classifyHttpError(
+  status: number,
+  headers: Headers,
+  bodyText?: string,
+  context?: ClassifyContext,
+): ClassifiedError {
+  const classified = classifyByStatus(status, headers, bodyText)
+  return context?.authoritative === false ? degradeNonAuthoritative(classified) : classified
 }
 
 /**
