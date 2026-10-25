@@ -11,6 +11,8 @@
 | Daily (Sandbox) | `https://daily-cloudcode-pa.sandbox.googleapis.com` | 实测可用（fallback）；来源：CLIProxy/Vibeproxy 实践（opencode 常量注释），OmniRoute 仅 discovery 链收录 |
 | Autopush (Sandbox) | `https://autopush-cloudcode-pa.sandbox.googleapis.com` | 实测 403（consumer 无 license），链尾兜底；来源：CLIProxy 实践，OmniRoute 未收录 |
 
+**2026-10-25 实测（两账号，各约 2s）：** daily 200（1.5–1.9s）；daily-sandbox 200（~1.5s）；prod 对每次请求都回 429 `RESOURCE_EXHAUSTED`（"Resource has been exhausted (e.g. check quota)."）；autopush 对每次请求都回 403 HTML "no license"。两个链尾环境对这类账号是设计上拒绝，其答复绝不能成为请求的判决——只有 `daily` / `daily-sandbox` 属于 `AGY_AUTHORITATIVE_ENDPOINTS`，`classifyHttpError` 的 `authoritative` 参数据此降级。这正是额度健康（85%）的账号被锁 24 小时的成因：prod 的永久 429 被当成了当日额度耗尽。
+
 已知环境限制：上游可能返回 `FAILED_PRECONDITION: User location is not supported for the API use`
 （网络出口地理位置不支持），与代码无关。
 

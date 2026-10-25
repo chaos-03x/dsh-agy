@@ -11,6 +11,8 @@
 | Daily (Sandbox) | `https://daily-cloudcode-pa.sandbox.googleapis.com` | Verified usable (fallback); source: CLIProxy/Vibeproxy practice (opencode constant comments), OmniRoute only in discovery chain |
 | Autopush (Sandbox) | `https://autopush-cloudcode-pa.sandbox.googleapis.com` | Returns 403 (consumer has no license), tail fallback; source: CLIProxy practice, not in OmniRoute |
 
+**Measured 2026-10-25 (both accounts, ~2s each):** daily 200 in 1.5–1.9s; daily-sandbox 200 in ~1.5s; prod 429 `RESOURCE_EXHAUSTED` "Resource has been exhausted (e.g. check quota)." on EVERY request; autopush 403 HTML "no license" on EVERY request. The two tail hosts reject this class of account BY DESIGN, so a verdict from them must never become the request's verdict — only `daily` and `daily-sandbox` are in `AGY_AUTHORITATIVE_ENDPOINTS`, and `classifyHttpError`'s `authoritative` flag is what downgrades a tail answer. This is the mechanism behind a healthy 85%-quota account being locked out for 24 hours: prod's permanent 429 was read as a spent daily quota.
+
 Known environment constraint: upstream may return `FAILED_PRECONDITION: User location is not supported for the API use` (egress location unsupported) — unrelated to code.
 
 OAuth endpoints (fixed): authorize `https://accounts.google.com/o/oauth2/v2/auth`; token `https://oauth2.googleapis.com/token`; userinfo `https://www.googleapis.com/oauth2/v1/userinfo?alt=json`.
