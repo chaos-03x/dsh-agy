@@ -160,6 +160,8 @@ export interface AgyAdapterOptions {
     latencyMs?: number
     ttftMs?: number
   }): void
+  /** Collect known model IDs across the whole pool to synthesize pool capabilities. */
+  getPoolModelIds?(): Promise<readonly string[]>
 }
 
 const UPSTREAM_ERROR_CODE = 'UPSTREAM'
@@ -291,7 +293,8 @@ export class AgyAdapter extends LlmAdapter {
         // Model discovery is account-scoped: route it through the account's proxy
         // (control-plane class, so the standard timeouts apply).
         const routing = { proxyUrl: session?.account.proxy }
-        const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
+        const poolModelIds = this.options.getPoolModelIds ? await this.options.getPoolModelIds().catch(() => undefined) : undefined
+        const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing), poolModelIds)
         this.cachedModels = { models, at: Date.now() }
         return models
       } catch (error) {

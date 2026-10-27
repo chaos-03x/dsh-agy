@@ -1694,5 +1694,37 @@ describe('fingerprint version freshness', () => {
       const unprobed: ManagedAccount = { refresh: 'r', addedAt: 1, lastUsed: 1 }
       expect(isModelSupportedByAccount(unprobed, 'claude-3-7-sonnet')).toBe(true)
     })
+
+    it('routes exclusive model to the account that supports it and locks without rotating to unsupported account', async () => {
+      stubTokenEndpoint()
+      const acc0 = {
+        ...account('acc0@example.com'),
+        cachedModels: ['gemini-4-argon-low', 'gemini-4-argon-high', 'gemini-3.8-flash-tiered'],
+      }
+      const acc1 = {
+        ...account('acc1@example.com'),
+        cachedModels: ['gemini-4-argon-disabled', 'gemini-3.8-flash-tiered'],
+      }
+      // acc1 is active by default in the store
+      const store = new InMemoryAccountStore(storage([acc0, acc1], 1))
+      const sessions = new AgySessionManager({ store })
+
+      // gemini-4-argon is only supported by acc0 (acc1 only has gemini-4-argon-disabled)
+      const sessionArgon = await sessions.getSession('gemini-4-argon', undefined, 'conv-argon')
+      expect(sessionArgon).toBeDefined()
+      expect(sessionArgon!.index).toBe(0)
+      expect(sessionArgon!.account.email).toBe('acc0@example.com')
+
+      // Picking argon set storage.activeIndex to 0
+      expect((await store.load()).activeIndex).toBe(0)
+
+      // When acc0 hits rate-limit on gemini-4-argon, rotation cannot rotate to acc1 (argon disabled)
+      await sessions.reportFailure('rate-limit', sessionArgon!, { model: 'gemini-4-argon' })
+      expect((await store.load()).activeIndex).toBe(0) // stays at 0 because acc1 does not support argon
+
+      // For a common model (gemini-3.8-flash-tiered), acc1 is rotated to if acc0 is rate-limited on flash
+      await sessions.reportFailure('rate-limit', sessionArgon!, { model: 'gemini-3.8-flash-tiered' })
+      expect((await store.load()).activeIndex).toBe(1) // rotated to acc1
+    })
   })
 })

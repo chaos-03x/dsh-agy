@@ -274,10 +274,19 @@ export async function listAgyModels(
   accessToken: string | undefined,
   projectId: string | undefined,
   fetchImpl: typeof fetch = proxiedFetch,
+  poolModelIds?: readonly string[],
 ): Promise<readonly LlmModelInfo[]> {
   if (!accessToken) return catalogModelList()
   try {
     const dynamic = await fetchAvailableModels(accessToken, projectId, fetchImpl)
+    if (poolModelIds && poolModelIds.length > 0) {
+      if (!dynamic.models) dynamic.models = {}
+      for (const id of poolModelIds) {
+        if (!dynamic.models[id]) {
+          dynamic.models[id] = {}
+        }
+      }
+    }
     const merged = mergeModelCatalog(dynamic)
     return merged.length > 0 ? merged : catalogModelList()
   } catch {
