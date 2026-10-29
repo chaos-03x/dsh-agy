@@ -61,6 +61,7 @@ export interface SsePayload {
     cachedContentTokenCount?: number
   }
   error?: SseError
+  modelVersion?: string
 }
 
 /**
@@ -76,7 +77,14 @@ export function parseSseDataLine(line: string): SsePayload | null {
   const parsed = JSON.parse(data) as unknown
   const root = (parsed as { response?: unknown })?.response ?? parsed
   const payload = (Array.isArray(root) ? root[0] : root) as SsePayload | undefined
-  return payload ?? null
+  if (!payload || typeof payload !== 'object') return null
+  const modelVersion = (root as { modelVersion?: unknown })?.modelVersion
+    ?? (parsed as { modelVersion?: unknown })?.modelVersion
+    ?? payload.modelVersion
+  if (typeof modelVersion === 'string' && modelVersion.length > 0) {
+    payload.modelVersion = modelVersion
+  }
+  return payload
 }
 
 /**
@@ -255,6 +263,7 @@ export interface ParseAgySseOptions {
    * (`${callId}:ptc:${n}`), triggering SessionFormatError. Enabling disambiguation
    * appends a safe unique salt to short/colliding ids.
    */
+  onModelVersion?: (modelVersion: string) => void
   disambiguateToolCallIds?: boolean
 }
 
@@ -352,6 +361,9 @@ export async function* parseAgySse(
     }
     const payload = parseSseDataLine(trimmed)
     if (!payload) return out
+    if (payload.modelVersion) {
+      options.onModelVersion?.(payload.modelVersion)
+    }
     if (payload.error) {
       const message = payload.error.message ?? payload.error.status ?? 'upstream error'
       throw new Error(`agy stream error (${payload.error.code ?? 'unknown'}): ${message}`)

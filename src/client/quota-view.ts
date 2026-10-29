@@ -117,17 +117,36 @@ export function untilText(iso: string | null, t: QuotaTranslate, now: number): s
   if (Number.isNaN(at)) return '—'
   const diff = at - now
   if (diff <= 0) return t('relNow')
-  const value = diff < MINUTE_MS
-    ? t('relNow')
-    : diff < HOUR_MS
-      ? t('relMinutes', { n: Math.floor(diff / MINUTE_MS) })
-      : diff < DAY_MS
-        ? t('relHours', { n: Math.floor(diff / HOUR_MS) })
-        : diff < 30 * DAY_MS
-          ? t('relDays', { n: Math.floor(diff / DAY_MS) })
-          : diff < 365 * DAY_MS
-            ? t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
-            : t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
+  const diffMins = Math.floor(diff / MINUTE_MS)
+  const diffHours = Math.floor(diff / HOUR_MS)
+  const remMins = diffMins % 60
+
+  let value: string
+  if (diff < MINUTE_MS) {
+    value = t('relNow')
+  } else if (diff < HOUR_MS) {
+    value = t('relMinutes', { n: diffMins })
+  } else if (diff < DAY_MS) {
+    value = remMins > 0
+      ? t('relHoursMins', { hours: diffHours, mins: remMins })
+      : t('relHours', { n: diffHours })
+  } else if (diff < 30 * DAY_MS) {
+    const diffDays = Math.floor(diff / DAY_MS)
+    const remHours = diffHours % 24
+    if (remHours > 0 && remMins > 0) {
+      value = t('relDaysHoursMins', { days: diffDays, hours: remHours, mins: remMins })
+    } else if (remHours > 0) {
+      value = t('relDaysHours', { days: diffDays, hours: remHours })
+    } else if (remMins > 0) {
+      value = t('relDaysMins', { days: diffDays, mins: remMins })
+    } else {
+      value = t('relDays', { n: diffDays })
+    }
+  } else if (diff < 365 * DAY_MS) {
+    value = t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
+  } else {
+    value = t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
+  }
   return t('quotaResetIn', { value })
 }
 
@@ -204,14 +223,26 @@ export function formatDetailedReset(
     return t('badgeReset5hMins', { mins: Math.max(1, diffMins) })
   }
 
+  const remHours = diffHours % 24
+  const remMins = diffMins % 60
+
   let countdown = ''
   if (diffDays > 0) {
-    const hours = diffHours % 24
-    countdown = hours > 0
-      ? t('badgeCountdownDaysHours', { days: diffDays, hours })
-      : t('badgeCountdownDays', { days: diffDays })
+    if (remHours > 0 && remMins > 0) {
+      countdown = t('badgeCountdownDaysHoursMins', { days: diffDays, hours: remHours, mins: remMins })
+    } else if (remHours > 0) {
+      countdown = t('badgeCountdownDaysHours', { days: diffDays, hours: remHours })
+    } else if (remMins > 0) {
+      countdown = t('badgeCountdownDaysMins', { days: diffDays, mins: remMins })
+    } else {
+      countdown = t('badgeCountdownDays', { days: diffDays })
+    }
   } else if (diffHours > 0) {
-    countdown = t('badgeCountdownHours', { hours: diffHours })
+    if (remMins > 0) {
+      countdown = t('badgeCountdownHoursMins', { hours: diffHours, mins: remMins })
+    } else {
+      countdown = t('badgeCountdownHours', { hours: diffHours })
+    }
   } else {
     countdown = t('badgeCountdownMins', { mins: Math.max(1, diffMins) })
   }

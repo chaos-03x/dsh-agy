@@ -39,6 +39,8 @@ import type { QuotaWindow } from '../types.ts'
  * Minimum throttle between automated re-fetches (2 minutes).
  */
 const AUTO_REFRESH_THROTTLE_MS = 120_000
+const AUTO_REFRESH_INTERVAL_MS = 120_000
+const OPEN_AUTO_REFRESH_INTERVAL_MS = 60_000
 
 /**
  * Render-tick cadence for the countdown and staleness figures. Pure state
@@ -219,6 +221,9 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   useEffect(() => {
     void load(false)
     const tick = window.setInterval(() => setNow(Date.now()), RENDER_TICK_MS)
+    const autoRefresh = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') void load(false)
+    }, AUTO_REFRESH_INTERVAL_MS)
     const onWake = (): void => {
       if (document.visibilityState !== 'hidden') void load(false)
     }
@@ -226,6 +231,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     document.addEventListener('visibilitychange', onWake)
     return () => {
       window.clearInterval(tick)
+      window.clearInterval(autoRefresh)
       window.removeEventListener('focus', onWake)
       document.removeEventListener('visibilitychange', onWake)
       if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
@@ -233,6 +239,17 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   }, [load])
 
   const isOpen = isPinned || isHovered
+
+  useEffect(() => {
+    if (!isOpen) return
+    void load(false)
+    const openTimer = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') void load(false)
+    }, OPEN_AUTO_REFRESH_INTERVAL_MS)
+    return () => {
+      window.clearInterval(openTimer)
+    }
+  }, [isOpen, load])
 
   // Dismiss pinned popover on outside pointer
   useDismissOnOutsidePointer(rootRef, isPinned, setIsPinned, panelRef)
@@ -442,6 +459,22 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
               null,
               h('div', { className: 'agy-ui-account-email' }, desensitizeEmail(activeAccount.email)),
               h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${activeAccount.projectId || t('thinkingDefaultAll')}`),
+              h(
+                'div',
+                { className: 'agy-ui-account-model' },
+                h('span', { className: 'agy-ui-account-model-label' }, `${t('fieldActualModel')}: `),
+                h('span', { className: 'agy-ui-account-model-val' }, activeAccount.actualModel ?? t('clusterPending')),
+                activeAccount.actualModel
+                  ? h(
+                      Tag,
+                      {
+                        tone: activeAccount.modelCluster === 'production' ? 'success' : 'warning',
+                        className: 'agy-ui-model-pill',
+                      },
+                      activeAccount.modelCluster === 'production' ? t('clusterProduction') : t('clusterCanary'),
+                    )
+                  : null,
+              ),
             ),
             h(
               Tag,

@@ -152,6 +152,7 @@ export interface AgyAdapterOptions {
   recordUsage?(record: {
     account?: string
     model?: string
+    actualModel?: string
     usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
     ok: boolean
     rateLimited?: boolean
@@ -695,11 +696,15 @@ export class AgyAdapter extends LlmAdapter {
       }
 
       try {
+        let actualModelVersion: string | undefined
         for await (const chunk of parseAgySse(response.body, {
           signal: options.signal,
           disambiguateToolCallIds: true,
           onToolSignature: (toolCallId, signature) => {
             pendingSignatures.push([toolCallId, signature])
+          },
+          onModelVersion: (version) => {
+            actualModelVersion = version
           },
         })) {
           if (chunk.type === 'usage') {
@@ -740,7 +745,7 @@ export class AgyAdapter extends LlmAdapter {
         for (const buffered of drainBuffer()) yield buffered
 
         await this.options.markSuccess?.(session)
-        this.recordUsage(session, options.model, { ok: true, usage, ttftMs }, attemptStartedAt)
+        this.recordUsage(session, options.model, { ok: true, usage, ttftMs, actualModel: actualModelVersion }, attemptStartedAt)
         return
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
@@ -849,6 +854,7 @@ export class AgyAdapter extends LlmAdapter {
       reason?: string
       usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
       ttftMs?: number
+      actualModel?: string
     },
     startedAt: number,
   ): void {
@@ -858,6 +864,7 @@ export class AgyAdapter extends LlmAdapter {
       record({
         ...(ledgerAccountKey(session) === undefined ? {} : { account: ledgerAccountKey(session) }),
         ...(model === undefined ? {} : { model }),
+        ...(result.actualModel === undefined ? {} : { actualModel: result.actualModel }),
         ok: result.ok,
         ...(result.rateLimited === true ? { rateLimited: true } : {}),
         ...(result.reason === undefined ? {} : { reason: result.reason }),
