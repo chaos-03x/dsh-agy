@@ -351,9 +351,30 @@ describe('agy management RPC', () => {
     // The activated account may see a different catalog, so activation must
     // drop the model-list cache rather than let the picker ride the TTL.
     expect(harness.cacheInvalidations).toBe(1)
+    // And announce it, so an open model picker re-reads NOW: some models exist
+    // only on some accounts, so the picker must follow the switch immediately.
+    expect(harness.notifications).toBe(1)
     await harness.management.call('account.delete', { index: 0 })
     const after = await harness.store.load()
     expect(after.accounts.map((entry) => entry.email)).toEqual(['b@y.com'])
+  })
+
+  it('carries each account\'s last routed model in the listing', async () => {
+    // The quota popover's "actual route" line reads THIS field: the ledger's
+    // recent ring already captured the upstream-routed version, so the host
+    // derives it newest-first per account and transports it — no probe, and no
+    // cluster/degradation tag (upstream's suffix does not reliably imply one).
+    const harness = makeHarness({
+      accounts: [account({ email: 'a@x.com' }), account({ email: 'b@y.com' })],
+      recentRequests: () => [
+        { at: 200, account: 'a@x.com', model: 'gemini-3.8-flash', kind: 'chat', ok: true, rateLimited: false, actualModel: 'gemini-3.8-flash-n' },
+        { at: 100, account: 'a@x.com', model: 'gemini-3.8-flash', kind: 'chat', ok: true, rateLimited: false, actualModel: 'gemini-3.8-flash-old' },
+      ],
+    })
+    const { accounts } = await harness.management.call('account.list', {}) as { accounts: Array<{ email: string | null, actualModel: string | null }> }
+    // Newest entry wins for a@x.com; b@y.com never served a request, so null.
+    expect(accounts.find((row) => row.email === 'a@x.com')?.actualModel).toBe('gemini-3.8-flash-n')
+    expect(accounts.find((row) => row.email === 'b@y.com')?.actualModel).toBeNull()
   })
 
   it('requires a model for test and delegates the call', async () => {
@@ -427,9 +448,31 @@ describe('agy management RPC', () => {
     })
 
     it('fails model.list helpfully when no account is configured', async () => {
-      const harness = makeHarness({ session: undefined })
+      // Gated on the LOCAL STORE (like account.list), not on getSession: probing
+      // quota/tokens to list a catalog both slowed the tab and folded every
+      // session failure into the same message.
+      const harness = makeHarness({ session: undefined, accounts: [] })
       await expect(harness.management.call('model.list', {}))
         .rejects.toThrow(/No agy account configured/)
+    })
+
+    it('lists models from the store when the session is unavailable', async () => {
+      // Regression for the misleading fallback: accounts EXIST (the user is
+      // logged in), so the tab must render the catalog with this account's
+      // identity even while no session can be built (e.g. a blocked pool) —
+      // it must not report "no account configured" over healthy accounts.
+      const harness = makeHarness({ session: undefined })
+      const result = await harness.management.call('model.list', {}) as { account: string | null }
+      expect(result.account).toBe('a@x.com')
+      expect(result.models).toHaveLength(2)
+      // The session was never consulted: the gate is local.
+      expect(harness.calls).not.toContainEqual({ method: 'getSession', args: [] })
+    })
+
+    it('reports the active account from the store, not from a session', async () => {
+      const harness = makeHarness({ session: undefined, activeIndex: 0 })
+      const result = await harness.management.call('model.list', {}) as { account: string | null }
+      expect(result.account).toBe('a@x.com')
     })
   })
 
@@ -827,6 +870,19 @@ describe('agy management RPC', () => {
         measured: number, failed: number, skipped: number
       }
       expect(result).toMatchObject({ measured: 1, failed: 1, skipped: 2 })
+    })
+
+    it('narrows the probe to one account when the limits card names an index', async () => {
+      // One card's refresh button must not probe the whole pool through several
+      // proxies: the named index travels to `refreshLimits` as `indices: [index]`,
+      // and an absent index keeps the pool-wide shape exactly as before.
+      const harness = makeHarness({ accounts: [account({ email: 'a@x.com' }), account({ email: 'b@y.com' })] })
+      await harness.management.call('account.limits', { force: true, index: 1 })
+      expect(harness.calls.find((call) => call.method === 'refreshLimits')?.args)
+        .toEqual([{ force: true, indices: [1] }])
+      await harness.management.call('account.limits', { force: true })
+      const forces = harness.calls.filter((call) => call.method === 'refreshLimits')
+      expect(forces[1]?.args).toEqual([{ force: true }])
     })
 
     it('degrades to zeroed counts when the refresh itself throws', async () => {

@@ -104,6 +104,17 @@ export interface AccountView {
   limitBurn: Record<string, number> | null
   /** This account's ledger entry, when it has recorded traffic. */
   usage: AccountUsageView | null
+  /**
+   * The model version upstream actually routed this account's most recent
+   * request to (e.g. `gemini-3.8-flash-n`), or null when nothing has been
+   * served through this account since the ring began.
+   *
+   * Derived host-side from the persisted recent-activity ring — a read of data
+   * the ledger already captured, never a probe. Display-only (the quota
+   * popover's account card); it carries no cluster/degradation classification,
+   * which upstream's version suffix does not reliably imply.
+   */
+  actualModel: string | null
 }
 
 /**
@@ -263,7 +274,16 @@ export interface AgyRpcMethods {
      * Absent (the default) keeps the TTL, so an automatic reload never spends an
      * upstream call it did not need.
      */
-    payload: { force?: boolean }
+    payload: {
+      force?: boolean
+      /**
+       * Restrict the refresh to ONE account (the limits card's refresh button).
+       *
+       * Absent refreshes every enabled account, as before. Naming an index keeps
+       * a single-card refresh from probing the whole pool through several proxies.
+       */
+      index?: number
+    }
     result: {
       limits: Array<{
         index: number

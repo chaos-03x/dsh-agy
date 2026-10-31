@@ -163,7 +163,11 @@ function toAccountUsageView(
 }
 
 export function createAgyManagement(options: AgyManagementOptions): AgyManagement {
-  const { store, sessions, stats, recentRequests, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
+  const { store, sessions, stats, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
+  // `recentRequests` is display-only (the quota popover's "actual route" line).
+  // A caller that builds no recent ring (tests, or a reader-only embed) must get
+  // an empty ring, never a TypeError from a missing accessor.
+  const recentRequests = options.recentRequests ?? (() => [])
   const thinkingBudget = options.thinkingBudget
   const multimodal = options.multimodal
   const uiPrefs = options.uiPrefs ?? new UiPrefsStore()
@@ -263,6 +267,14 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         // sampling path has run twice); `account.list` stays probe-free.
         limitBurn: null,
         usage: key === undefined ? null : toAccountUsageView(ledger.accounts[key]),
+        // The routed model version comes from the recent-activity ring — data
+        // every served request already captured, so this stays probe-free.
+        // Newest-first scan; the first entry that names this account AND carries
+        // an upstream version wins. No cluster/degradation classification is
+        // derived: upstream's version suffix does not reliably imply one.
+        actualModel: key === undefined
+          ? null
+          : recentRequests().find((entry) => entry.account === key && entry.actualModel != null)?.actualModel ?? null,
       })
     }
     // Per-model quota is deliberately NOT fetched here (nor anywhere else): it
@@ -348,6 +360,11 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       // cache is keyed to no account — drop it or the picker serves the
       // previous account's list until the TTL expires.
       invalidateModelCache()
+      // Some models exist only on some accounts: the host's model picker must
+      // re-read the list NOW, not on its next natural refresh, or the picker
+      // keeps offering models the new account cannot serve (and hides ones it
+      // can). Same channel the visibility toggle uses.
+      notifyModelsChanged()
       return { ok: true, index }
     },
 
@@ -386,14 +403,18 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
      * while the snapshot is still inside its TTL.
      */
     'account.limits': async (payload) => {
-      const force = (payload as { force?: unknown } | undefined)?.force === true
+      const body = payload as { force?: unknown; index?: unknown } | undefined
+      const force = body?.force === true
+      // A named index narrows the probe to that one account (the limits card's
+      // refresh button); absent keeps the pool-wide behavior.
+      const index = body?.index === undefined || body?.index === null ? undefined : asIndex(body)
       const storage = await store.load()
       // Best-effort: a failed refresh leaves whatever was cached, so this reply
       // is always the current best knowledge rather than an error. The OUTCOME
       // is still reported, because "probed and failed" and "was still fresh"
       // both leave the numbers identical and the user needs to know which.
       const result = await sessions
-        .refreshLimits(storage, { force })
+        .refreshLimits(storage, { force, ...(index === undefined ? {} : { indices: [index] }) })
         .catch(() => ({ measured: [], failed: [], skipped: 0 }))
       const fresh = await store.load()
       // Burn rates ride the same reply (the sampling path runs inside
