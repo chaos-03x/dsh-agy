@@ -636,7 +636,7 @@ export class AgySessionManager {
    */
   async refreshLimits(
     storage: AccountStorageV4,
-    options: { force?: boolean } = {},
+    options: { force?: boolean; indices?: number[] } = {},
   ): Promise<LimitsRefreshResult> {
     const now = Date.now()
     // A separate staleness rule: `isQuotaStale` is driven by the SCHEDULING
@@ -644,15 +644,23 @@ export class AgySessionManager {
     // "stale" on every call and re-probe continuously. `force` bypasses it for
     // an explicit user request, which is the only thing that may spend an
     // upstream call inside the TTL.
-    const candidates = storage.accounts.filter((account) => account.enabled !== false)
+    //
+    // `indices` narrows WHICH accounts may be probed (the per-account refresh
+    // button names one row) — it constrains the target set exactly like `force`
+    // does and changes nothing about WHERE the result lands: still
+    // `cachedLimits` only, never `cachedQuota`.
+    const candidates = storage.accounts
+      .map((account, index) => ({ account, index }))
+      .filter(({ account, index }) => account.enabled !== false
+        && (options.indices === undefined || options.indices.includes(index)))
     const targets = options.force === true
       ? candidates
-      : candidates.filter((account) => isLimitsStale(account, now))
+      : candidates.filter(({ account }) => isLimitsStale(account, now))
     if (targets.length === 0) {
       return { measured: [], failed: [], skipped: candidates.length }
     }
 
-    const probes = await Promise.all(targets.map(async (account) => {
+    const probes = await Promise.all(targets.map(async ({ account }) => {
       const key = this.accountKey(account)
       try {
         // The SHARED probe: the scheduling path joins the same in-flight promise
@@ -836,7 +844,16 @@ export class AgySessionManager {
     const eligible = storage.accounts
       .map((account, index) => ({ account, index }))
       .filter(({ account }) => account.enabled !== false && isModelSupportedByAccount(account, model))
-    if (eligible.length === 0) return undefined
+    if (eligible.length === 0) {
+      // An EMPTY store is the only case where "no account configured" is the
+      // truth — return undefined so the caller's NO_CREDENTIAL fallback stays
+      // accurate. When accounts EXIST but none can serve, `throwNoEligible`
+      // names the real reason (see its comment for the message choices).
+      if (storage.accounts.length === 0) return undefined
+      this.throwNoEligible(storage, model)
+      // unreachable; satisfies the return type
+      return undefined
+    }
 
     // Prioritize the active account as long as it is enabled, supports the model,
     // not cooling down, not family rate-limited, and not quota-exhausted.
@@ -1059,7 +1076,39 @@ export class AgySessionManager {
     // than `undefined`, which the adapter would report as NO_CREDENTIAL
     // ("no account configured") — misleading, and wrong for a transient blip.
     if (lastTransportError !== undefined) throw lastTransportError
+    // Reached when the loop never chose anyone: zero accounts (truth), an
+    // all-disabled pool (the loop had zero attempts because `enabled !== false`
+    // counted none), or an account set that emptied mid-request. Zero accounts
+    // stays `undefined` so the NO_CREDENTIAL fallback is accurate; every other
+    // case names why instead of the login hint.
+    if (storage.accounts.length === 0) return undefined
+    this.throwNoEligible(storage, model)
     return undefined
+  }
+
+  /**
+   * The single message for a pool that has accounts but none can serve the
+   * request — an all-disabled pool and a model no enabled account carries are
+   * different facts, and BOTH used to surface as the misleading "run `dsh-agy
+   * login`" hint (the user's accounts were valid the whole time).
+   * `invalid-credential` is deliberate: retrying cannot heal either state within
+   * the turn, and the adapter maps that kind to a terminal LlmError that shows
+   * the message verbatim without touching pool state.
+   */
+  private throwNoEligible(storage: AccountStorageV4, model?: string): never {
+    if (storage.accounts.length === 0) {
+      // Callers gate on `.length === 0` themselves before calling; this branch
+      // is defensive and must never be the misleading hint.
+      throw new AgyAuthError('invalid-credential', 'No agy account is configured.')
+    }
+    const disabledCount = storage.accounts.filter((account) => account.enabled === false).length
+    if (disabledCount === storage.accounts.length) {
+      throw new AgyAuthError('invalid-credential', `All ${disabledCount} agy account(s) are disabled — verify or re-login.`)
+    }
+    if (model !== undefined) {
+      throw new AgyAuthError('invalid-credential', `Model "${model}" is not available on any enabled agy account — switch account or pick another model.`)
+    }
+    throw new AgyAuthError('invalid-credential', 'No enabled agy account can serve this request.')
   }
 
   /**

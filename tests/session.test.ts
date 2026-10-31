@@ -53,6 +53,39 @@ describe('AgySessionManager', () => {
     expect(await sessions.getSession()).toBeUndefined()
   })
 
+  it('names the real reason instead of the login hint when every account is disabled', async () => {
+    // Both accounts are valid credentials the user owns; "run dsh-agy login"
+    // was the misleading fallback they saw before the reason was named here.
+    const sessions = new AgySessionManager({ store: new InMemoryAccountStore(storage([{ ...account(), enabled: false }])) })
+    const caught = await sessions.getSession().catch((error: unknown) => error)
+    expect(caught).toBeInstanceOf(AgyAuthError)
+    expect((caught as AgyAuthError).kind).toBe('invalid-credential')
+    expect((caught as Error).message).toMatch(/All 1 agy account\(s\) are disabled/)
+  })
+
+  it('names the model when no enabled account carries it', async () => {
+    // Accounts exist and are healthy — the failure is the MODEL on this pool,
+    // so the message must say which model and suggest the two real remedies.
+    // The support filter consults the DISCOVERED catalog (cachedModels), so the
+    // fixtures carry one that excludes the requested model. The token path is
+    // stubbed so the healthy accounts stay healthy through the pool's quota
+    // probe (which only runs because more than one account is eligible).
+    stubTokenEndpoint()
+    const sessions = new AgySessionManager({
+      store: new InMemoryAccountStore(storage([
+        { ...account(), cachedModels: ['gemini-3.8-flash'] },
+        { ...account('b@b.c'), cachedModels: ['gemini-3.8-flash'] },
+      ])),
+    })
+    const caught = await sessions
+      .getSession('claude-sonnet-4.5', undefined, 'conv-1')
+      .catch((error: unknown) => error)
+    expect(caught).toBeInstanceOf(AgyAuthError)
+    expect((caught as Error).message).toMatch(/Model "claude-sonnet-4\.5" is not available on any enabled agy account/)
+    // And it must NOT be the login hint the user used to see instead.
+    expect((caught as Error).message).not.toMatch(/dsh-agy login/)
+  })
+
   it('refreshes and returns a session with impersonation headers', async () => {
     stubTokenEndpoint()
     const store = new InMemoryAccountStore(storage([account()]))
@@ -982,8 +1015,13 @@ describe('usage-driven selection', () => {
     const store = new InMemoryAccountStore(storage([acc]))
     const sessions = new AgySessionManager({ store })
 
-    const session = await sessions.getSession()
-    expect(session).toBeUndefined()
+    // Every candidate's credential was revoked, which disabled the account.
+    // The request names WHY (all disabled) instead of returning `undefined` and
+    // degrading into the "No agy account configured — run dsh-agy login" hint —
+    // the account WAS configured, its credentials just stopped being valid.
+    const caught = await sessions.getSession().catch((error: unknown) => error)
+    expect(caught).toBeInstanceOf(AgyAuthError)
+    expect((caught as Error).message).toMatch(/disabled/)
 
     const after = await store.load()
     expect(after.accounts[0]!.enabled).toBe(false)
