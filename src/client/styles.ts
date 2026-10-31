@@ -486,6 +486,39 @@ export const AGY_STYLES_CSS = `
   box-shadow: 0 0 0 1px ${aliasVar('brand-primary')}, 0 3px 10px rgba(0, 0, 0, 0.12);
 }
 
+/* The next-account switch rides next to the badge, sharing its capsule look so
+   the two read as one control: click the badge for the panel, the arrow to
+   rotate accounts. */
+.agy-ui-badge-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: ${aliasVar('bg-layer-2')};
+  border: 0.5px solid ${aliasVar('border-l2')};
+  border-radius: 9999px;
+  padding: 3px;
+  font: var(--dsw-font-xxs-12);
+  color: ${aliasVar('label-secondary')};
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  font-family: inherit;
+  height: auto;
+}
+
+.agy-ui-badge-switch:hover:not(:disabled) {
+  color: ${aliasVar('brand-primary')};
+  background: ${aliasVar('bg-layer-3')};
+  border-color: ${aliasVar('border-l1')};
+}
+
+.agy-ui-badge-switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .agy-ui-dot {
   display: inline-block;
   width: 7px;

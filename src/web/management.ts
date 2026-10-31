@@ -556,8 +556,20 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
     },
 
     'model.list': async () => {
-      const session = await sessions.getSession().catch(() => undefined)
-      if (session === undefined) fail('No agy account configured — run `dsh-agy login` first.')
+      // The "is there an account" gate reads the LOCAL store, exactly like
+      // `account.list` — NOT `sessions.getSession()`. That call probes quota
+      // (`refreshQuotaCache`) and refreshes tokens (`accessTokenFor`), and any
+      // transient failure there was folded into this misleading "no account"
+      // message even when the account list rendered fine below it. Model
+      // discovery itself further degrades to the static catalog when the
+      // upstream is unreachable, so a network blip must not brand the page as
+      // unconfigured. `activeIndex` is the same source `account.list` uses to
+      // mark the active row.
+      const storage = await store.load()
+      const active = storage.accounts[storage.activeIndex]
+      if (storage.accounts.length === 0) {
+        fail('No agy account configured — run `dsh-agy login` first.')
+      }
       // The adapter's unfiltered catalog: reading the filtered `listModels()`
       // would hide a disabled model from this very list, leaving no switch to
       // turn it back on.
@@ -568,7 +580,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         name: model.name,
         disabled: hidden.has(model.id),
       }))
-      return { account: session.account.email ?? null, models: rows }
+      return { account: active?.email ?? null, models: rows }
     },
 
     'model.setDisabled': async (payload) => {

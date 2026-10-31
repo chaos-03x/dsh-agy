@@ -232,6 +232,59 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     }
   }, [load])
 
+  /**
+   * Accounts that can be switched to: everything that is not disabled.
+   *
+   * The switch moves the pool's active index — a disabled account cannot serve
+   * requests, so it is left out of both the badge's "next" rotation and the
+   * popover's picker (its row still names it under the account list above, but
+   * selecting it would be a no-op).
+   */
+  const switchableAccounts = accounts.filter((candidate) => candidate.state !== 'disabled')
+
+  /**
+   * Rotate the pool's active account forward one position (wrapping around),
+   * then force a quota refresh so the badge and popover show the new account's
+   * numbers immediately instead of on the next scheduled tick.
+   */
+  const handleSwitchNext = useCallback(async () => {
+    // Guard: the button is disabled anyway, but keep the handler safe standalone.
+    if (switchableAccounts.length < 2) return
+    const activePos = accounts.findIndex((candidate) => candidate.active)
+    const current = activePos >= 0 ? activePos : 0
+    const inSwitchable = switchableAccounts.findIndex((candidate) => candidate.index === current)
+    const anchor = inSwitchable >= 0 ? inSwitchable : -1
+    const next = switchableAccounts[(anchor + 1) % switchableAccounts.length]
+    if (next.index === current) return
+    setIsUpdating(true)
+    try {
+      await rpc.call('account.activate', { index: next.index })
+      // The activated account may see different windows; a forced reload reads
+      // them now rather than waiting out the limits cache TTL.
+      await load(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsUpdating(false)
+    }
+  }, [accounts, load, rpc, switchableAccounts])
+
+  /**
+   * Switch the pool's active account to the given index, then refresh its quota.
+   */
+  const handleSwitchTo = useCallback(async (index: number) => {
+    if (accounts.findIndex((candidate) => candidate.active) === index) return
+    setIsUpdating(true)
+    try {
+      await rpc.call('account.activate', { index })
+      await load(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsUpdating(false)
+    }
+  }, [accounts, load, rpc])
+
   const isOpen = isPinned || isHovered
 
   // Dismiss pinned popover on outside pointer
@@ -438,18 +491,39 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
             'div',
             { className: 'agy-ui-account-card' },
             h(
-              'div',
-              null,
-              h('div', { className: 'agy-ui-account-email' }, desensitizeEmail(activeAccount.email)),
-              h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${activeAccount.projectId || t('thinkingDefaultAll')}`),
+              'select',
+              {
+                className: 'agy-ui-account-select',
+                value: String(activeAccount.index),
+                disabled: isUpdating,
+                title: t('badgeSwitchTo'),
+                'aria-label': t('badgeSwitchTo'),
+                onChange: (event: { target: { value: string } }) => {
+                  void handleSwitchTo(Number(event.target.value))
+                },
+              },
+              switchableAccounts.map((candidate) =>
+                h('option',
+                  { key: candidate.index, value: String(candidate.index) },
+                  candidate.email ?? `#${candidate.index}`)),
             ),
             h(
-              Tag,
-              {
-                tone: activeAccount.state === 'active' ? 'success' : activeAccount.state === 'cooling' ? 'warning' : 'danger',
-                className: `agy-ui-state-pill ${activeAccount.state || 'active'}`,
-              },
-              stateLabel(activeAccount.state || 'active', t),
+              'div',
+              { className: 'agy-ui-account-card-row' },
+              h(
+                'div',
+                null,
+                h('div', { className: 'agy-ui-account-email' }, desensitizeEmail(activeAccount.email)),
+                h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${activeAccount.projectId || t('thinkingDefaultAll')}`),
+              ),
+              h(
+                Tag,
+                {
+                  tone: activeAccount.state === 'active' ? 'success' : activeAccount.state === 'cooling' ? 'warning' : 'danger',
+                  className: `agy-ui-state-pill ${activeAccount.state || 'active'}`,
+                },
+                stateLabel(activeAccount.state || 'active', t),
+              ),
             ),
           )
         : h(
@@ -526,6 +600,26 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       ref: rootRef,
       style: { position: 'relative', display: 'inline-flex', alignItems: 'center' },
     },
+    h(
+      Button,
+      {
+        variant: 'ghost',
+        size: 'sm',
+        className: 'agy-ui-badge-switch',
+        title: t('badgeSwitchNext'),
+        'aria-label': t('badgeSwitchNext'),
+        disabled: isUpdating || switchableAccounts.length < 2,
+        onClick: () => { void handleSwitchNext() },
+      },
+      h(
+        'svg',
+        { width: '12', height: '12', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round' },
+        h('path', { d: 'M17 2l4 4-4 4' }),
+        h('path', { d: 'M3 11v-1a4 4 0 0 1 4-4h14' }),
+        h('path', { d: 'M7 22l-4-4 4-4' }),
+        h('path', { d: 'M21 13v1a4 4 0 0 1-4 4H3' }),
+      ),
+    ),
     h(
       Button,
       {
