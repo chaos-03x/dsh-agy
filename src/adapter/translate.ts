@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
-import { catalogModel, isLevelThinkingModel, levelThinkingEffortsFor } from './catalog.ts'
+import { catalogModel, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 import {
   conversationMessages,
@@ -587,6 +587,19 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
   return [{ functionDeclarations: declarations }]
 }
 
+/**
+ * Resolve the concrete upstream model ID from the requested model and effort.
+ * Discrete-variant models (Gemini 4 Argon, Claude 5.5 series) are unified in DSH
+ * with level thinking, and mapped to the matching discrete wire model on request.
+ */
+export function resolveWireModel(model: string, effort?: string): string {
+  if (isUnifiedThinkingFamily(model)) {
+    const target = effort === 'low' ? 'low' : effort === 'high' ? 'high' : 'medium'
+    return `${model}-${target}`
+  }
+  return model
+}
+
 /** Build the wrapped Antigravity request body for one call. */
 export function toAgyRequestBody(
   options: GenerateOptions,
@@ -692,9 +705,15 @@ export function toAgyRequestBody(
       // A configured number for this level takes the place of the level token:
       // both together would let the level win (see `thinkingBudgetFor`).
       const configured = context.thinkingBudgetFor?.(effort)
-      generationConfig.thinkingConfig = configured === undefined
-        ? { thinkingLevel: effort, includeThoughts: true }
-        : { thinkingBudget: configured, includeThoughts: true }
+      if (options.model === 'gemini-4-argon' || options.model === 'claude-opus-5-5' || options.model === 'claude-sonnet-5-5') {
+        if (configured !== undefined) {
+          generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
+        }
+      } else {
+        generationConfig.thinkingConfig = configured === undefined
+          ? { thinkingLevel: effort, includeThoughts: true }
+          : { thinkingBudget: configured, includeThoughts: true }
+      }
     }
   } else if (claude && options.purpose !== 'session-title') {
     // Claude thinking models are id-bound (no level selector), so their budget is
@@ -719,7 +738,7 @@ export function toAgyRequestBody(
   return {
     project: context.projectId || undefined,
     requestId: context.requestId ?? generateAntigravityRequestId(),
-    model: options.model,
+    model: resolveWireModel(options.model, effort),
     userAgent: 'antigravity',
     requestType: 'agent',
     request: {

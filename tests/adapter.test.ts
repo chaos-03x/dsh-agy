@@ -3,7 +3,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, resolveWireModel, toAgyRequestBody } from '../src/adapter/translate.ts'
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   parseAgySse,
@@ -11,7 +11,7 @@ import {
   resolveStreamIdleTimeoutMs,
 } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
-import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId, registerDiscoveredTieredModels, resetDiscoveredTieredModels } from '../src/adapter/catalog.ts'
+import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId, isLevelThinkingModel, levelThinkingEffortsFor, registerDiscoveredTieredModels, resetDiscoveredTieredModels } from '../src/adapter/catalog.ts'
 import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { getThoughtSignature } from '../src/runtime/signature-cache.ts'
@@ -541,6 +541,23 @@ describe('translate', () => {
       { thought: true, text: 'a gemini thought' },
       { text: 'answer' },
     ])
+  })
+
+  it('maps unified thinking models (gemini-4-argon, claude-opus-5-5) to matching wire models based on effort', () => {
+    const lowArgon = toAgyRequestBody(generateOptions({ model: 'gemini-4-argon', reasoningEffort: 'low' }), {})
+    expect(lowArgon.model).toBe('gemini-4-argon-low')
+
+    const highArgon = toAgyRequestBody(generateOptions({ model: 'gemini-4-argon', reasoningEffort: 'high' }), {})
+    expect(highArgon.model).toBe('gemini-4-argon-high')
+
+    const medArgon = toAgyRequestBody(generateOptions({ model: 'gemini-4-argon' }), {})
+    expect(medArgon.model).toBe('gemini-4-argon-medium')
+
+    const lowOpus = toAgyRequestBody(generateOptions({ model: 'claude-opus-5-5', reasoningEffort: 'low' }), {})
+    expect(lowOpus.model).toBe('claude-opus-5-5-low')
+
+    const highOpus = toAgyRequestBody(generateOptions({ model: 'claude-opus-5-5', reasoningEffort: 'high' }), {})
+    expect(highOpus.model).toBe('claude-opus-5-5-high')
   })
 
   it('maps system, tools, and generation config', () => {
@@ -1538,6 +1555,90 @@ describe('models', () => {
     expect(formatTieredModelName('gemini-4.0-pro-tiered')).toBe('Gemini 4.0 Pro')
   })
 
+  it('sorts models deterministically into family hierarchy (Gemini 4 -> Flash 3.x -> Flash Lite -> 2.5 Pro -> 2.5 Flash -> Claude -> GPT)', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gpt-oss-120b-medium': {},
+        'gemini-4-argon': {},
+        'claude-sonnet-4-6': {},
+        'gemini-2.5-pro': {},
+        'gemini-3.5-flash-lite': {},
+        'gemini-3.8-flash-tiered': {},
+        'claude-opus-4-6-thinking': {},
+        'gemini-2.5-flash-lite': {},
+      },
+    })
+    const ids = merged.map((m) => m.id)
+    expect(ids).toEqual([
+      'gemini-4-argon',
+      'gemini-3.8-flash-tiered',
+      'gemini-3.5-flash-lite',
+      'gemini-2.5-pro',
+      'gemini-2.5-flash-lite',
+      'claude-opus-4-6-thinking',
+      'claude-sonnet-4-6',
+      'gpt-oss-120b-medium',
+    ])
+  })
+
+  it('automatically accommodates newly published upstream models into appropriate family and rank', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gpt-oss-120b-medium': {},
+        'gemini-5-pro': {},
+        'gemini-4-argon': {},
+        'claude-opus-6-0': {},
+        'gemini-3.8-flash-tiered': {},
+        'gemini-5-flash': {},
+        'claude-sonnet-5-5': {},
+        'gemini-2.5-pro': {},
+      },
+    })
+    const ids = merged.map((m) => m.id)
+    expect(ids).toEqual([
+      'gemini-5-pro',
+      'gemini-5-flash',
+      'gemini-4-argon',
+      'gemini-3.8-flash-tiered',
+      'gemini-2.5-pro',
+      'claude-opus-6-0',
+      'claude-sonnet-5-5',
+      'gpt-oss-120b-medium',
+    ])
+  })
+
+  it('dynamically unifies unseen models with discrete split thinking variants into level models', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'claude-opus-6-0-high': {},
+        'claude-opus-6-0-medium': {},
+        'claude-opus-6-0-low': {},
+      },
+    })
+    const ids = merged.map((m) => m.id)
+    expect(ids).toEqual(['claude-opus-6-0'])
+    expect(isChatCallableModelId('claude-opus-6-0-high')).toBe(true)
+    const unified = merged.find((m) => m.id === 'claude-opus-6-0')
+    expect(unified).toBeDefined()
+    expect(isLevelThinkingModel('claude-opus-6-0')).toBe(true)
+    expect(levelThinkingEffortsFor('claude-opus-6-0')).toEqual(['low', 'medium', 'high'])
+    expect(resolveWireModel('claude-opus-6-0', 'high')).toBe('claude-opus-6-0-high')
+    expect(resolveWireModel('claude-opus-6-0', 'low')).toBe('claude-opus-6-0-low')
+    expect(resolveWireModel('claude-opus-6-0', 'medium')).toBe('claude-opus-6-0-medium')
+  })
+
+  it('filters out disabled models (e.g. gemini-4-argon-disabled)', () => {
+    expect(isChatCallableModelId('gemini-4-argon-disabled')).toBe(false)
+    expect(isChatCallableModelId('gemini-4-argon')).toBe(true)
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-4-argon-disabled': {},
+        'gemini-3.8-flash-tiered': {},
+      },
+    })
+    expect(merged.map((m) => m.id)).toEqual(['gemini-3.8-flash-tiered'])
+  })
+
   it('rejects contradictory upstream display names (e.g. Gemini 2.5 models mislabeled as 3.5 Flash Lite)', () => {
     const merged = mergeModelCatalog({
       models: {
@@ -1587,16 +1688,20 @@ describe('models', () => {
       },
     })
     const ids = merged.map((m) => m.id)
-    // 3.8 flash tiered hides its split siblings
+    // 3.8 flash tiered hides its split siblings and avoids duplicate base model
     expect(ids).toContain('gemini-3.8-flash-tiered')
+    expect(ids).not.toContain('gemini-3.8-flash')
     expect(ids).not.toContain('gemini-3.8-flash-high')
     expect(ids).not.toContain('gemini-3.8-flash-medium')
     expect(ids).not.toContain('gemini-3.8-flash-low')
-    // 4 argon has no -tiered model, so all three tiers remain callable
-    expect(ids).toContain('gemini-4-argon-high')
-    expect(ids).toContain('gemini-4-argon-medium')
-    expect(ids).toContain('gemini-4-argon-low')
-    expect(merged.find((m) => m.id === 'gemini-4-argon-medium')?.context?.contextWindow).toBe(1048576)
+    const names = merged.map((m) => m.name)
+    expect(names.filter((n) => n === 'Gemini 3.8 Flash')).toHaveLength(1)
+    // 4 argon unifies into gemini-4-argon with level thinking, hiding its split siblings
+    expect(ids).toContain('gemini-4-argon')
+    expect(ids).not.toContain('gemini-4-argon-high')
+    expect(ids).not.toContain('gemini-4-argon-medium')
+    expect(ids).not.toContain('gemini-4-argon-low')
+    expect(merged.find((m) => m.id === 'gemini-4-argon')?.context?.contextWindow).toBe(1048576)
   })
 
   it('hides ids upstream assigns to a non-chat role, including ids without a tab_ prefix', () => {
@@ -1834,6 +1939,16 @@ describe('models', () => {
     expect(dynamicTiered.context?.contextWindow).toBe(1048576)
     expect(dynamicTiered.defaultMaxTokens).toBe(65536)
     expect(dynamicTiered.inputModalities).toEqual(['text', 'image'])
+
+    const argon = resolveAgyModel('agy', 'gemini-4-argon')
+    expect(argon.name).toBe('Gemini 4 Argon')
+    expect(argon.reasoning).toBeDefined()
+    expect(argon.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+
+    const opus55 = resolveAgyModel('agy', 'claude-opus-5-5')
+    expect(opus55.name).toBe('Claude Opus 5.5')
+    expect(opus55.reasoning).toBeDefined()
+    expect(opus55.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
 
     // legacy id-bound models and non-tiered discovered ids must not expose reasoning
     for (const id of ['gemini-3.6-flash-high', 'gemini-2.5-flash', 'brand-new-model']) {
