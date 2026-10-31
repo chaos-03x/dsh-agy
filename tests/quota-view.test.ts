@@ -367,6 +367,12 @@ describe('relative time', () => {
     expect(untilText(at(30), t, NOW)).toBe(zh.quotaResetIn.replace('{value}', zh.relMinutes.replace('{n}', '30')))
     expect(untilText(at(180), t, NOW)).toBe(zh.quotaResetIn.replace('{value}', zh.relHours.replace('{n}', '3')))
     expect(untilText(at(3 * 24 * 60), t, NOW)).toBe(zh.quotaResetIn.replace('{value}', zh.relDays.replace('{n}', '3')))
+    expect(untilText(at(195), t, NOW)).toBe(
+      zh.quotaResetIn.replace('{value}', zh.relHoursMins.replace('{hours}', '3').replace('{mins}', '15')),
+    )
+    expect(untilText(at(3 * 24 * 60 + 5 * 60 + 20), t, NOW)).toBe(
+      zh.quotaResetIn.replace('{value}', zh.relDaysHoursMins.replace('{days}', '3').replace('{hours}', '5').replace('{mins}', '20')),
+    )
     expect(untilText(null, t, NOW)).toBe(zh.valueUnknown)
     expect(untilText('not-a-date', t, NOW)).toBe(zh.valueUnknown)
   })
@@ -405,6 +411,24 @@ describe('relative time', () => {
     // Weekly window: minutes only (< 1 hour)
     const minsOnly = formatDetailedReset('weekly', at(45), t, NOW)
     expect(minsOnly).toContain(zh.badgeCountdownMins.replace('{mins}', '45'))
+
+    // Weekly window: days, hours and minutes
+    const daysHoursMins = formatDetailedReset('weekly', at(5 * 24 * 60 + 12 * 60 + 30), t, NOW)
+    expect(daysHoursMins).toContain(
+      zh.badgeCountdownDaysHoursMins.replace('{days}', '5').replace('{hours}', '12').replace('{mins}', '30'),
+    )
+
+    // Weekly window: days and minutes (hours === 0)
+    const daysMins = formatDetailedReset('weekly', at(2 * 24 * 60 + 40), t, NOW)
+    expect(daysMins).toContain(
+      zh.badgeCountdownDaysMins.replace('{days}', '2').replace('{mins}', '40'),
+    )
+
+    // Weekly window: hours and minutes (< 1 day)
+    const hoursMins = formatDetailedReset('weekly', at(4 * 60 + 25), t, NOW)
+    expect(hoursMins).toContain(
+      zh.badgeCountdownHoursMins.replace('{hours}', '4').replace('{mins}', '25'),
+    )
 
     // Passed reset
     expect(formatDetailedReset('5h', at(-5), t, NOW)).toBe(zh.quotaResetPassed)

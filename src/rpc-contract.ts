@@ -104,6 +104,10 @@ export interface AccountView {
   limitBurn: Record<string, number> | null
   /** This account's ledger entry, when it has recorded traffic. */
   usage: AccountUsageView | null
+  /** Actual model version returned by upstream response (e.g. gemini-3.8-flash-n), or null. */
+  actualModel?: string | null
+  /** Model cluster classification: 'production' (normal -n), 'canary' (grayscale/fallback), or null. */
+  modelCluster?: 'production' | 'canary' | null
 }
 
 /**
@@ -141,6 +145,8 @@ export interface RecentRequestView {
   /** Account key (email preferred), as the ledger stores it. */
   account: string | null
   model: string | null
+  /** Actual model version reported by upstream (e.g. gemini-3.8-flash-n), or null. */
+  actualModel?: string | null
   /** 'rotation' marks a pool event; the rest are request sources. */
   kind: 'chat' | 'cli' | 'verify' | 'test' | 'rotation'
   ok: boolean

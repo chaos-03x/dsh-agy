@@ -719,6 +719,29 @@ export const AGY_STYLES_CSS = `
   margin-top: 2px;
 }
 
+.agy-ui-account-model {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: var(--dsw-font-xxxs-11);
+  color: ${aliasVar('label-tertiary')};
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+
+.agy-ui-account-model-val {
+  color: ${aliasVar('label-primary')};
+  font-family: var(--dsw-font-family-mono, monospace);
+  font-weight: 500;
+}
+
+.agy-ui-model-pill {
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
 .agy-ui-state-pill {
   font: var(--dsw-font-xxxs-11);
   padding: 2px 7px;

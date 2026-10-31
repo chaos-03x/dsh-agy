@@ -202,6 +202,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
     // mutation persists it, and a read must not write.
     for (const account of storage.accounts) clearExpiredState(account, now)
     const ledger = stats.snapshot()
+    const recents = typeof recentRequests === 'function' ? recentRequests() : []
     const rows: AccountView[] = []
     for (const [index, account] of storage.accounts.entries()) {
       const state: AccountState = account.enabled === false
@@ -263,6 +264,12 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         // sampling path has run twice); `account.list` stays probe-free.
         limitBurn: null,
         usage: key === undefined ? null : toAccountUsageView(ledger.accounts[key]),
+        actualModel: key === undefined ? null : (recents.find((r) => r.account === key && r.actualModel)?.actualModel ?? (recents.find((r) => r.account === key && r.model?.endsWith('-n'))?.model ?? null)),
+        modelCluster: key === undefined ? null : (() => {
+          const act = recents.find((r) => r.account === key && r.actualModel)?.actualModel ?? (recents.find((r) => r.account === key && r.model?.endsWith('-n'))?.model ?? null)
+          if (!act) return null
+          return (act.endsWith('-n') || /-n($|-)/.test(act)) ? 'production' : 'canary'
+        })(),
       })
     }
     // Per-model quota is deliberately NOT fetched here (nor anywhere else): it

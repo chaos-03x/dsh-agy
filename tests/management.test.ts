@@ -60,6 +60,7 @@ function makeHarness(options: {
   /** What the session's burn-rate snapshot reports (defaults to none). */
   limitBurn?: Array<{ index: number, perHour: Record<string, number> }>
   baseUrl?: () => string
+  recentRequests?: () => any[]
 } = {}): Harness {
   const accounts = options.accounts ?? [account()]
   const store = makeStore(accounts, options.activeIndex ?? 0)
@@ -130,6 +131,7 @@ function makeHarness(options: {
     store,
     sessions,
     stats,
+    recentRequests: options.recentRequests,
     modelVisibility: visibility,
     uiPrefs,
     thinkingBudget: {

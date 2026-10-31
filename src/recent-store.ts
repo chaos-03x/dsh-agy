@@ -49,7 +49,7 @@ export const RECENT_FLUSH_INTERVAL_MS = 30_000
 
 /** Capture-key dedupe: the fields two processes writing the same capture share. */
 function captureKey(entry: RecentActivity): string {
-  return `${entry.at}|${entry.account ?? ''}|${entry.model ?? ''}|${entry.kind}|${entry.output ?? ''}`
+  return `${entry.at}|${entry.account ?? ''}|${entry.model ?? ''}|${entry.actualModel ?? ''}|${entry.kind}|${entry.output ?? ''}`
 }
 
 /**
@@ -71,6 +71,7 @@ export function parseRecentActivity(raw: unknown): RecentActivity | null {
     at: r.at,
     account: nullableString(r.account),
     model: nullableString(r.model),
+    ...(r.actualModel !== undefined ? { actualModel: nullableString(r.actualModel) } : {}),
     kind: r.kind as RecentActivity['kind'],
     ok: r.ok,
     rateLimited: r.rateLimited === true,
