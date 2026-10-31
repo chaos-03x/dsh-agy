@@ -172,6 +172,40 @@ describe('solo-account limits', () => {
     expect(after.accounts[0]!.cachedLimits?.groups).toHaveLength(1)
   })
 
+  it('indices narrow WHICH accounts are probed (the per-account refresh button)', async () => {
+    // One card's refresh must not probe the whole pool through several proxies:
+    // naming an index constrains the target set exactly like `force` does, and
+    // changes nothing about WHERE the result lands (`cachedLimits` only — see
+    // the force test above, whose argument this inherits).
+    const calls: string[] = []
+    stubSummary(calls)
+    const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x'), account('c@x')]))
+    const sessions = new AgySessionManager({ store })
+    const loaded = await store.load()
+
+    const solo = await sessions.refreshLimits(loaded, { force: true, indices: [1] })
+    expect(calls.filter((url) => url.includes('retrieveUserQuotaSummary')).length).toBe(1)
+    expect(solo.measured).toEqual([loaded.accounts[1]!.id])
+    expect(solo.skipped).toBe(0)
+    // Only the NAMED account learned anything.
+    const after = await store.load()
+    expect(after.accounts[1]!.cachedLimits).toBeDefined()
+    expect(after.accounts[0]!.cachedLimits).toBeUndefined()
+    expect(after.accounts[2]!.cachedLimits).toBeUndefined()
+
+    // A disabled account is not switched back on by being named: the candidate
+    // set is emptied by the enabled filter (not the TTL), so nothing is skipped.
+    await store.mutate((s) => {
+      s.accounts[1]!.enabled = false
+      s.accounts[0]!.cachedLimits = undefined
+    })
+    calls.length = 0
+    const disabled = await sessions.refreshLimits(await store.load(), { force: true, indices: [1] })
+    expect(calls.filter((url) => url.includes('retrieveUserQuotaSummary')).length).toBe(0)
+    expect(disabled.measured).toEqual([])
+    expect(disabled.skipped).toBe(0)
+  })
+
   it('leaves previous windows intact when the probe fails', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)

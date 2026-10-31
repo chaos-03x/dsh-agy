@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, it, describe, vi } from 'vitest'
 import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText, truncateIdentity } from '../src/client/index.ts'
-import { AgyQuotaBadge } from '../src/client/quota-badge.ts'
+import { AgyQuotaBadge, nextSwitchableIndex } from '../src/client/quota-badge.ts'
 import { h } from '../src/client/element.ts'
 import { installAgyStyles, AGY_STYLES_CSS, ALIAS_FALLBACKS } from '../src/client/styles.ts'
 import { en, zh } from '../src/client/locales.ts'
@@ -688,5 +688,55 @@ describe('quota badge snapshot render', () => {
     }) as unknown as QuotaTranslate
     const html = renderToStaticMarkup(h(AgyQuotaBadge, { rpc: failingRpc, t }))
     expect(html).toMatchSnapshot()
+  })
+
+  it('renders the rotate control alongside the badge', () => {
+    // The rotate control is part of the closed badge's markup. The primitives
+    // stub strips className (it passes only children through), so its presence
+    // is asserted by the distinctive repeat icon it renders — the badge itself
+    // draws no such path. Its disabled/rotate logic is pinned by
+    // `nextSwitchableIndex` above; the stub drops props, so `disabled` cannot
+    // be asserted in the static markup.
+    const failingRpc = {
+      call: async () => { throw new Error('snapshot render must not fetch') },
+    } as unknown as AgyRpcClient
+    const t = ((key: string, params?: Record<string, unknown>) => {
+      let text = (zh as Record<string, string>)[key] ?? key
+      for (const [k, v] of Object.entries(params ?? {})) text = text.replaceAll(`{${k}}`, String(v))
+      return text
+    }) as unknown as QuotaTranslate
+    const html = renderToStaticMarkup(h(AgyQuotaBadge, { rpc: failingRpc, t }))
+    expect(html).toContain('M17 2l4 4-4 4')
+  })
+})
+
+describe('nextSwitchableIndex', () => {
+  // A view factory: index and active flag are what the rotation reads.
+  const view = (index: number, state: AccountView['state'], active = false): AccountView => ({
+    index,
+    email: `u${index}@x.com`,
+    state,
+    active,
+  }) as AccountView
+
+  it('rotates forward over non-disabled accounts and wraps', () => {
+    const accounts = [view(0, 'active', true), view(1, 'cooling'), view(2, 'active')]
+    expect(nextSwitchableIndex(accounts)).toBe(1)
+    expect(nextSwitchableIndex([view(0, 'cooling'), view(1, 'active', true), view(2, 'disabled')])).toBe(0)
+    // A single switchable account cannot rotate — not even to itself.
+    expect(nextSwitchableIndex([view(0, 'disabled'), view(1, 'active', true)])).toBeNull()
+    // Wrap: the last switchable account rotates back to the first.
+    expect(nextSwitchableIndex([view(0, 'active'), view(1, 'active', true)])).toBe(0)
+  })
+
+  it('refuses to move a pool that has nowhere to go', () => {
+    // Fewer than two switchable accounts cannot rotate (a disabled row cannot
+    // serve requests, so activating it would be a no-op); neither can an
+    // all-disabled pool with no active flag to anchor on.
+    expect(nextSwitchableIndex([view(0, 'active', true)])).toBeNull()
+    expect(nextSwitchableIndex([view(0, 'disabled')])).toBeNull()
+    expect(nextSwitchableIndex([])).toBeNull()
+    // Two disabled accounts + one active-looking-but-disabled edge: still null.
+    expect(nextSwitchableIndex([view(0, 'disabled', true), view(1, 'disabled')])).toBeNull()
   })
 })

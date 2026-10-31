@@ -117,17 +117,39 @@ export function untilText(iso: string | null, t: QuotaTranslate, now: number): s
   if (Number.isNaN(at)) return '—'
   const diff = at - now
   if (diff <= 0) return t('relNow')
-  const value = diff < MINUTE_MS
-    ? t('relNow')
-    : diff < HOUR_MS
-      ? t('relMinutes', { n: Math.floor(diff / MINUTE_MS) })
-      : diff < DAY_MS
-        ? t('relHours', { n: Math.floor(diff / HOUR_MS) })
-        : diff < 30 * DAY_MS
-          ? t('relDays', { n: Math.floor(diff / DAY_MS) })
-          : diff < 365 * DAY_MS
-            ? t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
-            : t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
+  const diffMins = Math.floor(diff / MINUTE_MS)
+  const diffHours = Math.floor(diff / HOUR_MS)
+  const remMins = diffMins % 60
+
+  let value: string
+  if (diff < MINUTE_MS) {
+    value = t('relNow')
+  } else if (diff < HOUR_MS) {
+    value = t('relMinutes', { n: diffMins })
+  } else if (diff < DAY_MS) {
+    // An hour wall a fraction past the hour reads "3h 15m", not "3h":
+    // dropping the remainder made a 5h window's last stretch lie by up to an
+    // hour, which is the difference between "plenty" and "almost out".
+    value = remMins > 0
+      ? t('relHoursMins', { hours: diffHours, mins: remMins })
+      : t('relHours', { n: diffHours })
+  } else if (diff < 30 * DAY_MS) {
+    const diffDays = Math.floor(diff / DAY_MS)
+    const remHours = diffHours % 24
+    if (remHours > 0 && remMins > 0) {
+      value = t('relDaysHoursMins', { days: diffDays, hours: remHours, mins: remMins })
+    } else if (remHours > 0) {
+      value = t('relDaysHours', { days: diffDays, hours: remHours })
+    } else if (remMins > 0) {
+      value = t('relDaysMins', { days: diffDays, mins: remMins })
+    } else {
+      value = t('relDays', { n: diffDays })
+    }
+  } else if (diff < 365 * DAY_MS) {
+    value = t('relMonths', { n: Math.floor(diff / (30 * DAY_MS)) })
+  } else {
+    value = t('relYears', { n: Math.floor(diff / (365 * DAY_MS)) })
+  }
   return t('quotaResetIn', { value })
 }
 
@@ -174,9 +196,13 @@ export function resetText(resetTime: string | null, t: QuotaTranslate, now: numb
 }
 
 /**
- * Detailed reset countdown for a quota window:
- * - 5h window: e.g. "resets in 3h 15m" / "resets in 45m"
- * - daily/weekly window: full date + countdown: "MM/DD HH:mm (5d 12h later)" / "(5d later)" / "(45m later)"
+ * Detailed reset countdown for a quota window — EVERY window, 5h included.
+ *
+ * "MM/DD HH:mm (5d 12h 30m later)": the wall-clock moment first, a
+ * minute-precision countdown beside it. The 5h window used to get a bare
+ * "resets in 3h 15m" while daily/weekly showed the concrete date, so the
+ * shortest — the one you act on most urgently — was the only one not saying
+ * WHEN it would refill; it now reads exactly like the weekly line.
  */
 export function formatDetailedReset(
   window: string,
@@ -195,23 +221,24 @@ export function formatDetailedReset(
   const diffMins = Math.floor(diffMs / MINUTE_MS)
   const diffHours = Math.floor(diffMins / 60)
   const diffDays = Math.floor(diffHours / 24)
-
-  if (window === '5h') {
-    if (diffHours > 0) {
-      const mins = diffMins % 60
-      return t('badgeReset5hHoursMins', { hours: diffHours, mins })
-    }
-    return t('badgeReset5hMins', { mins: Math.max(1, diffMins) })
-  }
+  const remHours = diffHours % 24
+  const remMins = diffMins % 60
 
   let countdown = ''
   if (diffDays > 0) {
-    const hours = diffHours % 24
-    countdown = hours > 0
-      ? t('badgeCountdownDaysHours', { days: diffDays, hours })
-      : t('badgeCountdownDays', { days: diffDays })
+    if (remHours > 0 && remMins > 0) {
+      countdown = t('badgeCountdownDaysHoursMins', { days: diffDays, hours: remHours, mins: remMins })
+    } else if (remHours > 0) {
+      countdown = t('badgeCountdownDaysHours', { days: diffDays, hours: remHours })
+    } else if (remMins > 0) {
+      countdown = t('badgeCountdownDaysMins', { days: diffDays, mins: remMins })
+    } else {
+      countdown = t('badgeCountdownDays', { days: diffDays })
+    }
   } else if (diffHours > 0) {
-    countdown = t('badgeCountdownHours', { hours: diffHours })
+    countdown = remMins > 0
+      ? t('badgeCountdownHoursMins', { hours: diffHours, mins: remMins })
+      : t('badgeCountdownHours', { hours: diffHours })
   } else {
     countdown = t('badgeCountdownMins', { mins: Math.max(1, diffMins) })
   }

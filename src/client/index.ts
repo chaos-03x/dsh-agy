@@ -464,6 +464,13 @@ interface AccountHandlers {
    * can be tested; an empty string means "use the account's stored proxy".
    */
   onTestProxy: (index: number, proxy: string) => void
+  /**
+   * Force a quota refresh for THIS account (the limits card's refresh button).
+   *
+   * Named rather than pool-wide so one card's refresh does not probe every
+   * account through its own proxy; the outcome is reported like the toolbar's.
+   */
+  onRefreshLimits: (index: number) => void
 }
 
 /** One account's detail: identity, cumulative usage, proxy, and its actions. */
@@ -581,6 +588,12 @@ function AccountDetail(props: {
    * solo account too (unlike the scheduling quota refresh, which a pool of one
    * skips because measuring it could block the only account).
    */
+  // The card-head aside carries the per-account refresh ACTION (not a redundant
+  // label): one click re-probes THIS account's windows without touching the
+  // rest of the pool.
+  const limitsAside = button(t('refresh'),
+    () => { handlers.onRefreshLimits(account.index) },
+    { size: 'sm', variant: 'ghost', disabled: busy })
   const limitsBlock = card(t('limitsTitle'),
     account.limits === null || account.limits.length === 0
       ? h('div', { className: 'agy-empty' }, t('limitsUnavailable'))
@@ -628,7 +641,8 @@ function AccountDetail(props: {
                 ? h('div', { className: 'agy-limit-burn' },
                   t('limitBurnWarn', { value: burnHorizon(hoursLeft!, t) }))
                 : null)
-          })))))
+          })))),
+    limitsAside)
 
   const usageBlock = usage === null ? null : card(
     t('usageCumulative'),
@@ -2093,10 +2107,17 @@ export function AgySettings(props: {
    *   page would spend an upstream quota call.
    * @param report - whether to surface the outcome. Set only when the user asked
    *   for the refresh, since an automatic one must stay silent.
+   * @param index - restrict the refresh to ONE account (the limits card's
+   *   refresh button). An explicit per-account request forces the probe — the
+   *   click must be able to deliver something newer than the TTL holds — while
+   *   the merge below is already by index, so nothing else changes.
    */
-  const loadLimits = useCallback(async (force = false, report = false) => {
+  const loadLimits = useCallback(async (force = false, report = false, index?: number) => {
     try {
-      const result = await rpc.call('account.limits', force ? { force: true } : {})
+      const payload: { force?: boolean, index?: number } = force || index !== undefined
+        ? { force: true, ...(index === undefined ? {} : { index }) }
+        : {}
+      const result = await rpc.call('account.limits', payload)
       if (!alive.current) return
       const byIndex = new Map(result.limits.map((entry) => [entry.index, entry]))
       setAccounts((current) => current.map((account) => {
@@ -2248,6 +2269,21 @@ export function AgySettings(props: {
     return () => { window.removeEventListener('message', onMessage) }
   }, [refresh])
 
+  // A switch made in the conversation badge's popover (this section is not the
+  // only switch surface) must reach every tab here: the accounts rows re-read
+  // the store, the Models tab reloads its per-account catalog, and the quota
+  // windows refresh WITHOUT force — the badge's own switch already forced one,
+  // and a second forced probe through every proxy would only duplicate it.
+  useEffect(() => {
+    const onAccountChanged = (): void => {
+      void refresh()
+      void loadModels()
+      void loadLimits(false)
+    }
+    window.addEventListener('agy:account-changed', onAccountChanged)
+    return () => { window.removeEventListener('agy:account-changed', onAccountChanged) }
+  }, [loadLimits, loadModels, refresh])
+
   const copyText = useCallback(async (text: string) => {
     await navigator.clipboard?.writeText(text)
   }, [])
@@ -2285,7 +2321,14 @@ export function AgySettings(props: {
 
   const handlers: AccountHandlers = useMemo(() => ({
     t,
-    onActivate: (index) => { void act(() => rpc.call('account.activate', { index })) },
+    onActivate: (index) => {
+      void act(() => rpc.call('account.activate', { index })).then(() => {
+        // The activated account may carry a different catalog: reload the model
+        // list now (also clearing a stale model error) instead of leaving the
+        // Models tab showing the previous account's models until a remount.
+        void loadModels()
+      })
+    },
     onVerify: (index) => {
       void runAction(async () => {
         const result = await rpc.call('account.verify', { index })
@@ -2353,7 +2396,13 @@ export function AgySettings(props: {
           + (result.error === undefined ? '' : `\n${result.error}`))
       })
     },
-  }), [act, copyText, models, refresh, rpc, runAction, setActionError, setNotice, t])
+    /**
+     * Force the quota refresh for ONE account (the limits card's refresh
+     * button). Naming the index keeps a single card from probing the whole pool
+     * through several proxies; the outcome reports like the toolbar's refresh.
+     */
+    onRefreshLimits: (index) => { void loadLimits(true, true, index) },
+  }), [act, copyText, loadLimits, loadModels, models, refresh, rpc, runAction, setActionError, setNotice, t])
 
   const tabButton = (id: TabId, label: string, count?: number): ReactNode =>
     h('button', {

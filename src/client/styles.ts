@@ -736,9 +736,39 @@ export const AGY_STYLES_CSS = `
   border-radius: 9px;
   padding: 8px 12px;
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.agy-ui-account-card-row {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+/* The switcher is a NATIVE <select> (the primitives catalog has no Select):
+   only the frame is themed here, the popup itself stays the platform's. */
+.agy-ui-account-select {
+  width: 100%;
+  font: var(--dsw-font-xxs-12);
+  color: ${aliasVar('label-primary')};
+  background: ${aliasVar('bg-layer-3')};
+  border: 0.5px solid ${aliasVar('border-l2')};
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.agy-ui-account-select:focus-visible {
+  outline: 1px solid ${aliasVar('brand-primary')};
+  outline-offset: 1px;
+}
+
+.agy-ui-account-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .agy-ui-account-email {

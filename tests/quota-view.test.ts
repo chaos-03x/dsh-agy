@@ -310,7 +310,10 @@ describe('quota cards', () => {
       window('h', '5h', 0.8, at(195)),
       window('w', 'weekly', 0.5, at(5 * 24 * 60 + 12 * 60)),
     ], t, NOW, true)
-    expect(rows[0]?.reset).toBe(zh.badgeReset5hHoursMins.replace('{hours}', '3').replace('{mins}', '15'))
+    // Every window — 5h included — shows the full date plus a minute-precision
+    // countdown, so the shortest window is no longer the only one not saying
+    // WHEN it resets. The date substring is TZ-dependent; the countdown is not.
+    expect(rows[0]?.reset).toContain(zh.badgeCountdownHoursMins.replace('{hours}', '3').replace('{mins}', '15'))
     expect(rows[1]?.reset).toContain(zh.badgeCountdownDaysHours.replace('{days}', '5').replace('{hours}', '12'))
   })
 })
@@ -387,13 +390,16 @@ describe('relative time', () => {
   })
 
   it('formats detailed countdowns for 5h and longer windows', () => {
-    // 5h window: hours and minutes
-    expect(formatDetailedReset('5h', at(195), t, NOW)).toBe(
-      zh.badgeReset5hHoursMins.replace('{hours}', '3').replace('{mins}', '15'),
+    // 5h now reads EXACTLY like the weekly line: the full date plus a
+    // minute-precision countdown. (A bare "resets in 3h 15m" was the only
+    // window not saying when it would refill.) The wall-clock substring is
+    // TZ-dependent, so the countdown carries the assertion.
+    expect(formatDetailedReset('5h', at(195), t, NOW)).toContain(
+      zh.badgeCountdownHoursMins.replace('{hours}', '3').replace('{mins}', '15'),
     )
     // 5h window: minutes only (< 1 hour)
-    expect(formatDetailedReset('5h', at(45), t, NOW)).toBe(
-      zh.badgeReset5hMins.replace('{mins}', '45'),
+    expect(formatDetailedReset('5h', at(45), t, NOW)).toContain(
+      zh.badgeCountdownMins.replace('{mins}', '45'),
     )
 
     // Weekly window: days and hours

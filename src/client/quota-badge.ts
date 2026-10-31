@@ -68,6 +68,28 @@ function quotaColorForWindow(percent: number | null): string {
   return quotaColor(percent / 100)
 }
 
+/**
+ * The account the badge's "next" button rotates TO, or null when there is
+ * nothing to rotate to.
+ *
+ * Exported for a direct unit test — the rule is pure and the client test
+ * harness does not render. Eligible accounts are the non-disabled ones (a
+ * disabled row cannot serve requests, so activating it would be a no-op);
+ * rotation starts AFTER the active account and wraps around. When no account
+ * is marked active (an all-disabled pool, or a reply that predates the flag),
+ * rotation still moves forward from the first eligible row rather than
+ * dead-ending.
+ */
+export function nextSwitchableIndex(accounts: readonly AccountView[]): number | null {
+  const switchable = accounts.filter((candidate) => candidate.state !== 'disabled')
+  if (switchable.length < 2) return null
+  const activeIndex = accounts.find((candidate) => candidate.active)?.index ?? switchable[0]!.index
+  const pos = switchable.findIndex((candidate) => candidate.index === activeIndex)
+  const anchor = pos >= 0 ? pos : switchable.length - 1
+  const next = switchable[(anchor + 1) % switchable.length]!
+  return next.index === activeIndex ? null : next.index
+}
+
 interface EnrichedWindow {
   bucketId: string
   label: string
@@ -243,41 +265,52 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const switchableAccounts = accounts.filter((candidate) => candidate.state !== 'disabled')
 
   /**
+   * Announce a completed switch.
+   *
+   * The badge lives in the conversation header while the Settings section and
+   * the host's model picker live elsewhere; they cannot observe this component's
+   * state. The window event is the same pattern the UI-pref toggles use, and the
+   * listeners reload from the store so every surface shows the new account.
+   */
+  const announceAccountChanged = (index: number): void => {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('agy:account-changed', { detail: { index } }))
+    }
+  }
+
+  /**
    * Rotate the pool's active account forward one position (wrapping around),
    * then force a quota refresh so the badge and popover show the new account's
    * numbers immediately instead of on the next scheduled tick.
    */
   const handleSwitchNext = useCallback(async () => {
-    // Guard: the button is disabled anyway, but keep the handler safe standalone.
-    if (switchableAccounts.length < 2) return
-    const activePos = accounts.findIndex((candidate) => candidate.active)
-    const current = activePos >= 0 ? activePos : 0
-    const inSwitchable = switchableAccounts.findIndex((candidate) => candidate.index === current)
-    const anchor = inSwitchable >= 0 ? inSwitchable : -1
-    const next = switchableAccounts[(anchor + 1) % switchableAccounts.length]
-    if (next.index === current) return
+    const next = nextSwitchableIndex(accounts)
+    if (next === null) return
     setIsUpdating(true)
     try {
-      await rpc.call('account.activate', { index: next.index })
+      await rpc.call('account.activate', { index: next })
       // The activated account may see different windows; a forced reload reads
       // them now rather than waiting out the limits cache TTL.
       await load(true)
+      announceAccountChanged(next)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsUpdating(false)
     }
-  }, [accounts, load, rpc, switchableAccounts])
+  }, [accounts, load, rpc])
 
   /**
    * Switch the pool's active account to the given index, then refresh its quota.
    */
   const handleSwitchTo = useCallback(async (index: number) => {
-    if (accounts.findIndex((candidate) => candidate.active) === index) return
+    const activePos = accounts.find((candidate) => candidate.active)?.index
+    if (activePos === index) return
     setIsUpdating(true)
     try {
       await rpc.call('account.activate', { index })
       await load(true)
+      announceAccountChanged(index)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -515,6 +548,14 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
                 null,
                 h('div', { className: 'agy-ui-account-email' }, desensitizeEmail(activeAccount.email)),
                 h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${activeAccount.projectId || t('thinkingDefaultAll')}`),
+                // The model version upstream actually routed the last request
+                // to. Plain text only — NO state tag: upstream's version suffix
+                // does not reliably imply a production/canary split, and a
+                // guessed label is a false alarm the reader acts on.
+                activeAccount.actualModel === null
+                  ? null
+                  : h('div', { className: 'agy-ui-account-project' },
+                    `${t('actualModelLabel')}: ${activeAccount.actualModel}`),
               ),
               h(
                 Tag,
