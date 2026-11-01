@@ -1715,16 +1715,19 @@ describe('fingerprint version freshness', () => {
       expect(sessionArgon!.index).toBe(0)
       expect(sessionArgon!.account.email).toBe('acc0@example.com')
 
-      // Picking argon set storage.activeIndex to 0
-      expect((await store.load()).activeIndex).toBe(0)
+      // Borrowing argon for this conversation MUST NOT mutate global activeIndex,
+      // because acc1 is healthy and was only bypassed for this model.
+      expect((await store.load()).activeIndex).toBe(1)
 
-      // When acc0 hits rate-limit on gemini-4-argon, rotation cannot rotate to acc1 (argon disabled)
+      // When borrowed acc0 hits rate-limit on gemini-4-argon, it enters cooldown,
+      // but activeIndex remains 1 because acc0 was never the active account.
       await sessions.reportFailure('rate-limit', sessionArgon!, { model: 'gemini-4-argon' })
-      expect((await store.load()).activeIndex).toBe(0) // stays at 0 because acc1 does not support argon
+      expect((await store.load()).activeIndex).toBe(1)
 
-      // For a common model (gemini-3.8-flash-tiered), acc1 is rotated to if acc0 is rate-limited on flash
-      await sessions.reportFailure('rate-limit', sessionArgon!, { model: 'gemini-3.8-flash-tiered' })
-      expect((await store.load()).activeIndex).toBe(1) // rotated to acc1
+      // A concurrent or subsequent session using flash continues to route to acc1
+      const sessionFlash = await sessions.getSession('gemini-3.8-flash-tiered', undefined, 'conv-flash')
+      expect(sessionFlash!.index).toBe(1)
+      expect(sessionFlash!.account.email).toBe('acc1@example.com')
     })
   })
 })

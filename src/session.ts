@@ -847,13 +847,16 @@ export class AgySessionManager {
     // Prioritize the active account as long as it is enabled, supports the model,
     // not cooling down, not family rate-limited, and not quota-exhausted.
     const active = storage.accounts[storage.activeIndex]
-    const isActiveUsable = (acc: ManagedAccount | undefined): acc is ManagedAccount =>
+    const isActiveHealthy = (acc: ManagedAccount | undefined): acc is ManagedAccount =>
       acc !== undefined
       && acc.enabled !== false
-      && isModelSupportedByAccount(acc, model)
       && !isCoolingDown(acc, now)
       && !isFamilyRateLimited(acc, familyKey, now)
       && !isFamilyQuotaExhausted(acc, family, now)
+
+    const isActiveUsable = (acc: ManagedAccount | undefined): acc is ManagedAccount =>
+      isActiveHealthy(acc)
+      && isModelSupportedByAccount(acc, model)
 
     if (isActiveUsable(active) && this.inFlightCount(this.accountKey(active), now) < MAX_IN_FLIGHT_PER_ACCOUNT) {
       return { account: active, index: storage.activeIndex }
@@ -892,7 +895,17 @@ export class AgySessionManager {
       const blockedUntil = Math.min(...blocked.map((candidate) => candidate.blockedUntil ?? now))
       throw new AgyPoolBlockedError(retryable.length > 0 ? 'retryable' : 'quota-exhausted', blockedUntil)
     }
-    if (picked.index !== storage.activeIndex) {
+    // Only advance the global activeIndex when the currently active account is
+    // genuinely unusable (disabled, cooling down, rate-limited, or quota-exhausted).
+    // If the active account is healthy and was only bypassed because it lacks
+    // support for this specific model (model-aware routing) or because of
+    // in-flight concurrency spreading, keep the user's activeIndex intact so
+    // normal conversations and settings continue using the preferred account.
+    const shouldRotateActiveIndex =
+      picked.index !== storage.activeIndex
+      && (!active || active.enabled === false || !isActiveHealthy(active))
+
+    if (shouldRotateActiveIndex) {
       storage.activeIndex = picked.index
       await this.store.mutate((s) => {
         s.activeIndex = picked.index
@@ -1196,7 +1209,7 @@ export class AgySessionManager {
         const currentIndex = storage.accounts.findIndex((a) => this.accountKey(a) === key)
         const targetModel = info?.model ?? familyKeyOf(info?.model)
         const nextIndex = pickNextAccountIndex(storage.accounts, currentIndex >= 0 ? currentIndex : storage.activeIndex, Date.now(), targetModel)
-        if (nextIndex !== storage.activeIndex) {
+        if (currentIndex === storage.activeIndex && nextIndex !== storage.activeIndex) {
           storage.activeIndex = nextIndex
           nextIndexToRotate = nextIndex
         }
