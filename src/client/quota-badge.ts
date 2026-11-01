@@ -153,6 +153,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const [accounts, setAccounts] = useState<AccountView[]>([])
   const [loading, setLoading] = useState(false)
   const [isUpdating, setIsUpdating] = useState(false)
+  const [isOpen, setIsOpen] = useState(false)
   const [isPinned, setIsPinned] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
   const [now, setNow] = useState(() => Date.now())
@@ -380,13 +381,10 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     })()
   }, [accounts, load, rpc])
 
-  // Click-only popover: no hover open and no hover timers. The badge is a
-  // button — click toggles the board — so a pointer grazing the header never
-  // throws a panel over the conversation.
-  const isOpen = isPinned
-
-  // Dismiss pinned popover on outside pointer
-  useDismissOnOutsidePointer(rootRef, isPinned, setIsPinned, panelRef)
+  // Click-only popover: no hover open. The badge toggles open/close, while
+  // the pin control inside the popover locks it against outside dismiss.
+  // Dismiss popover on outside pointer only when NOT pinned.
+  useDismissOnOutsidePointer(rootRef, isOpen && !isPinned, setIsOpen, panelRef)
 
   // Anchored position calculation for desktop placement
   const anchored = useAnchoredPosition({
@@ -398,12 +396,24 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     margin: 12,
   })
 
+  const handleBadgeClick = (e?: { stopPropagation: () => void }) => {
+    e?.stopPropagation()
+    setIsOpen((prev) => {
+      if (prev) {
+        setIsPinned(false)
+        return false
+      }
+      return true
+    })
+  }
+
   const handleTogglePin = (e?: { stopPropagation: () => void }) => {
     e?.stopPropagation()
     setIsPinned((prev) => !prev)
   }
 
   const handleClose = () => {
+    setIsOpen(false)
     setIsPinned(false)
   }
 
@@ -422,24 +432,21 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   // read-only over the pool).
   const viewAccount = accounts.find((candidate) => candidate.index === viewIndex) ?? activeAccount
   // The badge alternates the ACTIVE account's two tracked readings —
-  // `account · 5h 82%` then `account · weekly 90%` — every RENDER_TICK_MS
-  // (5s). The flip is pure display arithmetic over `now`: it never loads
-  // quota, never touches the pool. With only one window measured, that one
-  // shows steadily instead of flickering to a count; with the WEEKLY window
-  // at 0% the alternation stops and the weekly reading holds — a spent week
-  // is the answer to "why is nothing serving", and it must not rotate away.
+  // `account · 5h quota 82%` then `account · weekly quota 90%` — every
+  // RENDER_TICK_MS (5s). The flip is pure display arithmetic over `now`:
+  // it never loads quota, never touches the pool. With only one window
+  // measured, that one shows steadily instead of flickering to a count.
   const activeRead = accountQuotaRead(activeAccount, now)
   const has5h = activeRead.fiveHour !== null
   const hasWeekly = activeRead.weekly !== null
-  const weeklyPinned = activeRead.weekly === 0
   const flipPhase = Math.floor(now / RENDER_TICK_MS) % 2
-  const showWeekly = weeklyPinned || (has5h && hasWeekly ? flipPhase === 1 : hasWeekly && !has5h)
+  const showWeekly = has5h && hasWeekly ? flipPhase === 1 : hasWeekly && !has5h
   const shownToken = showWeekly ? 'weekly' : '5h'
   const shownFraction = showWeekly ? activeRead.weekly : activeRead.fiveHour
   // The label and percent are hoisted out of the call-site objects: the i18n
   // walker reads each `t('key', {...})` params up to its first `}`, which a
   // template literal's `${...}` would cut short.
-  const shownWindowLabel = `${windowLabel(shownToken, t)} `
+  const shownWindowLabel = shownToken === 'weekly' ? t('badgeWindowWeekly') : t('badgeWindow5h')
   const shownPercent = toPercent(shownFraction) ?? 0
   const accountName = activeAccount?.email ? desensitizeEmail(activeAccount.email) : null
   const displayText = shownFraction !== null && accountName !== null
@@ -475,22 +482,25 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       : switchableAccounts
 
   const rawCards = buildQuotaCards(viewAccount, t, now, detailedReset)
-  // The weekly drain grays the 5h bars (the shared `barColorFor` rule): a
-  // spent week makes the 5h figure moot, and a green bar would promise
-  // headroom the week no longer has.
-  const viewWeekly = viewAccount ? accountQuotaRead(viewAccount, now).weekly : null
-  const cards: EnrichedCard[] = rawCards.map((rc) => ({
-    key: rc.key,
-    title: rc.title,
-    windows: rc.windows.map((w) => ({
-      bucketId: w.bucketId,
-      label: w.label,
-      percent: w.percent,
-      color: barColorFor(w.window, w.percent === null ? null : w.percent / 100, viewWeekly),
-      reset: w.reset,
-      stale: w.stale,
-    })),
-  }))
+  // Each card is an upstream group (e.g. Gemini, Claude+GPT). The 5h bar turns
+  // gray only when THAT GROUP's weekly quota is 0% AND 5h is not 0 (if 5h is 0,
+  // it is red). Groups with healthy weekly quotas keep their green/amber 5h bar.
+  const cards: EnrichedCard[] = rawCards.map((rc) => {
+    const cardWeeklyRow = rc.windows.find((w) => w.window === 'weekly')
+    const cardWeeklyFraction = cardWeeklyRow && cardWeeklyRow.percent !== null ? cardWeeklyRow.percent / 100 : null
+    return {
+      key: rc.key,
+      title: rc.title,
+      windows: rc.windows.map((w) => ({
+        bucketId: w.bucketId,
+        label: w.label,
+        percent: w.percent,
+        color: barColorFor(w.window, w.percent === null ? null : w.percent / 100, cardWeeklyFraction),
+        reset: w.reset,
+        stale: w.stale,
+      })),
+    }
+  })
   const limitsAge = viewAccount?.limitsUpdatedAt
     ? agoText(new Date(viewAccount.limitsUpdatedAt).toISOString(), t, now)
     : null
@@ -604,44 +614,37 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         ? h(
             'div',
             { className: 'agy-ui-account-card' },
+            // The account picker directly replaces the static email text in
+            // the card's top slot: selecting an account changes the viewed
+            // row and nothing else (zero RPC).
+            h(
+              'select',
+              {
+                className: 'agy-ui-account-select',
+                value: String(viewAccount.index),
+                title: t('badgeAccountView'),
+                'aria-label': t('badgeAccountView'),
+                onChange: (event: { target: { value: string } }) => {
+                  setViewIndex(Number(event.target.value))
+                },
+              },
+              selectOptions.map((candidate) =>
+                h('option',
+                  { key: candidate.index, value: String(candidate.index) },
+                  candidate.email ? desensitizeEmail(candidate.email) : `#${candidate.index}`)),
+            ),
             h(
               'div',
-              { className: 'agy-ui-account-card-row' },
-              h(
-                'div',
-                null,
-                h('div', { className: 'agy-ui-account-email' }, desensitizeEmail(viewAccount.email)),
-                h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${viewAccount.projectId || t('thinkingDefaultAll')}`),
-                // The model version upstream actually routed the last request
-                // to. Plain text only — NO state tag: upstream's version suffix
-                // does not reliably imply a production/canary split, and a
-                // guessed label is a false alarm the reader acts on.
-                viewAccount.actualModel === null
-                  ? null
-                  : h('div', { className: 'agy-ui-account-project' },
-                    `${t('actualModelLabel')}: ${viewAccount.actualModel}`),
-              ),
-              // The account picker occupies the state tag's old place and
-              // names the ONE account this panel displays. It is a view
-              // selector, not an activation: switching rows re-aims the panel
-              // and nothing else — rotating the pool is the badge arrow's and
-              // the rotation rule's job.
-              h(
-                'select',
-                {
-                  className: 'agy-ui-account-select',
-                  value: String(viewAccount.index),
-                  title: t('badgeAccountView'),
-                  'aria-label': t('badgeAccountView'),
-                  onChange: (event: { target: { value: string } }) => {
-                    setViewIndex(Number(event.target.value))
-                  },
-                },
-                selectOptions.map((candidate) =>
-                  h('option',
-                    { key: candidate.index, value: String(candidate.index) },
-                    candidate.email ? desensitizeEmail(candidate.email) : `#${candidate.index}`)),
-              ),
+              null,
+              h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${viewAccount.projectId || t('thinkingDefaultAll')}`),
+              // The model version upstream actually routed the last request
+              // to. Plain text only — NO state tag: upstream's version suffix
+              // does not reliably imply a production/canary split, and a
+              // guessed label is a false alarm the reader acts on.
+              viewAccount.actualModel === null
+                ? null
+                : h('div', { className: 'agy-ui-account-project' },
+                  `${t('actualModelLabel')}: ${viewAccount.actualModel}`),
             ),
           )
         : h(
@@ -726,7 +729,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         className: `agy-ui-badge ${isPinned ? 'pinned' : ''}${statusClass ? ` ${statusClass}` : ''}`,
         title: badgeTooltip,
         'aria-label': t('badgeAria'),
-        onClick: handleTogglePin,
+        onClick: handleBadgeClick,
       },
       h(StateDot, {
         state: effectiveDotState,

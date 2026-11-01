@@ -612,7 +612,7 @@ function AccountDetail(props: {
           : h('div', { className: 'agy-limit-age' },
             t('limitsMeasured', { ago: agoText(new Date(account.limitsUpdatedAt).toISOString(), t, now) })),
         ...account.limits.map((group) => {
-          const weeklyFraction = accountQuotaRead(account, now).weekly
+          const groupWeekly = group.windows.find((w) => w.window === 'weekly')?.remainingFraction ?? null
           return h('div', { className: 'agy-limit-group', key: group.name },
             h('div', { className: 'agy-limit-group-name' }, group.name),
             ...group.windows.map((window) => {
@@ -636,7 +636,7 @@ function AccountDetail(props: {
                   h('span', { className: 'agy-limit-track' },
                     fraction === null
                       ? null
-                      : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: barColorFor(window.window, fraction, weeklyFraction) } })),
+                      : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: barColorFor(window.window, fraction, groupWeekly) } })),
                   // An unreported fraction is an em dash, never "0%": unknown
                   // headroom and no headroom are opposite facts. A dedicated key
                   // rather than reusing `noProject`, whose NAME would then be wrong

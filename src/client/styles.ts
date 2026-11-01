@@ -273,6 +273,7 @@ export const AGY_STYLES_CSS = `
 
 /* ── Disclosure (the collapsible model-quota block) ──────────────────────── */
 .agy-disclosure { border-top: 0.5px solid ${aliasVar('border-l1')}; }
+.agy-card-body > .agy-disclosure { border-top: 0; }
 .agy-disclosure-toggle {
   display: flex; align-items: center; gap: 7px; width: 100%;
   padding: 9px 0; border: 0; cursor: pointer;
@@ -853,18 +854,16 @@ export const AGY_STYLES_CSS = `
 
 /* The switcher is a NATIVE <select> (the primitives catalog has no Select):
    only the frame is themed here, the popup itself stays the platform's. It
-   occupies the state tag's old slot beside the identity column, so it sizes to
-   its content and yields the row's remainder to the text. */
+   occupies the account card's top slot in place of static email text,
+   so it spans cleanly and acts as the board's account view picker. */
 .agy-ui-account-select {
-  width: auto;
-  max-width: 56%;
-  flex: 0 1 auto;
-  font: var(--dsw-font-xxs-12);
+  width: 100%;
+  font: var(--dsw-font-xxs-strong-12);
   color: ${aliasVar('label-primary')};
   background: ${aliasVar('bg-layer-3')};
   border: 0.5px solid ${aliasVar('border-l2')};
   border-radius: 6px;
-  padding: 3px 8px;
+  padding: 4px 8px;
   cursor: pointer;
 }
 

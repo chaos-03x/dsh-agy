@@ -347,8 +347,8 @@ function rotationWindows(group: QuotaGroup): QuotaWindow[] {
  * A window that reported no reset moment at all is NOT stale — the pool keeps
  * using its fraction, and so does this.
  */
-function resetInPast(resetTime: string | null, now: number): boolean {
-  if (resetTime === null) return false
+function resetInPast(resetTime: string | null | undefined, now: number): boolean {
+  if (!resetTime) return false
   return parseFutureResetMs(resetTime, now) === undefined
 }
 
@@ -552,7 +552,10 @@ export function windowRows(
  */
 export function barColorFor(token: string, fraction: number | null, weeklyFraction: number | null): string {
   if (fraction === null) return aliasVar('label-tertiary')
-  if (token === '5h' && weeklyFraction === 0) return aliasVar('label-tertiary')
+  // Only when weekly quota is 0% AND 5h quota is NOT 0, the 5h progress bar
+  // turns gray (unusable because weekly has drained, even though 5h has runway).
+  // When 5h is itself 0%, it renders red as an exhausted window.
+  if (token === '5h' && weeklyFraction === 0 && fraction > 0) return aliasVar('label-tertiary')
   return quotaColor(fraction)
 }
 

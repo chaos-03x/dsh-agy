@@ -372,9 +372,11 @@ describe('quota tints and drain thresholds', () => {
   })
 
   it('turns the 5h bar gray when weekly quota is exhausted (0%)', () => {
-    // When weekly quota is 0, the 5h window is moot upstream: no requests can serve.
-    // The bar renders neutral gray (label-tertiary) instead of misleading green.
+    // When weekly quota is 0 and 5h is NOT 0, the 5h window is moot upstream:
+    // the bar renders neutral gray (label-tertiary) instead of misleading green.
     expect(barColorFor('5h', 0.8, 0)).toContain('--dsw-alias-label-tertiary')
+    // When 5h is itself 0%, it renders red (state-error-primary), not gray.
+    expect(barColorFor('5h', 0, 0)).toContain('--dsw-alias-state-error-primary')
     // When weekly quota is not 0, 5h renders its normal quotaColor.
     expect(barColorFor('5h', 0.8, 0.5)).toContain('--dsw-alias-state-success-primary')
     expect(barColorFor('5h', 0.15, 0.5)).toContain('--dsw-alias-state-warn-primary')
