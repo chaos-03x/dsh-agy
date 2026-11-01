@@ -14,12 +14,14 @@
  * and stays a real HTTP route: Google redirects a browser to it.
  */
 
+import type { ModelRoutingTarget, ModelRoutingView } from './model-routing-types.ts'
 import type { MultimodalSource, MultimodalView } from './multimodal-types.ts'
 import type { ThinkingBudgets } from './thinking-types.ts'
 import type { QuotaGroup } from './types.ts'
 import type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 import type { UsageCounters, UsageSource } from './usage-types.ts'
 
+export type { ModelRoutingTarget, ModelRoutingView } from './model-routing-types.ts'
 export type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 export type { QuotaGroup, QuotaWindow } from './types.ts'
 export type { ThinkingBudgets, ThinkingLevel } from './thinking-types.ts'
@@ -423,6 +425,11 @@ export interface AgyRpcMethods {
   }
   'ui.prefs.get': { payload: Record<string, never>; result: UiPrefsView }
   'ui.prefs.set': { payload: SetUiPrefsPayload; result: UiPrefsView }
+  'modelRouting.get': { payload: Record<string, never>; result: ModelRoutingView }
+  'modelRouting.set': {
+    payload: { target: ModelRoutingTarget }
+    result: ModelRoutingView
+  }
 }
 
 /** Every method name, for the host's dispatch guard and the client's typing. */

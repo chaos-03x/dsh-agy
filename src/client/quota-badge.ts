@@ -23,12 +23,12 @@ import { aliasVar, installAgyStyles } from './styles.ts'
 import {
   accountQuotaRead,
   agoText,
+  barColorFor,
   buildQuotaCards,
   desensitizeEmail,
   dotStateFor,
   isAccountQuotaExhausted,
   nextHealthyIndex,
-  quotaColor,
   shouldProbeLimits,
   toPercent,
   windowLabel,
@@ -44,32 +44,20 @@ import type { QuotaWindow } from '../types.ts'
 const AUTO_REFRESH_THROTTLE_MS = 120_000
 
 /**
- * Render-tick cadence for the countdown and staleness figures. Pure state
- * recompute from already-fetched data — deliberately ZERO RPC: the fetch paths
- * are mount, window wake (throttled above) and the popover's refresh button,
- * and without this tick the countdown text would freeze between fetches.
+ * Render-tick cadence for the countdown, staleness figures, AND the badge's
+ * 5h/weekly reading alternation. Pure state recompute from already-fetched
+ * data — deliberately ZERO RPC: the fetch paths are mount, window wake
+ * (throttled above), the popover's refresh button, and the user-configured
+ * auto-refresh timer — and without this tick the countdown text would freeze
+ * between fetches. It runs at the flip cadence so the alternation lands
+ * exactly on it.
  */
-const RENDER_TICK_MS = 60_000
-
-/**
- * Grace period before hover close (250ms).
- */
-const HOVER_CLOSE_DELAY_MS = 250
+const RENDER_TICK_MS = 5_000
 
 /**
  * Mobile layout breakpoint (aligned with styles.ts media query).
  */
 export const MOBILE_BREAKPOINT_PX = 640
-
-/**
- * Quota bar and percentage color for a window.
- * Strictly unified with upstream Settings panel via quotaColor(percent / 100).
- * Thresholds: >70% success green, 30%-70% warning amber, <30% error red.
- */
-function quotaColorForWindow(percent: number | null): string {
-  if (percent === null) return aliasVar('label-tertiary')
-  return quotaColor(percent / 100)
-}
 
 /**
  * The account the badge's "next" button rotates TO, or null when there is
@@ -165,16 +153,20 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const [accounts, setAccounts] = useState<AccountView[]>([])
   const [loading, setLoading] = useState(false)
   const [isUpdating, setIsUpdating] = useState(false)
-  const [isHovered, setIsHovered] = useState(false)
   const [isPinned, setIsPinned] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [detailedReset, setDetailedReset] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The account the PANEL displays, named by the popover's dropdown. It is a
+  // VIEW, not an activation: picking a row changes what this board shows and
+  // nothing else (zero RPC), and it follows the pool's active account
+  // automatically — rotation and the rotate arrow both move it (sync effect
+  // below).
+  const [viewIndex, setViewIndex] = useState<number | null>(null)
 
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
-  const leaveTimerRef = useRef<number | null>(null)
   const lastFetchTimeRef = useRef<number>(0)
   const failedAtRef = useRef<number | null>(null)
   // The auto-refresh interval the Settings card stores, in minutes; null =
@@ -267,7 +259,6 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       window.clearInterval(tick)
       window.removeEventListener('focus', onWake)
       document.removeEventListener('visibilitychange', onWake)
-      if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
     }
   }, [load])
 
@@ -335,21 +326,15 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   /**
    * Switch the pool's active account to the given index, then refresh its quota.
    */
-  const handleSwitchTo = useCallback(async (index: number) => {
-    const activePos = accounts.find((candidate) => candidate.active)?.index
-    if (activePos === index) return
-    setIsUpdating(true)
-    try {
-      await rpc.call('account.activate', { index })
-      await load(true)
-      lastManualIndexRef.current = index
-      announceAccountChanged(index)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setIsUpdating(false)
-    }
-  }, [accounts, load, rpc])
+  // The panel follows the pool's active account automatically: a rotation or
+  // a rotate-arrow switch both land here, so the board's current account is
+  // always the one the pool is serving (the user's manual view pick survives
+  // loads that do not change the active index).
+  const activeIndex = accounts.find((candidate) => candidate.active)?.index
+    ?? (accounts.length > 0 ? accounts[0]!.index : null)
+  useEffect(() => {
+    setViewIndex(activeIndex)
+  }, [activeIndex])
 
   // A manual pick is an explicit override: the user chose to sit on this
   // account, so the auto-rotate below must not bounce them off it until the
@@ -395,7 +380,10 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     })()
   }, [accounts, load, rpc])
 
-  const isOpen = isPinned || isHovered
+  // Click-only popover: no hover open and no hover timers. The badge is a
+  // button — click toggles the board — so a pointer grazing the header never
+  // throws a panel over the conversation.
+  const isOpen = isPinned
 
   // Dismiss pinned popover on outside pointer
   useDismissOnOutsidePointer(rootRef, isPinned, setIsPinned, panelRef)
@@ -410,48 +398,13 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     margin: 12,
   })
 
-  const handleMouseEnterBadge = () => {
-    if (leaveTimerRef.current !== null) {
-      window.clearTimeout(leaveTimerRef.current)
-      leaveTimerRef.current = null
-    }
-    setIsHovered(true)
-  }
-
-  const handleMouseLeaveBadge = () => {
-    if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
-    leaveTimerRef.current = window.setTimeout(() => {
-      setIsHovered(false)
-    }, HOVER_CLOSE_DELAY_MS)
-  }
-
-  const handleMouseEnterPopover = () => {
-    if (leaveTimerRef.current !== null) {
-      window.clearTimeout(leaveTimerRef.current)
-      leaveTimerRef.current = null
-    }
-  }
-
-  const handleMouseLeavePopover = () => {
-    if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
-    leaveTimerRef.current = window.setTimeout(() => {
-      setIsHovered(false)
-    }, HOVER_CLOSE_DELAY_MS)
-  }
-
   const handleTogglePin = (e?: { stopPropagation: () => void }) => {
     e?.stopPropagation()
     setIsPinned((prev) => !prev)
-    setIsHovered(true)
   }
 
   const handleClose = () => {
-    if (leaveTimerRef.current !== null) {
-      window.clearTimeout(leaveTimerRef.current)
-      leaveTimerRef.current = null
-    }
     setIsPinned(false)
-    setIsHovered(false)
   }
 
   const handleRefreshClick = async (e: { stopPropagation: () => void }) => {
@@ -464,18 +417,23 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const accountCount = accounts.length
   const rawDot = dotStateFor(accounts)
   const dotState = rawDot === 'done' ? 'active' : rawDot === 'warning' ? 'cooling' : 'disabled'
+  // The panel shows ONLY the account the dropdown names (a pure view pick —
+  // watching one account must not switch the pool's traffic, so the select is
+  // read-only over the pool).
+  const viewAccount = accounts.find((candidate) => candidate.index === viewIndex) ?? activeAccount
   // The badge alternates the ACTIVE account's two tracked readings —
-  // `account · 5h 82%` then `account · weekly 90%` — instead of ranking a
-  // single "tightest" window, so the user sees both numbers the pool rotates
-  // on. The flip rides the render tick that already runs (zero RPC); with only
-  // one window measured, that one shows steadily instead of flickering to a
-  // count.
+  // `account · 5h 82%` then `account · weekly 90%` — every RENDER_TICK_MS
+  // (5s). The flip is pure display arithmetic over `now`: it never loads
+  // quota, never touches the pool. With only one window measured, that one
+  // shows steadily instead of flickering to a count; with the WEEKLY window
+  // at 0% the alternation stops and the weekly reading holds — a spent week
+  // is the answer to "why is nothing serving", and it must not rotate away.
   const activeRead = accountQuotaRead(activeAccount, now)
   const has5h = activeRead.fiveHour !== null
   const hasWeekly = activeRead.weekly !== null
-  const showWeekly = has5h && hasWeekly
-    ? Math.floor(now / RENDER_TICK_MS) % 2 === 1
-    : hasWeekly && !has5h
+  const weeklyPinned = activeRead.weekly === 0
+  const flipPhase = Math.floor(now / RENDER_TICK_MS) % 2
+  const showWeekly = weeklyPinned || (has5h && hasWeekly ? flipPhase === 1 : hasWeekly && !has5h)
   const shownToken = showWeekly ? 'weekly' : '5h'
   const shownFraction = showWeekly ? activeRead.weekly : activeRead.fiveHour
   // The label and percent are hoisted out of the call-site objects: the i18n
@@ -488,33 +446,39 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     ? t('badgeAccountQuotaFormat', { account: accountName, window: shownWindowLabel, percent: shownPercent })
     : t('badgeCountFormat', { count: accountCount })
 
-  // The header's traffic light follows the QUOTA contract, not the pool's
-  // account-state vocabulary: EITHER tracked window at exactly 0% is red (the
-  // pool would rotate off it too), a live 5h reading below 20% is amber, and
-  // anything else keeps the healthy look. Classes ride the badge and the dot;
-  // the dot rules are declared after the state rules in styles.ts so the quota
-  // verdict wins the cascade when both land.
+  // The quota verdict recolors the breathing dot ONLY — the label keeps the
+  // theme's plain text color, so red/amber never fights the caption for
+  // attention. Classes ride the badge and the dot; the dot rules in styles.ts
+  // override `color` (the primitive paints its halo and core from
+  // currentColor) and are declared after the state rules so the quota verdict
+  // wins the cascade when both land.
   const exhausted = isAccountQuotaExhausted(activeAccount, now)
   const fiveHourLow = activeRead.fiveHour !== null && activeRead.fiveHour > 0 && activeRead.fiveHour < 0.2
+  const effectiveDotState: StateDotState = exhausted
+    ? 'error'
+    : fiveHourLow || rawDot === 'warning'
+      ? 'warning'
+      : rawDot === 'idle'
+        ? 'idle'
+        : 'done'
   const statusClass = exhausted ? 'quota-error' : fiveHourLow ? 'quota-warn' : ''
-  const statusColor = exhausted
-    ? aliasVar('state-error-primary')
-    : fiveHourLow
-      ? aliasVar('state-warn-primary')
-      : null
 
-  // The picker lists every serviceable account. The active row joins even when
-  // the switch rules would exclude it (an all-drained pool keeps its active
-  // row selectable-looking) so the select's value always has an option to show
-  // instead of rendering blank.
-  const selectOptions = activeAccount !== undefined
-    && switchableAccounts.some((candidate) => candidate.index === activeAccount.index)
+  // The picker lists every serviceable account. The viewed row joins even when
+  // the switch rules would exclude it (a disabled active row in an all-drained
+  // pool stays selectable-looking) so the select's value always has an option
+  // to show instead of rendering blank.
+  const selectOptions = viewAccount !== undefined
+    && switchableAccounts.some((candidate) => candidate.index === viewAccount.index)
     ? switchableAccounts
-    : activeAccount
-      ? [activeAccount, ...switchableAccounts.filter((candidate) => candidate.index !== activeAccount.index)]
+    : viewAccount
+      ? [viewAccount, ...switchableAccounts.filter((candidate) => candidate.index !== viewAccount.index)]
       : switchableAccounts
 
-  const rawCards = buildQuotaCards(activeAccount, t, now, detailedReset)
+  const rawCards = buildQuotaCards(viewAccount, t, now, detailedReset)
+  // The weekly drain grays the 5h bars (the shared `barColorFor` rule): a
+  // spent week makes the 5h figure moot, and a green bar would promise
+  // headroom the week no longer has.
+  const viewWeekly = viewAccount ? accountQuotaRead(viewAccount, now).weekly : null
   const cards: EnrichedCard[] = rawCards.map((rc) => ({
     key: rc.key,
     title: rc.title,
@@ -522,13 +486,13 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       bucketId: w.bucketId,
       label: w.label,
       percent: w.percent,
-      color: quotaColorForWindow(w.percent),
+      color: barColorFor(w.window, w.percent === null ? null : w.percent / 100, viewWeekly),
       reset: w.reset,
       stale: w.stale,
     })),
   }))
-  const limitsAge = activeAccount?.limitsUpdatedAt
-    ? agoText(new Date(activeAccount.limitsUpdatedAt).toISOString(), t, now)
+  const limitsAge = viewAccount?.limitsUpdatedAt
+    ? agoText(new Date(viewAccount.limitsUpdatedAt).toISOString(), t, now)
     : null
 
   const badgeReadingStr = shownFraction !== null
@@ -551,8 +515,6 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
                 visibility: 'visible' as const,
               })
         : undefined,
-      onMouseEnter: handleMouseEnterPopover,
-      onMouseLeave: handleMouseLeavePopover,
       onClick: (e: { stopPropagation: () => void }) => { e.stopPropagation() },
     },
     // Mobile handle
@@ -638,7 +600,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     h(
       'div',
       { className: 'agy-ui-modal-body' },
-      activeAccount
+      viewAccount
         ? h(
             'div',
             { className: 'agy-ui-account-card' },
@@ -648,31 +610,31 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
               h(
                 'div',
                 null,
-                h('div', { className: 'agy-ui-account-email' }, desensitizeEmail(activeAccount.email)),
-                h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${activeAccount.projectId || t('thinkingDefaultAll')}`),
+                h('div', { className: 'agy-ui-account-email' }, desensitizeEmail(viewAccount.email)),
+                h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${viewAccount.projectId || t('thinkingDefaultAll')}`),
                 // The model version upstream actually routed the last request
                 // to. Plain text only — NO state tag: upstream's version suffix
                 // does not reliably imply a production/canary split, and a
                 // guessed label is a false alarm the reader acts on.
-                activeAccount.actualModel === null
+                viewAccount.actualModel === null
                   ? null
                   : h('div', { className: 'agy-ui-account-project' },
-                    `${t('actualModelLabel')}: ${activeAccount.actualModel}`),
+                    `${t('actualModelLabel')}: ${viewAccount.actualModel}`),
               ),
-              // The account picker occupies the state tag's old place: the
-              // state it showed is already legible here (the badge's dot, the
-              // verify note below), while WHICH account the pool serves is the
-              // one fact this card can act on.
+              // The account picker occupies the state tag's old place and
+              // names the ONE account this panel displays. It is a view
+              // selector, not an activation: switching rows re-aims the panel
+              // and nothing else — rotating the pool is the badge arrow's and
+              // the rotation rule's job.
               h(
                 'select',
                 {
                   className: 'agy-ui-account-select',
-                  value: String(activeAccount.index),
-                  disabled: isUpdating,
-                  title: t('badgeSwitchTo'),
-                  'aria-label': t('badgeSwitchTo'),
+                  value: String(viewAccount.index),
+                  title: t('badgeAccountView'),
+                  'aria-label': t('badgeAccountView'),
                   onChange: (event: { target: { value: string } }) => {
-                    void handleSwitchTo(Number(event.target.value))
+                    setViewIndex(Number(event.target.value))
                   },
                 },
                 selectOptions.map((candidate) =>
@@ -688,7 +650,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
             h('div', { className: 'agy-ui-account-email', style: { color: aliasVar('label-tertiary') } }, error ?? t('badgeNoAccount')),
           ),
 
-      activeAccount?.verificationRequired && activeAccount?.verificationUrl
+      viewAccount?.verificationRequired && viewAccount?.verificationUrl
         ? h(
             'div',
             { className: 'agy-ui-verify-note' },
@@ -697,7 +659,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
               'a',
               {
                 className: 'agy-ui-link-btn',
-                href: activeAccount.verificationUrl,
+                href: viewAccount.verificationUrl,
                 target: '_blank',
                 rel: 'noopener noreferrer',
               },
@@ -765,15 +727,17 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         title: badgeTooltip,
         'aria-label': t('badgeAria'),
         onClick: handleTogglePin,
-        onMouseEnter: handleMouseEnterBadge,
-        onMouseLeave: handleMouseLeaveBadge,
       },
       h(StateDot, {
-        state: rawDot as StateDotState,
+        state: effectiveDotState,
         size: 7,
         className: `agy-ui-dot ${dotState}${statusClass ? ` ${statusClass}` : ''}${isUpdating ? ' updating' : ''}`,
       }),
-      h('span', { style: statusColor === null ? undefined : { color: statusColor } }, displayText),
+      // The text stays the theme's plain color; only the dot carries the quota
+      // verdict. Keying the span on the SHOWN WINDOW remounts it on each 5s
+      // flip so the slide-in animation replays — a pure display change that
+      // never triggers a quota load.
+      h('span', { key: shownToken, className: 'agy-ui-badge-text' }, displayText),
       // The rotate affordance lives INSIDE the quota capsule, at its right —
       // one control, not two: the capsule opens the board, the arrow rotates
       // the pool to the next serviceable account. stopPropagation keeps the

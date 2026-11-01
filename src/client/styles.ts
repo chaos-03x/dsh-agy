@@ -432,6 +432,52 @@ export const AGY_STYLES_CSS = `
   border: 0.5px solid ${aliasVar('border-l2')}; border-radius: 8px; }
 .agy-textarea:focus { border-color: ${aliasVar('brand-primary')}; }
 
+.agy-select {
+  font: var(--dsw-font-xs-13);
+  color: ${aliasVar('label-primary')};
+  background: ${aliasVar('bg-layer-2')};
+  border: 0.5px solid ${aliasVar('border-l2')};
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  outline: none;
+}
+.agy-select:focus {
+  border-color: ${aliasVar('brand-primary')};
+}
+.agy-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.agy-model-routing-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.agy-model-routing-desc {
+  font: var(--dsw-font-xxs-12);
+  color: ${aliasVar('label-tertiary')};
+  line-height: 1.5;
+}
+.agy-model-routing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.agy-model-routing-label {
+  font: var(--dsw-font-xs-strong-13);
+  color: ${aliasVar('label-primary')};
+}
+.agy-model-routing-select {
+  min-width: 200px;
+}
+.agy-model-routing-source {
+  font: var(--dsw-font-xxs-12);
+  color: ${aliasVar('label-tertiary')};
+}
+
 /* ── Preferences card ───────────────────────────────────────────────────── */
 .agy-pref-row {
   display: flex;
@@ -573,16 +619,47 @@ export const AGY_STYLES_CSS = `
 
 /* The quota traffic light overrides the account-state tint when both land on
    the dot: 0% on EITHER tracked window is the exhausted red, a live 5h reading
-   below 20% the near-drain amber. Declared AFTER the state rules above so the
-   quota verdict wins the cascade at equal specificity. */
+   below 20% the near-drain amber. The primitive paints its halo (::before)
+   and core (::after) from currentColor, so the override recolors 'color' —
+   not just the element background — and repeats it on background/box-shadow;
+   otherwise the state's green core survives as a green center inside a red
+   ring. Declared AFTER the state rules above so the quota verdict wins the
+   cascade at equal specificity. */
+.agy-ui-dot[data-state="error"],
 .agy-ui-dot.quota-error {
+  color: ${aliasVar('state-error-primary')};
   background-color: ${aliasVar('state-error-primary')};
   box-shadow: 0 0 6px ${aliasVar('state-error-primary')};
 }
 
 .agy-ui-dot.quota-warn {
+  color: ${aliasVar('state-warn-primary')};
   background-color: ${aliasVar('state-warn-primary')};
   box-shadow: 0 0 6px ${aliasVar('state-warn-primary')};
+}
+
+.agy-ui-dot[data-state="error"].updating,
+.agy-ui-dot.quota-error.updating {
+  box-shadow: 0 0 10px ${aliasVar('state-error-primary')};
+}
+
+/* The badge caption slides up on each 5h/weekly flip: the span is remounted
+   per shown window (keyed), so the animation replays on every real change and
+   never while the weekly-zero pin holds the text steady. */
+.agy-ui-badge-text {
+  display: inline-block;
+  animation: agy-ui-badge-slide-in 0.28s ease-out;
+}
+
+@keyframes agy-ui-badge-slide-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes agy-ui-pulse {

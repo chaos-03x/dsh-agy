@@ -43,6 +43,7 @@ import type { AgyResolvedImage } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
 import { AgyStreamIdleTimeoutError, parseAgySse, UnmappedFinishReasonError } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
+import type { ModelRoutingTarget } from '../model-routing-types.ts'
 
 export type { AgyAccountSession }
 
@@ -115,6 +116,8 @@ export interface AgyAdapterOptions {
   claudeBudgetFor?(): number | undefined
   /** Budget for the tiered slot (the selector's "Default" effort). */
   tieredBudgetFor?(): number | undefined
+  /** Configured routing target for tiered model variants. */
+  modelRoutingTarget?(): ModelRoutingTarget | undefined
   /**
    * Configured per-file cap for non-image multimodal inlining, in bytes
    * (see `multimodal-config.ts`).
@@ -292,7 +295,13 @@ export class AgyAdapter extends LlmAdapter {
         // Model discovery is account-scoped: route it through the account's proxy
         // (control-plane class, so the standard timeouts apply).
         const routing = { proxyUrl: session?.account.proxy }
-        const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
+        const routingTarget = this.options.modelRoutingTarget?.()
+        const models = await listAgyModels(
+          session?.auth.access,
+          session?.account.projectId,
+          accountFetch(routing),
+          routingTarget,
+        )
         this.cachedModels = { models, at: Date.now() }
         return models
       } catch (error) {
@@ -501,6 +510,9 @@ export class AgyAdapter extends LlmAdapter {
           ...(this.options.tieredBudgetFor === undefined
             ? {}
             : { tieredBudgetFor: this.options.tieredBudgetFor }),
+          ...(this.options.modelRoutingTarget === undefined
+            ? {}
+            : { modelRoutingTarget: this.options.modelRoutingTarget }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
         })

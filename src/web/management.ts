@@ -30,11 +30,14 @@ import type { AgySessionManager } from '../session.ts'
 import type { ModelVisibility } from '../model-visibility.ts'
 import type { UsageStats } from '../stats.ts'
 import { sanitizeQuotaRefreshMinutes, UiPrefsStore } from '../ui-prefs.ts'
+import { isValidModelRoutingTarget, ModelRoutingStore } from '../model-routing.ts'
 import type {
   AccountState,
   AccountUsageView,
   AccountView,
   AgyRpcMethod,
+  ModelRoutingTarget,
+  ModelRoutingView,
   ModelView,
   MultimodalView,
   RangeBreakdown,
@@ -88,6 +91,11 @@ export interface AgyManagementOptions {
   multimodal: {
     get: () => MultimodalView
     set: (value: number | undefined) => MultimodalView
+  }
+  /** Model routing configuration for tiered model families. */
+  modelRouting?: {
+    get: () => ModelRoutingView
+    set: (target: ModelRoutingTarget) => ModelRoutingView
   }
   /**
    * The adapter's *unfiltered* model catalog.
@@ -171,6 +179,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
   const thinkingBudget = options.thinkingBudget
   const multimodal = options.multimodal
   const uiPrefs = options.uiPrefs ?? new UiPrefsStore()
+  const modelRouting = options.modelRouting ?? new ModelRoutingStore()
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
   const pendingAuth = new Map<string, PendingAuth>()
@@ -713,6 +722,19 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         detailedQuotaReset: body?.detailedQuotaReset as boolean | undefined,
         quotaRefreshMinutes: sanitizeQuotaRefreshMinutes(body?.quotaRefreshMinutes),
       })
+    },
+
+    'modelRouting.get': async () => modelRouting.get(),
+
+    'modelRouting.set': async (payload) => {
+      const body = payload as { target?: unknown } | undefined
+      if (!isValidModelRoutingTarget(body?.target)) {
+        fail('target must be one of: tiered, high, medium, low')
+      }
+      const view = modelRouting.set(body.target)
+      invalidateModelCache()
+      notifyModelsChanged()
+      return view
     },
   }
 

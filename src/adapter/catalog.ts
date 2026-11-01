@@ -55,14 +55,16 @@ const CATALOG_BY_ID = new Map(AGY_PUBLIC_MODELS.map((m) => [m.id, m]))
 
 /** Format dynamic tiered model id to display name (e.g. 'gemini-3.8-flash-tiered' -> 'Gemini 3.8 Flash'). */
 export function formatTieredModelName(modelId: string): string {
-  const base = modelId.replace(/-tiered$/, '')
+  const base = modelId.replace(/-(?:tiered|low|medium|high)$/, '')
+  const tierMatch = /-(low|medium|high)$/.exec(modelId)
+  const tierSuffix = tierMatch ? ` (${tierMatch[1]!.charAt(0).toUpperCase() + tierMatch[1]!.slice(1)})` : ''
   return base
     .split('-')
     .map((part) => {
       if (/^\d+(\.\d+)*$/.test(part)) return part
       return part.charAt(0).toUpperCase() + part.slice(1)
     })
-    .join(' ')
+    .join(' ') + tierSuffix
 }
 
 /**
@@ -83,7 +85,7 @@ export function isChatCallableModelId(modelId: string): boolean {
 export function catalogModel(modelId: string): CatalogModel | undefined {
   const existing = CATALOG_BY_ID.get(modelId)
   if (existing) return existing
-  if (typeof modelId === 'string' && modelId.endsWith('-tiered')) {
+  if (typeof modelId === 'string' && (modelId.endsWith('-tiered') || /-(?:low|medium|high)$/.test(modelId))) {
     return {
       id: modelId,
       name: formatTieredModelName(modelId),

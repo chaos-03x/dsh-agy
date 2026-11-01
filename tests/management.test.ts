@@ -8,6 +8,7 @@ import { ModelVisibility } from '../src/model-visibility.ts'
 import { ThinkingBudgetStore } from '../src/thinking-budget.ts'
 import { MultimodalConfigStore } from '../src/multimodal-config.ts'
 import { UiPrefsStore } from '../src/ui-prefs.ts'
+import { ModelRoutingStore } from '../src/model-routing.ts'
 import type { AccountStore } from '../src/store/accounts.ts'
 import type { AgySessionManager } from '../src/session.ts'
 import type { AccountStorageV4, ManagedAccount } from '../src/types.ts'
@@ -127,6 +128,8 @@ function makeHarness(options: {
   const multimodalConfig = new MultimodalConfigStore({ file: multimodalFile })
   const prefsFile = join(mkdtempSync(join(tmpdir(), 'agy-ui-prefs-rpc-')), 'agy-ui-prefs.json')
   const uiPrefs = new UiPrefsStore(prefsFile)
+  const routingFile = join(mkdtempSync(join(tmpdir(), 'agy-routing-rpc-')), 'agy-model-routing.json')
+  const modelRouting = new ModelRoutingStore(routingFile)
   const management = createAgyManagement({
     store,
     sessions,
@@ -134,6 +137,7 @@ function makeHarness(options: {
     recentRequests: options.recentRequests,
     modelVisibility: visibility,
     uiPrefs,
+    modelRouting,
     thinkingBudget: {
       all: () => thinkingBudget.all(),
       set: (level, value) => thinkingBudget.setBudget(level, value),
@@ -983,6 +987,29 @@ describe('agy management RPC', () => {
         .rejects.toThrow(/quotaRefreshMinutes/)
       await expect(management.call('ui.prefs.set', { quotaRefreshMinutes: '10' as never }))
         .rejects.toThrow(/quotaRefreshMinutes/)
+    })
+  })
+
+  describe('model routing', () => {
+    it('reads default model routing and updates it', async () => {
+      const { management } = makeHarness()
+      const initial = await management.call('modelRouting.get', {}) as { target: string; source: string }
+      expect(initial.target).toBe('tiered')
+      expect(initial.source).toBe('default')
+
+      const updated = await management.call('modelRouting.set', { target: 'high' }) as { target: string; source: string }
+      expect(updated.target).toBe('high')
+      expect(updated.source).toBe('stored')
+
+      const readBack = await management.call('modelRouting.get', {}) as { target: string; source: string }
+      expect(readBack.target).toBe('high')
+      expect(readBack.source).toBe('stored')
+    })
+
+    it('rejects invalid model routing targets', async () => {
+      const { management } = makeHarness()
+      await expect(management.call('modelRouting.set', { target: 'unknown' }))
+        .rejects.toThrow(/target must be one of/)
     })
   })
 })

@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
+import { routeModel, type ModelRoutingTarget } from '../model-routing-types.ts'
 import { catalogModel, isLevelThinkingModel, levelThinkingEffortsFor } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 import {
@@ -632,6 +633,10 @@ export function toAgyRequestBody(
      * `thinkingLevel` — the tiered model's adaptive entry, given an explicit cap.
      */
     tieredBudgetFor?: () => number | undefined
+    /**
+     * Target routing variant for tiered models (e.g. 'tiered', 'high', 'medium', 'low').
+     */
+    modelRoutingTarget?: () => ModelRoutingTarget | undefined
   },
 ): AgyRequestBody {
   const messages = normalizeMessages(options.messages)
@@ -719,7 +724,7 @@ export function toAgyRequestBody(
   return {
     project: context.projectId || undefined,
     requestId: context.requestId ?? generateAntigravityRequestId(),
-    model: options.model,
+    model: routeModel(options.model, context.modelRoutingTarget?.()),
     userAgent: 'antigravity',
     requestType: 'agent',
     request: {

@@ -8,6 +8,11 @@ import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type 
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
 import {
+  DEFAULT_MODEL_ROUTING_TARGET,
+  routeModel,
+  type ModelRoutingTarget,
+} from '../model-routing-types.ts'
+import {
   AGY_PUBLIC_MODELS,
   catalogModel,
   isChatCallableModelId,
@@ -162,7 +167,10 @@ function advertisedModelIds(dynamic: DiscoveredModels): Set<string> {
  * Not the complete hiding rule: the `tab_` prefix check stays in
  * `mergeModelCatalog`, because the catalog-only fallback has no payload.
  */
-function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
+function hiddenDiscoveredIds(
+  dynamic: DiscoveredModels,
+  routingTarget: ModelRoutingTarget = DEFAULT_MODEL_ROUTING_TARGET,
+): Set<string> {
   const models = dynamic.models ?? {}
   const advertised = advertisedModelIds(dynamic)
   const hidden = new Set<string>()
@@ -184,8 +192,16 @@ function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
     }
   }
   for (const id of Object.keys(models)) {
-    const m = /^(.*)-(?:low|medium|high)$/.exec(id)
-    if (m && Object.hasOwn(models, `${m[1]}-tiered`)) hidden.add(id)
+    const m = /^(.*)-(?:low|medium|high|tiered)$/.exec(id)
+    if (m) {
+      const base = m[1]!
+      const targetId = routingTarget === 'tiered' ? `${base}-tiered` : `${base}-${routingTarget}`
+      if (Object.hasOwn(models, targetId)) {
+        if (id !== targetId) hidden.add(id)
+      } else if (Object.hasOwn(models, `${base}-tiered`)) {
+        if (id !== `${base}-tiered`) hidden.add(id)
+      }
+    }
   }
   return hidden
 }
@@ -227,18 +243,24 @@ export async function fetchAvailableModels(
  * Exported so surfaces other than the selector (the quota panel) present the
  * same list. `mergeModelCatalog` consumes it too, so the two cannot drift.
  */
-export function chatCallableDiscoveredIds(dynamic: DiscoveredModels): string[] {
-  const hidden = hiddenDiscoveredIds(dynamic)
+export function chatCallableDiscoveredIds(
+  dynamic: DiscoveredModels,
+  routingTarget: ModelRoutingTarget = DEFAULT_MODEL_ROUTING_TARGET,
+): string[] {
+  const hidden = hiddenDiscoveredIds(dynamic, routingTarget)
   return Object.keys(dynamic.models ?? {}).filter((id) => isChatCallableModelId(id) && !hidden.has(id))
 }
 
 /** Merge dynamic ids with catalog metadata; non-chat and superseded ids are dropped, unknown ids keep minimal info. */
-export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
+export function mergeModelCatalog(
+  dynamic: DiscoveredModels,
+  routingTarget: ModelRoutingTarget = DEFAULT_MODEL_ROUTING_TARGET,
+): LlmModelInfo[] {
   if (dynamic.tieredModelIds) {
     registerDiscoveredTieredModels(dynamic.tieredModelIds)
   }
   const entries: LlmModelInfo[] = []
-  const hidden = hiddenDiscoveredIds(dynamic)
+  const hidden = hiddenDiscoveredIds(dynamic, routingTarget)
   for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
     if (!isChatCallableModelId(id) || hidden.has(id)) continue
     const meta = catalogModel(id)
@@ -259,10 +281,12 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
 }
 
 /** Catalog-only model list used when the endpoint is unreachable. */
-export function catalogModelList(): LlmModelInfo[] {
+export function catalogModelList(
+  routingTarget: ModelRoutingTarget = DEFAULT_MODEL_ROUTING_TARGET,
+): LlmModelInfo[] {
   return AGY_PUBLIC_MODELS.map((model) => ({
     provider: AGY_PROVIDER,
-    id: model.id,
+    id: routeModel(model.id, routingTarget),
     name: model.name,
     inputModalities: inputModalitiesFor(model),
     context: { contextWindow: model.contextLength },
@@ -274,8 +298,9 @@ export async function listAgyModels(
   accessToken: string | undefined,
   projectId: string | undefined,
   fetchImpl: typeof fetch = proxiedFetch,
+  routingTarget: ModelRoutingTarget = DEFAULT_MODEL_ROUTING_TARGET,
 ): Promise<readonly LlmModelInfo[]> {
-  if (!accessToken) return catalogModelList()
+  if (!accessToken) return catalogModelList(routingTarget)
   try {
     const dynamic = await fetchAvailableModels(accessToken, projectId, fetchImpl)
     const merged = mergeModelCatalog(dynamic)

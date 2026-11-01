@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest'
 import {
   accountQuotaRead,
   agoText,
+  barColorFor,
   buildQuotaCards,
   desensitizeEmail,
   dotStateFor,
@@ -289,6 +290,7 @@ describe('quota cards', () => {
     const rows = windowRows([window('h', '5h', 0.02, at(-30))], t, NOW)
     expect(rows[0]).toEqual({
       bucketId: 'h',
+      window: '5h',
       label: zh.quotaWindow5h,
       percent: null,
       reset: zh.quotaResetPassed,
@@ -367,6 +369,19 @@ describe('quota tints and drain thresholds', () => {
     expect(drainThresholdFor('daily')).toBeUndefined()
     expect(drainThresholdFor('monthly')).toBeUndefined()
     expect(drainThresholdFor('30d')).toBeUndefined()
+  })
+
+  it('turns the 5h bar gray when weekly quota is exhausted (0%)', () => {
+    // When weekly quota is 0, the 5h window is moot upstream: no requests can serve.
+    // The bar renders neutral gray (label-tertiary) instead of misleading green.
+    expect(barColorFor('5h', 0.8, 0)).toContain('--dsw-alias-label-tertiary')
+    // When weekly quota is not 0, 5h renders its normal quotaColor.
+    expect(barColorFor('5h', 0.8, 0.5)).toContain('--dsw-alias-state-success-primary')
+    expect(barColorFor('5h', 0.15, 0.5)).toContain('--dsw-alias-state-warn-primary')
+    // Weekly bar itself renders by quotaColor.
+    expect(barColorFor('weekly', 0, 0)).toContain('--dsw-alias-state-error-primary')
+    // Unmeasured (null) is gray.
+    expect(barColorFor('5h', null, 0.5)).toContain('--dsw-alias-label-tertiary')
   })
 })
 

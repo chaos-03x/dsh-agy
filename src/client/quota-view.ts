@@ -46,6 +46,8 @@ export interface BadgeQuota {
 /** One rendered window row. */
 export interface QuotaWindowRow {
   bucketId: string
+  /** The upstream window token ('5h' | 'weekly' | ...), for the color rule. */
+  window: string
   /** Localized window label. */
   label: string
   /**
@@ -527,12 +529,31 @@ export function windowRows(
     // percentage described a period that ended, and the reset copy says so.
     return {
       bucketId: window.bucketId,
+      window: window.window,
       label: windowLabel(window.window, t),
       percent: stale ? null : toPercent(window.remainingFraction),
       reset: formatQuotaReset(window.window, window.resetTime, t, now, detailed),
       stale,
     }
   })
+}
+
+/**
+ * One window row's bar color, for EVERY surface that renders a quota bar —
+ * the status board's cards and the Settings limits card call this, so a
+ * reading never shows two colors on two surfaces.
+ *
+ * Beyond the shared traffic contract, one display rule: when the account's
+ * WEEKLY window sits at exactly 0%, its 5h figure is moot — upstream serves
+ * nothing for the rest of the week no matter what the 5h bar says — so the
+ * 5h bar renders in the neutral "unusable" gray rather than a live color
+ * that would promise headroom the week no longer has. An unmeasured fraction
+ * is the same gray for the opposite reason (no data to color).
+ */
+export function barColorFor(token: string, fraction: number | null, weeklyFraction: number | null): string {
+  if (fraction === null) return aliasVar('label-tertiary')
+  if (token === '5h' && weeklyFraction === 0) return aliasVar('label-tertiary')
+  return quotaColor(fraction)
 }
 
 /**

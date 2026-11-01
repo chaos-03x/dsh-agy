@@ -31,8 +31,8 @@ import { aliasVar, installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
-import { agoText, formatQuotaReset, quotaColor, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
-import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
+import { accountQuotaRead, agoText, barColorFor, formatQuotaReset, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
+import type { AccountView, AgyRpcClient, AgyRpcResult, ModelRoutingTarget, ModelRoutingView, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
 import {
@@ -611,42 +611,45 @@ function AccountDetail(props: {
           ? null
           : h('div', { className: 'agy-limit-age' },
             t('limitsMeasured', { ago: agoText(new Date(account.limitsUpdatedAt).toISOString(), t, now) })),
-        ...account.limits.map((group) => h('div', { className: 'agy-limit-group', key: group.name },
-          h('div', { className: 'agy-limit-group-name' }, group.name),
-          ...group.windows.map((window) => {
-            const fraction = window.remainingFraction
-            // Burn projection: rate (fraction/hour) over remaining fraction
-            // gives hours-to-empty. Spoken ONLY when that lands BEFORE the
-            // window's reset — otherwise the reset time this row already shows
-            // is the answer, and a "won't run dry" line is noise.
-            const burn = account.limitBurn?.[window.bucketId]
-            const hoursLeft = fraction !== null && burn !== undefined && burn > 0
-              ? fraction / burn
-              : null
-            const resetHours = window.resetTime === null
-              ? null
-              : (new Date(window.resetTime).getTime() - now) / HOUR_MS
-            const exhaustsFirst = hoursLeft !== null && resetHours !== null
-              && hoursLeft < resetHours
-            return h('div', { key: window.bucketId },
-              h('div', { className: 'agy-limit-row' },
-                h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),
-                h('span', { className: 'agy-limit-track' },
-                  fraction === null
-                    ? null
-                    : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: quotaColor(fraction) } })),
-                // An unreported fraction is an em dash, never "0%": unknown
-                // headroom and no headroom are opposite facts. A dedicated key
-                // rather than reusing `noProject`, whose NAME would then be wrong
-                // for the value it renders.
-                h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
-                h('span', { className: 'agy-limit-reset' },
-                  window.resetTime === null ? null : formatQuotaReset(window.window, window.resetTime, t, now, props.detailedQuotaReset))),
-              exhaustsFirst
-                ? h('div', { className: 'agy-limit-burn' },
-                  t('limitBurnWarn', { value: burnHorizon(hoursLeft!, t) }))
-                : null)
-          })))),
+        ...account.limits.map((group) => {
+          const weeklyFraction = accountQuotaRead(account, now).weekly
+          return h('div', { className: 'agy-limit-group', key: group.name },
+            h('div', { className: 'agy-limit-group-name' }, group.name),
+            ...group.windows.map((window) => {
+              const fraction = window.remainingFraction
+              // Burn projection: rate (fraction/hour) over remaining fraction
+              // gives hours-to-empty. Spoken ONLY when that lands BEFORE the
+              // window's reset — otherwise the reset time this row already shows
+              // is the answer, and a "won't run dry" line is noise.
+              const burn = account.limitBurn?.[window.bucketId]
+              const hoursLeft = fraction !== null && burn !== undefined && burn > 0
+                ? fraction / burn
+                : null
+              const resetHours = window.resetTime === null
+                ? null
+                : (new Date(window.resetTime).getTime() - now) / HOUR_MS
+              const exhaustsFirst = hoursLeft !== null && resetHours !== null
+                && hoursLeft < resetHours
+              return h('div', { key: window.bucketId },
+                h('div', { className: 'agy-limit-row' },
+                  h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),
+                  h('span', { className: 'agy-limit-track' },
+                    fraction === null
+                      ? null
+                      : h('i', { style: { width: `${Math.round(fraction * 100)}%`, background: barColorFor(window.window, fraction, weeklyFraction) } })),
+                  // An unreported fraction is an em dash, never "0%": unknown
+                  // headroom and no headroom are opposite facts. A dedicated key
+                  // rather than reusing `noProject`, whose NAME would then be wrong
+                  // for the value it renders.
+                  h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
+                  h('span', { className: 'agy-limit-reset' },
+                    window.resetTime === null ? null : formatQuotaReset(window.window, window.resetTime, t, now, props.detailedQuotaReset))),
+                exhaustsFirst
+                  ? h('div', { className: 'agy-limit-burn' },
+                    t('limitBurnWarn', { value: burnHorizon(hoursLeft!, t) }))
+                  : null)
+            }))
+        })),
     limitsAside)
 
   const usageBlock = usage === null ? null : card(
@@ -1518,6 +1521,110 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 /**
+ * Model routing card on the Config tab.
+ *
+ * Allows the user to select what model variant is used when requesting tiered
+ * models: -tiered (adaptive/default), -high, -medium, or -low.
+ */
+function ModelRoutingCard(props: { rpc: AgyRpcClient; t: T }): ReactNode {
+  const { rpc, t } = props
+  const [target, setTarget] = useState<ModelRoutingTarget>('tiered')
+  const [source, setSource] = useState<string>('default')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const errorTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const alive = useRef(true)
+
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+      if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await rpc.call('modelRouting.get', {})
+        if (!alive.current) return
+        setTarget(res.target)
+        setSource(res.source)
+        setLoading(false)
+      } catch (err) {
+        if (!alive.current) return
+        setLoading(false)
+      }
+    })()
+  }, [rpc])
+
+  const handleChange = useCallback(
+    async (nextTarget: ModelRoutingTarget) => {
+      setSaving(true)
+      const prev = target
+      setTarget(nextTarget)
+      if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+      try {
+        const res = await rpc.call('modelRouting.set', { target: nextTarget })
+        if (!alive.current) return
+        setTarget(res.target)
+        setSource(res.source)
+        setError(null)
+      } catch (err) {
+        if (!alive.current) return
+        setTarget(prev)
+        setError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+        errorTimer.current = setTimeout(() => setError(null), ACTION_MESSAGE_TTL_MS)
+      } finally {
+        if (alive.current) setSaving(false)
+      }
+    },
+    [rpc, target, t],
+  )
+
+  const sourceCaption =
+    source === 'env'
+      ? t('modelRoutingSourceEnv')
+      : source === 'stored'
+        ? t('modelRoutingSourceStored')
+        : t('modelRoutingSourceDefault')
+
+  return card(
+    t('modelRoutingTitle'),
+    h(
+      'div',
+      { className: 'agy-model-routing-body' },
+      h('div', { className: 'agy-model-routing-desc' }, t('modelRoutingDesc')),
+      h(
+        'div',
+        { className: 'agy-model-routing-row' },
+        h('span', { className: 'agy-model-routing-label' }, t('modelRoutingLabel')),
+        h(
+          'select',
+          {
+            className: 'agy-select agy-model-routing-select',
+            value: target,
+            disabled: loading || saving || source === 'env',
+            title: t('modelRoutingLabel'),
+            'aria-label': t('modelRoutingLabel'),
+            onChange: (e: { target: { value: string } }) => {
+              void handleChange(e.target.value as ModelRoutingTarget)
+            },
+          },
+          h('option', { value: 'tiered' }, t('modelRoutingOptionTiered')),
+          h('option', { value: 'high' }, t('modelRoutingOptionHigh')),
+          h('option', { value: 'medium' }, t('modelRoutingOptionMedium')),
+          h('option', { value: 'low' }, t('modelRoutingOptionLow')),
+        ),
+      ),
+      h('div', { className: 'agy-model-routing-source' }, sourceCaption),
+      error ? h('div', { className: 'agy-error' }, error) : null,
+    ),
+  )
+}
+
+/**
  * The config tab: a card container, not one component.
  *
  * Each card loads and saves its OWN state (the thinking card already had that
@@ -1529,7 +1636,8 @@ function ConfigTab(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const { rpc, t } = props
   return h('div', { className: 'agy-root' },
     h(ThinkingBudgetCard, { rpc, t }),
-    h(MultimodalCard, { rpc, t }))
+    h(MultimodalCard, { rpc, t }),
+    h(ModelRoutingCard, { rpc, t }))
 }
 
 /**
