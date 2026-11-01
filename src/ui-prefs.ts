@@ -10,7 +10,14 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { agyDataFile } from './store/paths.ts'
 import type { SetUiPrefsPayload, UiPrefsDocument, UiPrefsView } from './ui-prefs-types.ts'
-import { quotaRefreshMinutesView, sanitizeQuotaRefreshMinutes } from './ui-prefs-types.ts'
+import {
+  DEFAULT_BADGE_DETAILED_MODE,
+  DEFAULT_BADGE_MODEL_GROUP,
+  DEFAULT_BADGE_SKIP_ZERO_WEEKLY,
+  DEFAULT_BADGE_WINDOW_TYPE,
+  quotaRefreshMinutesView,
+  sanitizeQuotaRefreshMinutes,
+} from './ui-prefs-types.ts'
 
 export * from './ui-prefs-types.ts'
 
@@ -32,6 +39,18 @@ export function sanitizeUiPrefs(raw: unknown): UiPrefsDocument {
   if (obj.quotaRefreshMinutes !== undefined) {
     const minutes = sanitizeQuotaRefreshMinutes(obj.quotaRefreshMinutes)
     if (minutes !== undefined) doc.quotaRefreshMinutes = minutes
+  }
+  if (typeof obj.badgeDetailedMode === 'boolean') {
+    doc.badgeDetailedMode = obj.badgeDetailedMode
+  }
+  if (typeof obj.badgeModelGroup === 'string' && obj.badgeModelGroup.length > 0) {
+    doc.badgeModelGroup = obj.badgeModelGroup
+  }
+  if (obj.badgeWindowType === 'both' || obj.badgeWindowType === '5h' || obj.badgeWindowType === 'weekly') {
+    doc.badgeWindowType = obj.badgeWindowType
+  }
+  if (typeof obj.badgeSkipZeroWeekly === 'boolean') {
+    doc.badgeSkipZeroWeekly = obj.badgeSkipZeroWeekly
   }
   return doc
 }
@@ -64,6 +83,10 @@ export class UiPrefsStore {
       conversationBadge: this.doc.conversationBadge === true,
       detailedQuotaReset: this.doc.detailedQuotaReset === true,
       quotaRefreshMinutes: quotaRefreshMinutesView(this.doc),
+      badgeDetailedMode: this.doc.badgeDetailedMode ?? DEFAULT_BADGE_DETAILED_MODE,
+      badgeModelGroup: this.doc.badgeModelGroup ?? DEFAULT_BADGE_MODEL_GROUP,
+      badgeWindowType: this.doc.badgeWindowType ?? DEFAULT_BADGE_WINDOW_TYPE,
+      badgeSkipZeroWeekly: this.doc.badgeSkipZeroWeekly ?? DEFAULT_BADGE_SKIP_ZERO_WEEKLY,
     }
   }
 
@@ -74,6 +97,10 @@ export class UiPrefsStore {
       ...(this.doc.conversationBadge !== undefined ? { conversationBadge: this.doc.conversationBadge } : {}),
       ...(this.doc.detailedQuotaReset !== undefined ? { detailedQuotaReset: this.doc.detailedQuotaReset } : {}),
       ...(this.doc.quotaRefreshMinutes !== undefined ? { quotaRefreshMinutes: this.doc.quotaRefreshMinutes } : {}),
+      ...(this.doc.badgeDetailedMode !== undefined ? { badgeDetailedMode: this.doc.badgeDetailedMode } : {}),
+      ...(this.doc.badgeModelGroup !== undefined ? { badgeModelGroup: this.doc.badgeModelGroup } : {}),
+      ...(this.doc.badgeWindowType !== undefined ? { badgeWindowType: this.doc.badgeWindowType } : {}),
+      ...(this.doc.badgeSkipZeroWeekly !== undefined ? { badgeSkipZeroWeekly: this.doc.badgeSkipZeroWeekly } : {}),
     }
     if (typeof prefs.conversationBadge === 'boolean') {
       next.conversationBadge = prefs.conversationBadge
@@ -85,14 +112,22 @@ export class UiPrefsStore {
     if (minutes !== undefined) {
       next.quotaRefreshMinutes = minutes
     }
+    if (typeof prefs.badgeDetailedMode === 'boolean') {
+      next.badgeDetailedMode = prefs.badgeDetailedMode
+    }
+    if (typeof prefs.badgeModelGroup === 'string' && prefs.badgeModelGroup.length > 0) {
+      next.badgeModelGroup = prefs.badgeModelGroup
+    }
+    if (prefs.badgeWindowType === 'both' || prefs.badgeWindowType === '5h' || prefs.badgeWindowType === 'weekly') {
+      next.badgeWindowType = prefs.badgeWindowType
+    }
+    if (typeof prefs.badgeSkipZeroWeekly === 'boolean') {
+      next.badgeSkipZeroWeekly = prefs.badgeSkipZeroWeekly
+    }
     this.write(next)
     this.doc = next
     this.raw = UiPrefsStore.serialize(next)
-    return {
-      conversationBadge: next.conversationBadge === true,
-      detailedQuotaReset: next.detailedQuotaReset === true,
-      quotaRefreshMinutes: quotaRefreshMinutesView(next),
-    }
+    return this.get()
   }
 
   reload(): void {

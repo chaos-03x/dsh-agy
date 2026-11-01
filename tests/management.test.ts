@@ -963,6 +963,14 @@ describe('agy management RPC', () => {
         .rejects.toThrow(/must be a boolean/)
       await expect(management.call('ui.prefs.set', { detailedQuotaReset: 123 as never }))
         .rejects.toThrow(/must be a boolean/)
+      await expect(management.call('ui.prefs.set', { badgeDetailedMode: 'yes' as never }))
+        .rejects.toThrow(/must be a boolean/)
+      await expect(management.call('ui.prefs.set', { badgeModelGroup: 123 as never }))
+        .rejects.toThrow(/must be a string/)
+      await expect(management.call('ui.prefs.set', { badgeWindowType: 'invalid' as never }))
+        .rejects.toThrow(/must be one of: both, 5h, weekly/)
+      await expect(management.call('ui.prefs.set', { badgeSkipZeroWeekly: 456 as never }))
+        .rejects.toThrow(/must be a boolean/)
     })
 
     it('stores the quota refresh interval, or null for never, and rejects garbage', async () => {

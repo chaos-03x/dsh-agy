@@ -704,6 +704,10 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         conversationBadge?: unknown
         detailedQuotaReset?: unknown
         quotaRefreshMinutes?: unknown
+        badgeDetailedMode?: unknown
+        badgeModelGroup?: unknown
+        badgeWindowType?: unknown
+        badgeSkipZeroWeekly?: unknown
       } | undefined
       if (body?.conversationBadge !== undefined && typeof body.conversationBadge !== 'boolean') {
         fail('conversationBadge must be a boolean')
@@ -717,10 +721,26 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       if (body?.quotaRefreshMinutes !== undefined && sanitizeQuotaRefreshMinutes(body.quotaRefreshMinutes) === undefined) {
         fail('quotaRefreshMinutes must be an integer between 1 and 120, or null for never')
       }
+      if (body?.badgeDetailedMode !== undefined && typeof body.badgeDetailedMode !== 'boolean') {
+        fail('badgeDetailedMode must be a boolean')
+      }
+      if (body?.badgeModelGroup !== undefined && typeof body.badgeModelGroup !== 'string') {
+        fail('badgeModelGroup must be a string')
+      }
+      if (body?.badgeWindowType !== undefined && !['both', '5h', 'weekly'].includes(body.badgeWindowType as string)) {
+        fail('badgeWindowType must be one of: both, 5h, weekly')
+      }
+      if (body?.badgeSkipZeroWeekly !== undefined && typeof body.badgeSkipZeroWeekly !== 'boolean') {
+        fail('badgeSkipZeroWeekly must be a boolean')
+      }
       return uiPrefs.set({
         conversationBadge: body?.conversationBadge as boolean | undefined,
         detailedQuotaReset: body?.detailedQuotaReset as boolean | undefined,
         quotaRefreshMinutes: sanitizeQuotaRefreshMinutes(body?.quotaRefreshMinutes),
+        badgeDetailedMode: body?.badgeDetailedMode as boolean | undefined,
+        badgeModelGroup: body?.badgeModelGroup as string | undefined,
+        badgeWindowType: body?.badgeWindowType as any,
+        badgeSkipZeroWeekly: body?.badgeSkipZeroWeekly as boolean | undefined,
       })
     },
 

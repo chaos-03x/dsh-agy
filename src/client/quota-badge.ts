@@ -28,14 +28,24 @@ import {
   desensitizeEmail,
   dotStateFor,
   isAccountQuotaExhausted,
+  modelLabelForGroup,
   nextHealthyIndex,
+  pickBadgeQuota,
+  resolveQuotaGroup,
   shouldProbeLimits,
   toPercent,
   windowLabel,
   type QuotaTranslate,
 } from './quota-view.ts'
 import type { AccountView, AgyRpcClient, UiPrefsView } from '../rpc-contract.ts'
-import { DEFAULT_QUOTA_REFRESH_MINUTES } from '../ui-prefs-types.ts'
+import {
+  DEFAULT_BADGE_DETAILED_MODE,
+  DEFAULT_BADGE_MODEL_GROUP,
+  DEFAULT_BADGE_SKIP_ZERO_WEEKLY,
+  DEFAULT_BADGE_WINDOW_TYPE,
+  DEFAULT_QUOTA_REFRESH_MINUTES,
+  type BadgeWindowType,
+} from '../ui-prefs-types.ts'
 import type { QuotaWindow } from '../types.ts'
 
 /**
@@ -174,6 +184,10 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   // never. The state defaults to the shipped interval so the timer runs before
   // the first prefs read lands.
   const [refreshMinutes, setRefreshMinutes] = useState<number | null>(DEFAULT_QUOTA_REFRESH_MINUTES)
+  const [badgeDetailedMode, setBadgeDetailedMode] = useState<boolean>(DEFAULT_BADGE_DETAILED_MODE)
+  const [badgeModelGroup, setBadgeModelGroup] = useState<string>(DEFAULT_BADGE_MODEL_GROUP)
+  const [badgeWindowType, setBadgeWindowType] = useState<BadgeWindowType>(DEFAULT_BADGE_WINDOW_TYPE)
+  const [badgeSkipZeroWeekly, setBadgeSkipZeroWeekly] = useState<boolean>(DEFAULT_BADGE_SKIP_ZERO_WEEKLY)
 
   useEffect(() => {
     installAgyStyles()
@@ -184,11 +198,25 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     window.addEventListener('resize', checkMobile)
     const onPrefsChange = (e: Event): void => {
       const detail = (e as CustomEvent<UiPrefsView>).detail
-      if (detail && typeof detail.detailedQuotaReset === 'boolean') {
-        setDetailedReset(detail.detailedQuotaReset)
-      }
       if (detail) {
-        setRefreshMinutes(detail.quotaRefreshMinutes)
+        if (typeof detail.detailedQuotaReset === 'boolean') {
+          setDetailedReset(detail.detailedQuotaReset)
+        }
+        if (detail.quotaRefreshMinutes !== undefined) {
+          setRefreshMinutes(detail.quotaRefreshMinutes)
+        }
+        if (typeof detail.badgeDetailedMode === 'boolean') {
+          setBadgeDetailedMode(detail.badgeDetailedMode)
+        }
+        if (typeof detail.badgeModelGroup === 'string') {
+          setBadgeModelGroup(detail.badgeModelGroup)
+        }
+        if (detail.badgeWindowType) {
+          setBadgeWindowType(detail.badgeWindowType)
+        }
+        if (typeof detail.badgeSkipZeroWeekly === 'boolean') {
+          setBadgeSkipZeroWeekly(detail.badgeSkipZeroWeekly)
+        }
       }
     }
     window.addEventListener('agy:ui-prefs-changed', onPrefsChange)
@@ -222,6 +250,10 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       if (prefs) {
         setDetailedReset(prefs.detailedQuotaReset === true)
         setRefreshMinutes(prefs.quotaRefreshMinutes)
+        setBadgeDetailedMode(prefs.badgeDetailedMode === true)
+        setBadgeModelGroup(prefs.badgeModelGroup ?? DEFAULT_BADGE_MODEL_GROUP)
+        setBadgeWindowType(prefs.badgeWindowType ?? DEFAULT_BADGE_WINDOW_TYPE)
+        setBadgeSkipZeroWeekly(prefs.badgeSkipZeroWeekly ?? DEFAULT_BADGE_SKIP_ZERO_WEEKLY)
       }
       setError(null)
 
@@ -427,48 +459,108 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const accountCount = accounts.length
   const rawDot = dotStateFor(accounts)
   const dotState = rawDot === 'done' ? 'active' : rawDot === 'warning' ? 'cooling' : 'disabled'
-  // The panel shows ONLY the account the dropdown names (a pure view pick —
-  // watching one account must not switch the pool's traffic, so the select is
-  // read-only over the pool).
   const viewAccount = accounts.find((candidate) => candidate.index === viewIndex) ?? activeAccount
-  // The badge alternates the ACTIVE account's two tracked readings —
-  // `account · 5h quota 82%` then `account · weekly quota 90%` — every
-  // RENDER_TICK_MS (5s). The flip is pure display arithmetic over `now`:
-  // it never loads quota, never touches the pool. With only one window
-  // measured, that one shows steadily instead of flickering to a count.
-  const activeRead = accountQuotaRead(activeAccount, now)
-  const has5h = activeRead.fiveHour !== null
-  const hasWeekly = activeRead.weekly !== null
-  const flipPhase = Math.floor(now / RENDER_TICK_MS) % 2
-  const showWeekly = has5h && hasWeekly ? flipPhase === 1 : hasWeekly && !has5h
-  const shownToken = showWeekly ? 'weekly' : '5h'
-  const shownFraction = showWeekly ? activeRead.weekly : activeRead.fiveHour
-  // The label and percent are hoisted out of the call-site objects: the i18n
-  // walker reads each `t('key', {...})` params up to its first `}`, which a
-  // template literal's `${...}` would cut short.
-  const shownWindowLabel = shownToken === 'weekly' ? t('badgeWindowWeekly') : t('badgeWindow5h')
-  const shownPercent = toPercent(shownFraction) ?? 0
-  const accountName = activeAccount?.email ? desensitizeEmail(activeAccount.email) : null
-  const displayText = shownFraction !== null && accountName !== null
-    ? t('badgeAccountQuotaFormat', { account: accountName, window: shownWindowLabel, percent: shownPercent })
-    : t('badgeCountFormat', { count: accountCount })
 
-  // The quota verdict recolors the breathing dot ONLY — the label keeps the
-  // theme's plain text color, so red/amber never fights the caption for
-  // attention. Classes ride the badge and the dot; the dot rules in styles.ts
-  // override `color` (the primitive paints its halo and core from
-  // currentColor) and are declared after the state rules so the quota verdict
-  // wins the cascade when both land.
-  const exhausted = isAccountQuotaExhausted(activeAccount, now)
-  const fiveHourLow = activeRead.fiveHour !== null && activeRead.fiveHour > 0 && activeRead.fiveHour < 0.2
-  const effectiveDotState: StateDotState = exhausted
-    ? 'error'
-    : fiveHourLow || rawDot === 'warning'
-      ? 'warning'
-      : rawDot === 'idle'
-        ? 'idle'
-        : 'done'
-  const statusClass = exhausted ? 'quota-error' : fiveHourLow ? 'quota-warn' : ''
+  let displayText: string
+  let effectiveDotState: StateDotState = 'idle'
+  let statusClass = ''
+  let shownToken = '5h'
+  let shownFraction: number | null = null
+  let badgeReadingStr: string
+
+  if (!badgeDetailedMode) {
+    // Non-detailed mode: original chaos-03x/dsh-agy badge
+    const badgeQuota = pickBadgeQuota(accounts, now)
+    const badgeWindow = badgeQuota?.window && badgeQuota.window !== '5h' ? `${windowLabel(badgeQuota.window, t)} ` : ''
+    displayText = badgeQuota !== null
+      ? (badgeWindow !== ''
+          ? t('badgeWindowQuotaFormat', { window: badgeWindow, percent: badgeQuota.percent })
+          : t('badgeQuotaFormat', { percent: badgeQuota.percent }))
+      : t('badgeCountFormat', { count: accountCount })
+
+    badgeReadingStr = badgeQuota !== null
+      ? t('badgeReading', { window: badgeWindow, percent: badgeQuota.percent })
+      : t('badgeUnmeasured')
+
+    if (badgeQuota !== null) {
+      if (badgeQuota.percent <= 0) {
+        effectiveDotState = 'error'
+        statusClass = 'quota-error'
+      } else if (badgeQuota.percent <= 20) {
+        effectiveDotState = 'warning'
+        statusClass = 'quota-warn'
+      } else {
+        effectiveDotState = 'done'
+        statusClass = ''
+      }
+    } else {
+      effectiveDotState = rawDot as StateDotState
+    }
+  } else {
+    // Detailed mode
+    const targetGroup = resolveQuotaGroup(
+      activeAccount?.limits,
+      badgeModelGroup === 'auto' ? activeAccount?.actualModel : badgeModelGroup,
+    )
+    const groupRead = accountQuotaRead(activeAccount, now, badgeModelGroup)
+    const modelLabel = modelLabelForGroup(targetGroup, activeAccount?.actualModel)
+
+    const has5h = groupRead.fiveHour !== null
+    const hasWeekly = groupRead.weekly !== null
+    const weeklyIsZero = groupRead.weekly === 0
+    const skipWeekly = weeklyIsZero && badgeSkipZeroWeekly
+
+    if (badgeWindowType === '5h') {
+      shownToken = '5h'
+      shownFraction = groupRead.fiveHour
+    } else if (badgeWindowType === 'weekly') {
+      shownToken = 'weekly'
+      shownFraction = groupRead.weekly
+    } else {
+      const flipPhase = Math.floor(now / RENDER_TICK_MS) % 2
+      const showWeekly = skipWeekly
+        ? false
+        : has5h && hasWeekly
+          ? flipPhase === 1
+          : hasWeekly && !has5h
+      shownToken = showWeekly ? 'weekly' : '5h'
+      shownFraction = showWeekly ? groupRead.weekly : groupRead.fiveHour
+    }
+
+    const shownWindowLabel = shownToken === 'weekly' ? t('badgeWindowWeekly') : t('badgeWindow5h')
+    const shownWindowWithSpace = `${shownWindowLabel} `
+    const shownPercent = toPercent(shownFraction) ?? 0
+    const accountName = activeAccount?.email ? desensitizeEmail(activeAccount.email) : null
+    displayText = shownFraction !== null && accountName !== null
+      ? t('badgeAccountQuotaFormat', {
+          account: accountName,
+          model: modelLabel,
+          window: shownWindowWithSpace,
+          percent: shownPercent,
+        })
+      : t('badgeCountFormat', { count: accountCount })
+
+    badgeReadingStr = shownFraction !== null
+      ? t('badgeReading', { window: shownWindowWithSpace, percent: shownPercent })
+      : t('badgeUnmeasured')
+
+    if (shownFraction !== null) {
+      if (shownFraction <= 0) {
+        effectiveDotState = 'error'
+        statusClass = 'quota-error'
+      } else if (shownFraction <= 0.2) {
+        effectiveDotState = 'warning'
+        statusClass = 'quota-warn'
+      } else {
+        effectiveDotState = 'done'
+        statusClass = ''
+      }
+    } else if (rawDot === 'warning') {
+      effectiveDotState = 'warning'
+    } else if (rawDot === 'done') {
+      effectiveDotState = 'done'
+    }
+  }
 
   // The picker lists every serviceable account. The viewed row joins even when
   // the switch rules would exclude it (a disabled active row in an all-drained
@@ -505,9 +597,6 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     ? agoText(new Date(viewAccount.limitsUpdatedAt).toISOString(), t, now)
     : null
 
-  const badgeReadingStr = shownFraction !== null
-    ? t('badgeReading', { window: shownWindowLabel, percent: shownPercent })
-    : t('badgeUnmeasured')
   const badgeTooltip = t('badgeTooltip', { count: accountCount, reading: badgeReadingStr })
 
   const popoverContent = h(
@@ -736,43 +825,39 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         size: 7,
         className: `agy-ui-dot ${dotState}${statusClass ? ` ${statusClass}` : ''}${isUpdating ? ' updating' : ''}`,
       }),
-      // The text stays the theme's plain color; only the dot carries the quota
-      // verdict. Keying the span on the SHOWN WINDOW remounts it on each 5s
-      // flip so the slide-in animation replays — a pure display change that
-      // never triggers a quota load.
-      h('span', { key: shownToken, className: 'agy-ui-badge-text' }, displayText),
-      // The rotate affordance lives INSIDE the quota capsule, at its right —
-      // one control, not two: the capsule opens the board, the arrow rotates
-      // the pool to the next serviceable account. stopPropagation keeps the
-      // rotation from toggling the pin the capsule's own click starts.
-      h(
-        'span',
-        {
-          className: `agy-ui-badge-switch${switchableAccounts.length < 2 || isUpdating ? ' disabled' : ''}`,
-          role: 'button',
-          tabIndex: 0,
-          title: t('badgeSwitchNext'),
-          'aria-label': t('badgeSwitchNext'),
-          onClick: (e: { stopPropagation: () => void }) => {
-            e.stopPropagation()
-            if (!isUpdating && switchableAccounts.length >= 2) void handleSwitchNext()
-          },
-          onKeyDown: (e: { key: string, stopPropagation: () => void, preventDefault: () => void }) => {
-            if (e.key !== 'Enter' && e.key !== ' ') return
-            e.stopPropagation()
-            e.preventDefault()
-            if (!isUpdating && switchableAccounts.length >= 2) void handleSwitchNext()
-          },
-        },
-        h(
-          'svg',
-          { width: '12', height: '12', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round' },
-          h('path', { d: 'M17 2l4 4-4 4' }),
-          h('path', { d: 'M3 11v-1a4 4 0 0 1 4-4h14' }),
-          h('path', { d: 'M7 22l-4-4 4-4' }),
-          h('path', { d: 'M21 13v1a4 4 0 0 1-4 4H3' }),
-        ),
-      ),
+      badgeDetailedMode
+        ? h('span', { key: shownToken, className: 'agy-ui-badge-text' }, displayText)
+        : h('span', null, displayText),
+      badgeDetailedMode
+        ? h(
+            'span',
+            {
+              className: `agy-ui-badge-switch${switchableAccounts.length < 2 || isUpdating ? ' disabled' : ''}`,
+              role: 'button',
+              tabIndex: 0,
+              title: t('badgeSwitchNext'),
+              'aria-label': t('badgeSwitchNext'),
+              onClick: (e: { stopPropagation: () => void }) => {
+                e.stopPropagation()
+                if (!isUpdating && switchableAccounts.length >= 2) void handleSwitchNext()
+              },
+              onKeyDown: (e: { key: string, stopPropagation: () => void, preventDefault: () => void }) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return
+                e.stopPropagation()
+                e.preventDefault()
+                if (!isUpdating && switchableAccounts.length >= 2) void handleSwitchNext()
+              },
+            },
+            h(
+              'svg',
+              { width: '12', height: '12', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round' },
+              h('path', { d: 'M17 2l4 4-4 4' }),
+              h('path', { d: 'M3 11v-1a4 4 0 0 1 4-4h14' }),
+              h('path', { d: 'M7 22l-4-4 4-4' }),
+              h('path', { d: 'M21 13v1a4 4 0 0 1-4 4H3' }),
+            ),
+          )
+        : null,
     ),
     popoverNode,
   )

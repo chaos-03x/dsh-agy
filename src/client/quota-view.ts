@@ -308,7 +308,7 @@ export function toPercent(fraction: number | null | undefined): number | null {
  */
 export function quotaColor(fraction: number): string {
   if (fraction <= 0) return aliasVar('state-error-primary')
-  if (fraction < 0.2) return aliasVar('state-warn-primary')
+  if (fraction <= 0.2) return aliasVar('state-warn-primary')
   return aliasVar('state-success-primary')
 }
 
@@ -460,11 +460,66 @@ export interface AccountQuotaRead {
   weekly: number | null
 }
 
-export function accountQuotaRead(view: AccountView | undefined, now: number): AccountQuotaRead {
+/**
+ * Resolve which quota group an account should monitor, matching model or group selector.
+ * 'auto' resolves by actualModel (gemini -> Gemini Models, claude -> Claude and GPT models, etc.),
+ * falling back to the first available group.
+ */
+export function resolveQuotaGroup(
+  groups: readonly QuotaGroup[] | null | undefined,
+  targetOrModel?: string | null,
+): QuotaGroup | undefined {
+  if (!groups || groups.length === 0) return undefined
+  if (!targetOrModel || targetOrModel === 'auto') {
+    return groups[0]
+  }
+  const key = targetOrModel.toLowerCase()
+  const exact = groups.find((g) => g.name.toLowerCase() === key)
+  if (exact) return exact
+
+  if (key.startsWith('gemini-') || key.startsWith('gemma-') || key === 'gemini') {
+    return groups.find((g) => g.name.toLowerCase().includes('gemini') || g.windows.some((w) => w.bucketId.startsWith('gemini-'))) ?? groups[0]
+  }
+  if (key.startsWith('claude-') || key === 'claude') {
+    return groups.find((g) => g.name.toLowerCase().includes('claude') || g.windows.some((w) => w.bucketId.startsWith('3p-') || w.bucketId.startsWith('claude-'))) ?? groups[0]
+  }
+  if (key.startsWith('gpt-') || key.startsWith('openai/') || key === 'gpt') {
+    return groups.find((g) => g.name.toLowerCase().includes('gpt') || g.windows.some((w) => w.bucketId.startsWith('3p-') || w.bucketId.startsWith('gpt-'))) ?? groups[0]
+  }
+  const partial = groups.find((g) => g.name.toLowerCase().includes(key))
+  return partial ?? groups[0]
+}
+
+/** Clean label for a model group (e.g. 'Gemini', 'Claude', 'GPT'). */
+export function modelLabelForGroup(group: QuotaGroup | undefined, actualModel?: string | null): string {
+  if (actualModel) {
+    const id = actualModel.toLowerCase()
+    if (id.startsWith('claude-')) return 'Claude'
+    if (id.startsWith('gemini-') || id.startsWith('gemma-')) return 'Gemini'
+    if (id.startsWith('gpt-')) return 'GPT'
+  }
+  if (!group) return 'AGY'
+  const name = group.name.toLowerCase()
+  if (name.includes('gemini') || name.includes('google')) return 'Gemini'
+  if (name.includes('claude')) return 'Claude'
+  if (name.includes('gpt')) return 'GPT'
+  return group.name || 'AGY'
+}
+
+export function accountQuotaRead(
+  view: AccountView | undefined,
+  now: number,
+  groupTarget?: string | null,
+): AccountQuotaRead {
+  if (!view?.limits) return { fiveHour: null, weekly: null }
+  const target = groupTarget !== undefined
+    ? resolveQuotaGroup(view.limits, groupTarget === 'auto' ? view.actualModel : groupTarget)
+    : undefined
+  const groupsToRead = target ? [target] : view.limits
+
   const read = (token: '5h' | 'weekly'): number | null => {
-    if (!view?.limits) return null
     let best: number | null = null
-    for (const group of view.limits) {
+    for (const group of groupsToRead) {
       for (const window of group.windows) {
         if (window.window !== token) continue
         if (window.remainingFraction === null) continue

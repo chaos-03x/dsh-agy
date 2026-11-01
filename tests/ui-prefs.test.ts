@@ -84,6 +84,10 @@ describe('UiPrefsStore', () => {
         conversationBadge: false,
         detailedQuotaReset: false,
         quotaRefreshMinutes: DEFAULT_QUOTA_REFRESH_MINUTES,
+        badgeDetailedMode: true,
+        badgeModelGroup: 'auto',
+        badgeWindowType: 'both',
+        badgeSkipZeroWeekly: true,
       })
     } finally {
       if (existsSync(file)) rmSync(file)
@@ -138,6 +142,36 @@ describe('UiPrefsStore', () => {
       expect(new UiPrefsStore(file).get().quotaRefreshMinutes).toBeNull()
       // A partial set carries the null through too.
       expect(store.set({ detailedQuotaReset: true }).quotaRefreshMinutes).toBeNull()
+    } finally {
+      if (existsSync(file)) rmSync(file)
+    }
+  })
+
+  it('persists badge detailed mode and quota selection preferences', () => {
+    const file = join(tmpdir(), `agy-ui-prefs-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+    try {
+      const store = new UiPrefsStore(file)
+      expect(store.get().badgeDetailedMode).toBe(true)
+      expect(store.get().badgeModelGroup).toBe('auto')
+      expect(store.get().badgeWindowType).toBe('both')
+      expect(store.get().badgeSkipZeroWeekly).toBe(true)
+
+      const updated = store.set({
+        badgeDetailedMode: false,
+        badgeModelGroup: 'Gemini Models',
+        badgeWindowType: '5h',
+        badgeSkipZeroWeekly: false,
+      })
+      expect(updated.badgeDetailedMode).toBe(false)
+      expect(updated.badgeModelGroup).toBe('Gemini Models')
+      expect(updated.badgeWindowType).toBe('5h')
+      expect(updated.badgeSkipZeroWeekly).toBe(false)
+
+      const store2 = new UiPrefsStore(file)
+      expect(store2.get().badgeDetailedMode).toBe(false)
+      expect(store2.get().badgeModelGroup).toBe('Gemini Models')
+      expect(store2.get().badgeWindowType).toBe('5h')
+      expect(store2.get().badgeSkipZeroWeekly).toBe(false)
     } finally {
       if (existsSync(file)) rmSync(file)
     }

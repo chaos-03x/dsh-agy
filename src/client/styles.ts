@@ -584,7 +584,8 @@ export const AGY_STYLES_CSS = `
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
-  transition: background-color 0.3s;
+  transition: background-color 0.3s, color 0.3s, box-shadow 0.3s;
+  animation: agy-ui-pulse 2.4s ease-in-out infinite;
 }
 
 .agy-ui-dot[data-state="done"],

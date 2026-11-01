@@ -19,12 +19,14 @@ import {
   formatDetailedReset,
   formatQuotaReset,
   isAccountQuotaExhausted,
+  modelLabelForGroup,
   nextHealthyIndex,
   pickBadgeQuota,
   pickBadgeWindow,
   PROBE_FAILURE_BACKOFF_MS,
   quotaColor,
   resetText,
+  resolveQuotaGroup,
   shouldProbeLimits,
   sortWindows,
   stateLabel,
@@ -351,12 +353,13 @@ describe('account identity', () => {
 
 describe('quota tints and drain thresholds', () => {
   it('tints every surface by the one quota contract', () => {
-    // 0% is exhausted (red), below 20% nearly drained (amber), the rest
+    // 0% is exhausted (red), 20% and below is nearly drained (amber), the rest
     // healthy (green). The header badge, its window bars and the Settings
     // limits card all call this one rule, so the same reading can never
     // render two colours on two surfaces.
     expect(quotaColor(0.8)).toContain('--dsw-alias-state-success-primary')
-    expect(quotaColor(0.2)).toContain('--dsw-alias-state-success-primary')
+    expect(quotaColor(0.21)).toContain('--dsw-alias-state-success-primary')
+    expect(quotaColor(0.2)).toContain('--dsw-alias-state-warn-primary')
     expect(quotaColor(0.19)).toContain('--dsw-alias-state-warn-primary')
     expect(quotaColor(0.05)).toContain('--dsw-alias-state-warn-primary')
     expect(quotaColor(0)).toContain('--dsw-alias-state-error-primary')
@@ -540,6 +543,30 @@ describe('account quota read and the shared rotation rule', () => {
       ],
     })
     expect(accountQuotaRead(view, NOW)).toEqual({ fiveHour: 0.4, weekly: 0.9 })
+  })
+
+  it('resolves model groups and isolates readings by target or actualModel', () => {
+    const geminiGroup = group('Gemini Models', [window('gemini-h', '5h', 0.54, at(60)), window('gemini-w', 'weekly', 0.86, at(5000))])
+    const claudeGroup = group('Claude and GPT models', [window('3p-h', '5h', 1.0, at(60)), window('3p-w', 'weekly', 0, at(5000))])
+    const groups = [geminiGroup, claudeGroup]
+
+    expect(resolveQuotaGroup(groups, 'gemini-3.8-flash-n')).toBe(geminiGroup)
+    expect(resolveQuotaGroup(groups, 'claude-sonnet-4-6')).toBe(claudeGroup)
+    expect(resolveQuotaGroup(groups, 'auto')).toBe(geminiGroup)
+    expect(resolveQuotaGroup(groups, 'Claude and GPT models')).toBe(claudeGroup)
+
+    expect(modelLabelForGroup(geminiGroup, 'gemini-3.8-flash-n')).toBe('Gemini')
+    expect(modelLabelForGroup(claudeGroup, 'claude-sonnet-4-6')).toBe('Claude')
+    expect(modelLabelForGroup(claudeGroup, 'gpt-4o')).toBe('GPT')
+
+    const view = account({
+      actualModel: 'gemini-3.8-flash-n',
+      limits: groups,
+    })
+    // Auto target matches actualModel (Gemini Models), ignoring Claude's 0% weekly
+    expect(accountQuotaRead(view, NOW, 'auto')).toEqual({ fiveHour: 0.54, weekly: 0.86 })
+    // Explicit Claude group reads Claude's windows
+    expect(accountQuotaRead(view, NOW, 'Claude and GPT models')).toEqual({ fiveHour: 1.0, weekly: 0 })
   })
 
   it('withholds readings whose window already reset, and null stays null', () => {

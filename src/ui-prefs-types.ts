@@ -4,6 +4,13 @@ export const QUOTA_REFRESH_MAX_MINUTES = 120
 /** Interval used while nothing is stored. */
 export const DEFAULT_QUOTA_REFRESH_MINUTES = 5
 
+export type BadgeWindowType = 'both' | '5h' | 'weekly'
+
+export const DEFAULT_BADGE_DETAILED_MODE = true
+export const DEFAULT_BADGE_MODEL_GROUP = 'auto'
+export const DEFAULT_BADGE_WINDOW_TYPE: BadgeWindowType = 'both'
+export const DEFAULT_BADGE_SKIP_ZERO_WEEKLY = true
+
 export interface UiPrefsView {
   conversationBadge: boolean
   detailedQuotaReset: boolean
@@ -13,12 +20,24 @@ export interface UiPrefsView {
    * reader never has to re-implement the fallback.
    */
   quotaRefreshMinutes: number | null
+  /** Whether the conversation header badge uses the detailed mode. */
+  badgeDetailedMode: boolean
+  /** Model group to display on badge ('auto' or group name/prefix). */
+  badgeModelGroup: string
+  /** Quota window type to display ('both' | '5h' | 'weekly'). */
+  badgeWindowType: BadgeWindowType
+  /** Whether to exclude weekly quota from rotation when it reaches 0%. */
+  badgeSkipZeroWeekly: boolean
 }
 
 export interface SetUiPrefsPayload {
   conversationBadge?: boolean
   detailedQuotaReset?: boolean
   quotaRefreshMinutes?: number | null
+  badgeDetailedMode?: boolean
+  badgeModelGroup?: string
+  badgeWindowType?: BadgeWindowType
+  badgeSkipZeroWeekly?: boolean
 }
 
 export interface UiPrefsDocument {
@@ -26,6 +45,10 @@ export interface UiPrefsDocument {
   conversationBadge?: boolean
   detailedQuotaReset?: boolean
   quotaRefreshMinutes?: number | null
+  badgeDetailedMode?: boolean
+  badgeModelGroup?: string
+  badgeWindowType?: BadgeWindowType
+  badgeSkipZeroWeekly?: boolean
 }
 
 /**

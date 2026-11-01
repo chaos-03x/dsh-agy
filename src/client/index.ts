@@ -36,9 +36,14 @@ import type { AccountView, AgyRpcClient, AgyRpcResult, ModelRoutingTarget, Model
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
 import {
+  DEFAULT_BADGE_DETAILED_MODE,
+  DEFAULT_BADGE_MODEL_GROUP,
+  DEFAULT_BADGE_SKIP_ZERO_WEEKLY,
+  DEFAULT_BADGE_WINDOW_TYPE,
   DEFAULT_QUOTA_REFRESH_MINUTES,
   QUOTA_REFRESH_MAX_MINUTES,
   QUOTA_REFRESH_MIN_MINUTES,
+  type BadgeWindowType,
 } from '../ui-prefs-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
 
@@ -737,12 +742,17 @@ export function resolveSelectedAccountIndex(
 function PreferencesCard(props: {
   rpc: AgyRpcClient
   t: T
+  accounts?: AccountView[]
   onBadgePrefChange?: (enabled: boolean) => void
   onDetailedPrefChange?: (enabled: boolean) => void
 }): ReactNode {
-  const { rpc, t, onBadgePrefChange, onDetailedPrefChange } = props
+  const { rpc, t, accounts, onBadgePrefChange, onDetailedPrefChange } = props
   const [badgeEnabled, setBadgeEnabled] = useState(false)
   const [detailedReset, setDetailedReset] = useState(false)
+  const [badgeDetailedMode, setBadgeDetailedMode] = useState(DEFAULT_BADGE_DETAILED_MODE)
+  const [badgeModelGroup, setBadgeModelGroup] = useState<string>(DEFAULT_BADGE_MODEL_GROUP)
+  const [badgeWindowType, setBadgeWindowType] = useState<BadgeWindowType>(DEFAULT_BADGE_WINDOW_TYPE)
+  const [badgeSkipZeroWeekly, setBadgeSkipZeroWeekly] = useState(DEFAULT_BADGE_SKIP_ZERO_WEEKLY)
   // Auto quota-refresh: null = never. The draft is the input's own text state;
   // it commits on blur/Enter so typing "1" mid-way toward "15" does not save 1.
   const [refreshMinutes, setRefreshMinutes] = useState<number | null>(DEFAULT_QUOTA_REFRESH_MINUTES)
@@ -765,6 +775,10 @@ function PreferencesCard(props: {
         const minutes = prefs === null ? DEFAULT_QUOTA_REFRESH_MINUTES : prefs.quotaRefreshMinutes
         setRefreshMinutes(minutes)
         setMinutesDraft(minutes === null ? '' : String(minutes))
+        setBadgeDetailedMode(prefs?.badgeDetailedMode === true)
+        setBadgeModelGroup(prefs?.badgeModelGroup ?? DEFAULT_BADGE_MODEL_GROUP)
+        setBadgeWindowType(prefs?.badgeWindowType ?? DEFAULT_BADGE_WINDOW_TYPE)
+        setBadgeSkipZeroWeekly(prefs?.badgeSkipZeroWeekly ?? DEFAULT_BADGE_SKIP_ZERO_WEEKLY)
         onDetailedPrefChange?.(prefs?.detailedQuotaReset === true)
         setLoading(false)
       }
@@ -817,6 +831,88 @@ function PreferencesCard(props: {
       setSaving(false)
     }
   }, [rpc, t, onDetailedPrefChange])
+
+  const toggleDetailedMode = useCallback(async (checked: boolean) => {
+    setSaving(true)
+    setBadgeDetailedMode(checked)
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+    try {
+      const res = await rpc.call('ui.prefs.set', { badgeDetailedMode: checked })
+      setBadgeDetailedMode(res.badgeDetailedMode)
+      setSaveError(null)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agy:ui-prefs-changed', { detail: res }))
+      }
+    } catch (err) {
+      setBadgeDetailedMode(!checked)
+      setSaveError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
+    } finally {
+      setSaving(false)
+    }
+  }, [rpc, t])
+
+  const saveBadgeModelGroup = useCallback(async (group: string) => {
+    setSaving(true)
+    const prev = badgeModelGroup
+    setBadgeModelGroup(group)
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+    try {
+      const res = await rpc.call('ui.prefs.set', { badgeModelGroup: group })
+      setBadgeModelGroup(res.badgeModelGroup)
+      setSaveError(null)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agy:ui-prefs-changed', { detail: res }))
+      }
+    } catch (err) {
+      setBadgeModelGroup(prev)
+      setSaveError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
+    } finally {
+      setSaving(false)
+    }
+  }, [rpc, t, badgeModelGroup])
+
+  const saveBadgeWindowType = useCallback(async (type: BadgeWindowType) => {
+    setSaving(true)
+    const prev = badgeWindowType
+    setBadgeWindowType(type)
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+    try {
+      const res = await rpc.call('ui.prefs.set', { badgeWindowType: type })
+      setBadgeWindowType(res.badgeWindowType)
+      setSaveError(null)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agy:ui-prefs-changed', { detail: res }))
+      }
+    } catch (err) {
+      setBadgeWindowType(prev)
+      setSaveError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
+    } finally {
+      setSaving(false)
+    }
+  }, [rpc, t, badgeWindowType])
+
+  const toggleSkipZeroWeekly = useCallback(async (checked: boolean) => {
+    setSaving(true)
+    setBadgeSkipZeroWeekly(checked)
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+    try {
+      const res = await rpc.call('ui.prefs.set', { badgeSkipZeroWeekly: checked })
+      setBadgeSkipZeroWeekly(res.badgeSkipZeroWeekly)
+      setSaveError(null)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agy:ui-prefs-changed', { detail: res }))
+      }
+    } catch (err) {
+      setBadgeSkipZeroWeekly(!checked)
+      setSaveError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
+    } finally {
+      setSaving(false)
+    }
+  }, [rpc, t])
 
   const saveRefreshMinutes = useCallback(async (minutes: number | null) => {
     setSaving(true)
@@ -873,6 +969,10 @@ function PreferencesCard(props: {
     void saveRefreshMinutes(parsed)
   }, [minutesDraft, refreshMinutes, t, saveRefreshMinutes])
 
+  const activeAccount = accounts?.find((a) => a.active) ?? accounts?.[0]
+  const availableGroups = (activeAccount?.limits ?? accounts?.flatMap((a) => a.limits ?? []) ?? [])
+    .filter((g, idx, arr) => arr.findIndex((x) => x.name === g.name) === idx)
+
   const rows = [
     h('div', { className: 'agy-pref-row', key: 'detailed' },
       h('div', { className: 'agy-pref-info' },
@@ -916,7 +1016,62 @@ function PreferencesCard(props: {
         disabled: loading || saving,
         onChange: (checked: boolean) => void toggleBadge(checked),
       })),
-  ]
+    badgeEnabled
+      ? h('div', { className: 'agy-pref-row', key: 'detailedMode' },
+          h('div', { className: 'agy-pref-info' },
+            h('div', { className: 'agy-pref-name' }, t('prefBadgeDetailedMode')),
+            h('div', { className: 'agy-pref-desc' }, t('prefBadgeDetailedModeDesc'))),
+          h(Switch, {
+            label: t('prefBadgeDetailedMode'),
+            checked: badgeDetailedMode,
+            disabled: loading || saving,
+            onChange: (checked: boolean) => void toggleDetailedMode(checked),
+          }))
+      : null,
+    badgeEnabled && badgeDetailedMode
+      ? h('div', { className: 'agy-pref-row', key: 'modelGroup' },
+          h('div', { className: 'agy-pref-info' },
+            h('div', { className: 'agy-pref-name' }, t('prefBadgeModelGroup'))),
+          h('select', {
+            className: 'agy-select agy-pref-select',
+            value: badgeModelGroup,
+            disabled: loading || saving,
+            title: t('prefBadgeModelGroup'),
+            'aria-label': t('prefBadgeModelGroup'),
+            onChange: (e: { target: { value: string } }) => void saveBadgeModelGroup(e.target.value),
+          },
+          h('option', { value: 'auto' }, t('prefBadgeModelGroupAuto')),
+          ...availableGroups.map((g) => h('option', { key: g.name, value: g.name }, g.name))))
+      : null,
+    badgeEnabled && badgeDetailedMode
+      ? h('div', { className: 'agy-pref-row', key: 'windowType' },
+          h('div', { className: 'agy-pref-info' },
+            h('div', { className: 'agy-pref-name' }, t('prefBadgeWindowType'))),
+          h('select', {
+            className: 'agy-select agy-pref-select',
+            value: badgeWindowType,
+            disabled: loading || saving,
+            title: t('prefBadgeWindowType'),
+            'aria-label': t('prefBadgeWindowType'),
+            onChange: (e: { target: { value: string } }) => void saveBadgeWindowType(e.target.value as BadgeWindowType),
+          },
+          h('option', { value: 'both' }, t('prefBadgeWindowBoth')),
+          h('option', { value: '5h' }, t('prefBadgeWindow5h')),
+          h('option', { value: 'weekly' }, t('prefBadgeWindowWeekly'))))
+      : null,
+    badgeEnabled && badgeDetailedMode && badgeWindowType === 'both'
+      ? h('div', { className: 'agy-pref-row', key: 'skipZeroWeekly' },
+          h('div', { className: 'agy-pref-info' },
+            h('div', { className: 'agy-pref-name' }, t('prefBadgeSkipZeroWeekly')),
+            h('div', { className: 'agy-pref-desc' }, t('prefBadgeSkipZeroWeeklyDesc'))),
+          h(Switch, {
+            label: t('prefBadgeSkipZeroWeekly'),
+            checked: badgeSkipZeroWeekly,
+            disabled: loading || saving,
+            onChange: (checked: boolean) => void toggleSkipZeroWeekly(checked),
+          }))
+      : null,
+  ].filter((item): item is ReactNode => item !== null)
 
   return h('section', { className: 'agy-card' },
     h('div', { className: 'agy-card-body' },
@@ -1074,6 +1229,7 @@ function AccountsTab(props: {
     h(PreferencesCard, {
       rpc: props.rpc,
       t,
+      accounts: props.accounts,
       onBadgePrefChange: props.onBadgePrefChange,
       onDetailedPrefChange: props.onDetailedPrefChange,
     })))
