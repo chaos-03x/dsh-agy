@@ -36,6 +36,7 @@ import {
 import { _clearVersionCacheForTest, resolveAntigravityVersion } from '../src/runtime/version.ts'
 import { parseQuotaSummary } from '../src/adapter/quota-summary.ts'
 import {
+  cachedQuotaReadings,
   FAMILY_UNKNOWN,
   familiesForBucketId,
   familiesForGroup,
@@ -46,13 +47,16 @@ import {
   ingestQuotaGroups,
   isFamilyDrained,
   isQuotaStale,
+  limitGroupReadings,
+  measuredQuotaSpent,
   modelFamilyOf,
+  quotaCooldownContradicted,
   rankPoolCandidates,
   requiredDrainFor,
 } from '../src/runtime/quota.ts'
 import { fingerprintMode, isAgyDisabled } from '../src/runtime/risk.ts'
 import { QUOTA_WINDOWS } from '../src/types.ts'
-import type { ManagedAccount } from '../src/types.ts'
+import type { CooldownReason, ManagedAccount } from '../src/types.ts'
 
 function account(): ManagedAccount {
   return { email: 'a@b.c', refresh: 'rt|p', addedAt: 0, lastUsed: 0 }
@@ -1187,6 +1191,68 @@ describe('family quota helpers', () => {
     expect(day).toBeCloseTo(0.5 / 24, 4)
     const hour = requiredDrainFor({ remainingFraction: 0.5, resetTime: new Date(Date.now() + 60 * 60 * 1000).toISOString() })
     expect(hour).toBeCloseTo(0.5 / 1, 2)
+  })
+})
+
+describe('quota cooldown lift (a false park vs newer evidence)', () => {
+  const reading = (fraction: number | null, resetTime?: string | null) => ({ fraction, resetTime })
+
+  it('measuredQuotaSpent matches the block wall: zero with a future reset', () => {
+    expect(measuredQuotaSpent([reading(0, '2099-01-01T00:00:00Z')])).toBe(true)
+    expect(measuredQuotaSpent([reading(0.9, '2099-01-01T00:00:00Z')])).toBe(false)
+    // A reset in the past describes a window that is over — nothing to wait for.
+    expect(measuredQuotaSpent([reading(0, '2000-01-01T00:00:00Z')])).toBe(false)
+    // No reset moment: a bare zero cannot bound a wait.
+    expect(measuredQuotaSpent([reading(0)])).toBe(false)
+    expect(measuredQuotaSpent([reading(null)])).toBe(false)
+    expect(measuredQuotaSpent([])).toBe(false)
+  })
+
+  it('cachedQuotaReadings and limitGroupReadings flatten both cache shapes', () => {
+    expect(cachedQuotaReadings({
+      google: { remainingFraction: 0.4, weeklyFraction: 0, weeklyResetTime: '2099-01-01T00:00:00Z' },
+    })).toEqual([
+      { fraction: 0.4, resetTime: undefined },
+      { fraction: 0, resetTime: '2099-01-01T00:00:00Z' },
+    ])
+    expect(limitGroupReadings([{
+      name: 'Gemini Models',
+      windows: [
+        { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.2, resetTime: null },
+        { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: null, resetTime: null },
+      ],
+    }])).toEqual([
+      { fraction: 0.2, resetTime: null },
+      { fraction: null, resetTime: null },
+    ])
+  })
+
+  it('lifts only a still-running quota-exhausted park contradicted AFTER it was set', () => {
+    const parked = {
+      cooldownReason: 'quota-exhausted' as CooldownReason,
+      coolingDownUntil: Date.now() + 3_600_000,
+      cooldownSetAt: Date.now() - 60_000,
+    }
+    const healthy = [reading(0.8, '2099-01-01T00:00:00Z')]
+    expect(quotaCooldownContradicted(parked, healthy, Date.now())).toBe(true)
+    // A measurement from BEFORE the park proves nothing about the park: the 429
+    // is newer evidence than the older snapshot.
+    expect(quotaCooldownContradicted(parked, healthy, Date.now() - 120_000)).toBe(false)
+    // A fresh measurement that still shows a spent window CONFIRMS the park.
+    expect(quotaCooldownContradicted(parked, [reading(0, '2099-01-01T00:00:00Z')], Date.now())).toBe(false)
+    // Other cooldown reasons are out of scope: rate-limit and verification
+    // parks are upstream's own short windows, not quota beliefs.
+    expect(quotaCooldownContradicted({ ...parked, cooldownReason: 'rate-limit' }, healthy, Date.now())).toBe(false)
+    expect(quotaCooldownContradicted({ ...parked, cooldownReason: 'validation-required' }, healthy, Date.now())).toBe(false)
+    // An expired park is clearExpiredState's job, not the lift's.
+    expect(quotaCooldownContradicted({ ...parked, coolingDownUntil: Date.now() - 1 }, healthy, Date.now())).toBe(false)
+    // A park written before cooldownSetAt existed may be contradicted by any
+    // fresh measurement.
+    expect(quotaCooldownContradicted(
+      { cooldownReason: 'quota-exhausted', coolingDownUntil: Date.now() + 3_600_000 },
+      healthy,
+      Date.now(),
+    )).toBe(true)
   })
 })
 

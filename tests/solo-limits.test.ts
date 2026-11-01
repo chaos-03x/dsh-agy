@@ -292,4 +292,59 @@ describe('solo-account limits', () => {
     expect(isLimitsStale({ ...account(), cachedLimits: { groups: [], updatedAt: Number.NaN } })).toBe(true)
     expect(isLimitsStale({ ...account(), cachedLimits: { groups: [], updatedAt: Date.now() } })).toBe(false)
   })
+
+  it('lifts a false quota-exhausted park when the display probe measures quota remaining', async () => {
+    // A SOLO pool never runs the scheduling refresh (the >1 gate), so the display
+    // probe is the ONLY evidence that can contradict a false park. A burst 429
+    // whose body merely said "quota" parks a healthy account for up to a day;
+    // opening the accounts page measures and heals it instead of leaving the
+    // 冷却至 badge up until the cooldown expires while every run reports
+    // "quota exhausted".
+    const calls: string[] = []
+    stubSummary(calls)
+    const parked = {
+      ...account('solo@x'),
+      coolingDownUntil: Date.now() + 20 * 60 * 60 * 1000,
+      cooldownReason: 'quota-exhausted' as const,
+      cooldownSetAt: Date.now() - 60_000,
+    }
+    const store = new InMemoryAccountStore(storage([parked]))
+    const sessions = new AgySessionManager({ store })
+    await sessions.refreshLimits(await store.load())
+
+    const after = await store.load()
+    expect(after.accounts[0]!.coolingDownUntil).toBeUndefined()
+    expect(after.accounts[0]!.cooldownReason).toBeUndefined()
+    expect(after.accounts[0]!.cooldownSetAt).toBeUndefined()
+    // And the healed account serves again.
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session?.account.email).toBe('solo@x')
+  })
+
+  it('keeps a park the fresh measurement CONFIRMS (a spent window with a future reset)', async () => {
+    // The lift must never turn a real exhaustion back into a hammering loop: a
+    // weekly bucket at 0 with its reset still ahead is exactly what the park is
+    // for, whatever the burst 429 said.
+    const calls: string[] = []
+    stubSummary(calls, [{
+      displayName: 'Gemini Models',
+      buckets: [
+        { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.9, resetTime: null },
+        { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0, resetTime: '2099-01-01T00:00:00Z' },
+      ],
+    }])
+    const parked = {
+      ...account('solo@x'),
+      coolingDownUntil: Date.now() + 3_600_000,
+      cooldownReason: 'quota-exhausted' as const,
+      cooldownSetAt: Date.now() - 60_000,
+    }
+    const store = new InMemoryAccountStore(storage([parked]))
+    const sessions = new AgySessionManager({ store })
+    await sessions.refreshLimits(await store.load())
+
+    const after = await store.load()
+    expect(after.accounts[0]!.coolingDownUntil).toBeGreaterThan(Date.now())
+    expect(after.accounts[0]!.cooldownReason).toBe('quota-exhausted')
+  })
 })

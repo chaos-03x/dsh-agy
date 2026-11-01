@@ -594,6 +594,69 @@ export function isFamilyQuotaExhausted(account: ManagedAccount, family?: ModelFa
 }
 
 /**
+ * One normalized window reading for the cooldown-lift check: a fraction and the
+ * moment it resets. Both cache shapes project onto it — a `CachedQuota` record
+ * splits into its 5-hour and weekly halves, and one `QuotaWindow` bucket IS one
+ * reading (its `window` token only labels which half it is).
+ */
+export interface QuotaWindowReading {
+  fraction: number | null | undefined
+  resetTime: string | null | undefined
+}
+
+/**
+ * Whether ANY measured window is SPENT — a zero fraction whose reset is still
+ * ahead, exactly the block wall `rankPoolCandidates` applies. Elapsed resets and
+ * unmeasured windows describe nothing and never count.
+ */
+export function measuredQuotaSpent(
+  readings: ReadonlyArray<QuotaWindowReading>,
+  now = Date.now(),
+): boolean {
+  return readings.some((reading) =>
+    typeof reading.fraction === 'number'
+    && reading.fraction <= 0
+    && parseFutureResetMs(reading.resetTime ?? undefined, now) !== undefined)
+}
+
+/** Flatten a family quota cache into one reading per window. */
+export function cachedQuotaReadings(quotas: Record<string, CachedQuota>): QuotaWindowReading[] {
+  return Object.values(quotas).flatMap((entry) => [
+    { fraction: entry.remainingFraction, resetTime: entry.resetTime },
+    { fraction: entry.weeklyFraction, resetTime: entry.weeklyResetTime },
+  ])
+}
+
+/** Flatten grouped display windows into one reading per bucket. */
+export function limitGroupReadings(groups: ReadonlyArray<QuotaGroup>): QuotaWindowReading[] {
+  return groups.flatMap((group) => group.windows.map((window) => ({
+    fraction: window.remainingFraction,
+    resetTime: window.resetTime,
+  })))
+}
+
+/**
+ * Whether a `quota-exhausted` park on this account is CONTRADICTED by a newer
+ * measurement: the park is still in force, the measurement completed after the
+ * park was set (an older snapshot cannot clear a newer park), and no measured
+ * window is spent. The 429 that set the park may have been a burst whose body
+ * merely said "quota" — a wording the classifier reads as exhausted daily quota
+ * and parks the account for up to a day — and the newer measurement is the only
+ * evidence that outlives it.
+ */
+export function quotaCooldownContradicted(
+  account: Pick<ManagedAccount, 'cooldownReason' | 'coolingDownUntil' | 'cooldownSetAt'>,
+  readings: ReadonlyArray<QuotaWindowReading>,
+  measuredAt: number,
+  now = Date.now(),
+): boolean {
+  if (account.cooldownReason !== 'quota-exhausted') return false
+  if ((account.coolingDownUntil ?? 0) <= now) return false
+  if ((account.cooldownSetAt ?? 0) >= measuredAt) return false
+  return !measuredQuotaSpent(readings, now)
+}
+
+/**
  * Rank pool candidates for one request, mirroring AuthStorage's antigravity
  * ordering: unblocked first (earliest unblock time among blocked), hot windows
  * last, measured usage before unmeasured, required-drain descending, then

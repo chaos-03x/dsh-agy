@@ -23,6 +23,7 @@ import {
   recordRateLimit,
 } from './runtime/rotation.ts'
 import {
+  cachedQuotaReadings,
   familyKeyOf,
   familyQuotaFor,
   ingestFamilyQuotas,
@@ -30,9 +31,12 @@ import {
   isFamilyQuotaExhausted,
   isLimitsStale,
   isQuotaStale,
+  limitGroupReadings,
   modelFamilyOf,
+  quotaCooldownContradicted,
   rankPoolCandidates,
 } from './runtime/quota.ts'
+import type { QuotaWindowReading } from './runtime/quota.ts'
 import {
   generateFingerprint,
   getFingerprintData,
@@ -690,6 +694,11 @@ export class AgySessionManager {
     }
     if (updates.length === 0) return result
 
+    // Same lift as the scheduling path: the display probe is the ONLY evidence
+    // a SOLO pool ever gets (the scheduling refresh is gated to pools > 1), so
+    // opening the accounts page measures and heals a false park instead of
+    // leaving it until the cooldown expires.
+    const liftedKeys = new Set<string>()
     for (const update of updates) {
       const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
       // Only `cachedLimits` — never `cachedQuota`, which is what keeps this
@@ -699,6 +708,9 @@ export class AgySessionManager {
         // Burn-rate sampling rides the same successful probe: memory only, so
         // it cannot affect the store or the scheduling path.
         this.noteLimitSample(update.key, update.groups, update.updatedAt)
+        if (this.liftContradictedQuotaPark(target, limitGroupReadings(update.groups), update.updatedAt)) {
+          liftedKeys.add(update.key)
+        }
       }
     }
     // Drop samples for accounts that no longer exist, so the maps stay bounded
@@ -714,13 +726,42 @@ export class AgySessionManager {
       await this.store.mutate((s) => {
         for (const update of updates) {
           const target = s.accounts.find((candidate) => this.accountKey(candidate) === update.key)
-          if (target) target.cachedLimits = { groups: update.groups, updatedAt: update.updatedAt }
+          if (target) {
+            target.cachedLimits = { groups: update.groups, updatedAt: update.updatedAt }
+            if (liftedKeys.has(update.key)) {
+              target.coolingDownUntil = undefined
+              target.cooldownReason = undefined
+              target.cooldownSetAt = undefined
+            }
+          }
         }
       })
     } catch {
       // A derived display cache; a failed write degrades gracefully.
     }
     return result
+  }
+
+  /**
+   * A `quota-exhausted` cooldown is one 429's belief; both probe paths pass
+   * newer evidence here. A successful probe that completed after the park was
+   * set and measures NO spent window proves the park was a false positive — a
+   * burst 429 whose body merely said "quota" parks a healthy account for up to
+   * a day — so clear it in place.
+   *
+   * @returns whether the park was lifted, so the caller can mirror the clear
+   *   into the same store write that persists the measurement.
+   */
+  private liftContradictedQuotaPark(
+    target: ManagedAccount,
+    readings: ReadonlyArray<QuotaWindowReading>,
+    measuredAt: number,
+  ): boolean {
+    if (!quotaCooldownContradicted(target, readings, measuredAt)) return false
+    target.coolingDownUntil = undefined
+    target.cooldownReason = undefined
+    target.cooldownSetAt = undefined
+    return true
   }
 
   /**
@@ -776,12 +817,19 @@ export class AgySessionManager {
 
     const updates = results.filter((r): r is { key: string; quotas: Record<string, CachedQuota>; models: string[]; updatedAt: number } => Boolean(r && Object.keys(r.quotas).length > 0))
     if (updates.length > 0) {
+      // A probe completed after the park was set is newer evidence: when it
+      // measures no spent window, the parked account returns to service in the
+      // SAME write that refreshes the cache, so the next pick sees it usable.
+      const liftedKeys = new Set<string>()
       for (const update of updates) {
         const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
         if (target) {
           target.cachedQuota = update.quotas
           target.cachedQuotaUpdatedAt = update.updatedAt
           if (update.models.length > 0) target.cachedModels = update.models
+          if (this.liftContradictedQuotaPark(target, cachedQuotaReadings(update.quotas), update.updatedAt)) {
+            liftedKeys.add(update.key)
+          }
         }
       }
       try {
@@ -792,6 +840,11 @@ export class AgySessionManager {
               target.cachedQuota = update.quotas
               target.cachedQuotaUpdatedAt = update.updatedAt
               if (update.models.length > 0) target.cachedModels = update.models
+              if (liftedKeys.has(update.key)) {
+                target.coolingDownUntil = undefined
+                target.cooldownReason = undefined
+                target.cooldownSetAt = undefined
+              }
             }
           }
         })

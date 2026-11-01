@@ -1261,6 +1261,51 @@ describe('usage-driven selection', () => {
     })
   })
 
+  it('lifts a false quota-exhausted park when a fresh measurement shows quota remaining', async () => {
+    // A burst 429 whose body merely said "quota" parks a HEALTHY account for up
+    // to 24h (the reset cap), and pickAccount then reports the whole pool
+    // exhausted on every run — the settings panel showed 冷却至 while the
+    // account served fine. The scheduling probe completing after the park was
+    // set is newer evidence: when it measures no spent window, the park lifts
+    // IN THE SAME refresh that fills the cache, and the request proceeds.
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      if (url.includes('fetchAvailableModels')) {
+        return new Response(JSON.stringify({ models: { 'gemini-3.5-flash': { quotaInfo: { remainingFraction: 0.8 } } } }), { status: 200 })
+      }
+      if (url.includes('retrieveUserQuotaSummary')) {
+        return new Response(JSON.stringify({
+          groups: [{
+            displayName: 'Gemini Models',
+            buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.8, resetTime: null }],
+          }],
+        }), { status: 200 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+    const parked = (email: string) => ({
+      ...account(email),
+      coolingDownUntil: Date.now() + 20 * 60 * 60 * 1000,
+      cooldownReason: 'quota-exhausted' as const,
+      cooldownSetAt: Date.now() - 60_000,
+    })
+    const store = new InMemoryAccountStore(storage([parked('a@x'), parked('b@x')]))
+    const sessions = new AgySessionManager({ store })
+
+    const session = await sessions.getSession('gemini-3.5-flash')
+    expect(session?.account.email).toMatch(/^[ab]@x$/)
+
+    const after = await store.load()
+    for (const acc of after.accounts) {
+      expect(acc.coolingDownUntil).toBeUndefined()
+      expect(acc.cooldownReason).toBeUndefined()
+      expect(acc.cooldownSetAt).toBeUndefined()
+    }
+  })
+
   it('classifies a weekly-decided block as quota-exhausted, not retryable', async () => {
     // The weekly window holds `rankPoolCandidates` back without touching
     // `remainingFraction`, so a pool blocked ONLY by the week was reported as
