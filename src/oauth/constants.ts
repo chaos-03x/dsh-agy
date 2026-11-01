@@ -106,7 +106,12 @@ export async function fetchAgyFirstOk(
     try {
       const response = await fetchImpl(`${baseEndpoint}${urlPath}`, init)
       if (!AGY_ENDPOINT_SKIP_STATUSES.has(response.status)) return response
-      lastSkipped = response
+      // Prefer keeping a 429 or 503 response from earlier production endpoints
+      // rather than letting the internal autopush sandbox 403 (which always fails for
+      // consumer accounts with "no license") overwrite the real rate-limit/capacity signal.
+      if (!lastSkipped || (baseEndpoint !== AGY_ENDPOINT_AUTOPUSH && (response.status === 429 || response.status === 503))) {
+        lastSkipped = response
+      }
     } catch (error) {
       lastNetworkError = error
       // Fail-closed only while an explicit per-account proxy is in effect: the

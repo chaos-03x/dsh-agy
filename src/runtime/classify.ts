@@ -200,6 +200,16 @@ export function classifyHttpError(
         message: bodyText ? bodyText.slice(0, 200) : undefined,
       }
     }
+    // An HTML response (from autopush sandbox "no license" or an intermediary gateway)
+    // is NOT an invalid account credential — Google API auth errors are structured JSON.
+    // Classifying HTML 403 as auth-failure causes false revocations of healthy accounts.
+    if (bodyText && /^\s*<(!doctype|html)/i.test(bodyText)) {
+      return {
+        kind: 'transient',
+        status,
+        message: bodyText.slice(0, 200),
+      }
+    }
     return { kind: 'auth-failure', status, message: bodyText ? bodyText.slice(0, 200) : undefined }
   }
   if (status === 404) {

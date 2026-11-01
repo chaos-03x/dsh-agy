@@ -1538,6 +1538,21 @@ describe('models', () => {
     expect(formatTieredModelName('gemini-4.0-pro-tiered')).toBe('Gemini 4.0 Pro')
   })
 
+  it('rejects contradictory upstream display names (e.g. Gemini 2.5 models mislabeled as 3.5 Flash Lite)', () => {
+    const merged = mergeModelCatalog({
+      models: {
+        'gemini-2.5-flash-lite': { displayName: 'Gemini 3.5 Flash Lite' },
+        'gemini-2.5-flash': { displayName: 'Gemini 3.5 Flash Lite' },
+        'gemini-2.5-flash-thinking': { displayName: 'Gemini 3.5 Flash Lite' },
+        'gemini-3.5-flash-lite': { displayName: 'Gemini 3.5 Flash Lite' },
+      },
+    })
+    expect(merged.find((m) => m.id === 'gemini-2.5-flash-lite')?.name).toBe('Gemini 2.5 Flash Lite')
+    expect(merged.find((m) => m.id === 'gemini-2.5-flash')?.name).toBe('Gemini 2.5 Flash')
+    expect(merged.find((m) => m.id === 'gemini-2.5-flash-thinking')?.name).toBe('Gemini 2.5 Flash Thinking')
+    expect(merged.find((m) => m.id === 'gemini-3.5-flash-lite')?.name).toBe('Gemini 3.5 Flash Lite')
+  })
+
   it('merges dynamic ids with catalog metadata and filters tab models', () => {
     const merged = mergeModelCatalog({
       models: {
@@ -1855,6 +1870,17 @@ describe('models', () => {
     const dynamicFlash = resolveAgyModel('agy', 'gemini-custom-flash-id')
     expect(dynamicFlash.reasoning).toBeDefined()
     expect(dynamicFlash.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+
+    // Upstream sometimes redundantly puts flash models in both flash and pro groups
+    registerDiscoveredTieredModels({
+      flashLite: ['gemini-3.5-flash-lite'],
+      flash: ['gemini-3.8-flash-tiered'],
+      pro: ['gemini-3.8-flash-tiered', 'gemini-3.1-pro-low'],
+    })
+    const flashTiered = resolveAgyModel('agy', 'gemini-3.8-flash-tiered')
+    expect(flashTiered.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'medium', 'high'])
+    const proLowModel = resolveAgyModel('agy', 'gemini-3.1-pro-low')
+    expect(proLowModel.reasoning!.efforts.map((e) => String(e.id))).toEqual(['low', 'high'])
   })
 
   it('declares no default reasoning effort, so the selector keeps an adaptive option', () => {

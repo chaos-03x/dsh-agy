@@ -489,6 +489,18 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
     expect(response.status).toBe(503)
   })
 
+  it('preserves daily 503 or 429 instead of letting autopush 403 overwrite it', async () => {
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) return new Response('daily overloaded', { status: 503 })
+      if (url.startsWith(AGY_ENDPOINT_PROD)) return new Response('prod overloaded', { status: 503 })
+      if (url.startsWith(AGY_ENDPOINT_DAILY_SANDBOX)) return new Response('sandbox overloaded', { status: 503 })
+      return new Response('<!DOCTYPE html><html>403 Forbidden</html>', { status: 403 })
+    }) as unknown as typeof fetch
+    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    expect(response.status).toBe(503)
+  })
+
   // Issue #29 (2): with no explicit proxy, a transient socket failure on one
   // endpoint must fall through to the next instead of aborting the whole chain.
   it('falls through to the next endpoint on a direct transient socket failure', async () => {
