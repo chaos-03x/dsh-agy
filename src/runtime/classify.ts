@@ -100,6 +100,15 @@ const QUOTA_EXHAUSTED_KEYWORDS = [
   'individual quota',
 ]
 
+/**
+ * Bare quota vocabulary. The word alone is NOT a spent-plan verdict (see
+ * classifyRateLimit's unknown fallback), but on a 403 it still selects the
+ * rate-limit KIND — the pinned rule that keeps a quota wall from revoking.
+ */
+function hasQuotaWording(bodyText: string | undefined): boolean {
+  return /quota|resource_exhausted/.test((bodyText ?? '').toLowerCase())
+}
+
 /** Classify a 429 body into the four upstream categories. */
 export function classifyRateLimit(
   bodyText: string | undefined,
@@ -115,8 +124,13 @@ export function classifyRateLimit(
   if (retryAfterMs !== undefined) {
     return 'rate_limited'
   }
-  // No explicit retry hint: "quota" wording → daily quota, otherwise unknown.
-  return text.includes('quota') || text.includes('resource_exhausted') ? 'quota_exhausted' : 'unknown'
+  // No explicit retry hint: RESOURCE_EXHAUSTED is Google's canonical exhaustion
+  // token, but a body that merely CONTAINS the word "quota" is NOT evidence of
+  // a spent plan — per-minute and burst 429s mention quota too, and reading the
+  // bare word as exhaustion parked healthy accounts for up to a day (the
+  // cooldown-lift rule exists for exactly that). Bare wording falls back to
+  // unknown's short family-scoped backoff.
+  return text.includes('resource_exhausted') ? 'quota_exhausted' : 'unknown'
 }
 
 const RATE_LIMIT_RESET_FIELDS = ['resetTime', 'reset_time', 'resetAt', 'quotaResetTime'] as const
@@ -192,7 +206,10 @@ export function classifyHttpError(
     // (not bad auth). Only treat a 403 as auth-failure when the body carries
     // no quota wording — a false revoke permanently disables the account.
     const category = classifyRateLimit(bodyText, undefined)
-    if (category === 'quota_exhausted') {
+    // The KIND gate stays wording-based rather than category-based: bare "quota"
+    // wording on a 403 now classifies `unknown` (see classifyRateLimit) yet must
+    // STILL land here as a rate-limit — never an auth-failure revoke.
+    if (category === 'quota_exhausted' || hasQuotaWording(bodyText)) {
       return {
         kind: 'rate-limit',
         rateLimitCategory: category,

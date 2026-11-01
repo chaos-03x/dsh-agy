@@ -82,6 +82,11 @@ describe('classifyHttpError', () => {
     expect(unknown.rateLimitCategory).toBe('unknown')
     const resource = classifyHttpError(429, new Headers(), JSON.stringify({ error: { status: 'RESOURCE_EXHAUSTED' } }))
     expect(resource.rateLimitCategory).toBe('quota_exhausted')
+    // Bare "quota" wording without a retry hint is NOT a spent-plan verdict:
+    // per-minute and burst 429s mention quota too, and reading the bare word as
+    // exhaustion parked healthy accounts for up to a day.
+    const bare = classifyHttpError(429, new Headers(), JSON.stringify({ error: { message: 'Request quota exceeded for the current minute' } }))
+    expect(bare.rateLimitCategory).toBe('unknown')
   })
 
   it('classifies 401 and plain 403 as auth-failure', () => {
@@ -97,6 +102,11 @@ describe('classifyHttpError', () => {
     )
     expect(quota.kind).toBe('rate-limit')
     expect(quota.rateLimitCategory).toBe('quota_exhausted')
+    // The 403 KIND gate is wording-based, not category-based: a bare-"quota"
+    // wall demotes to the `unknown` CATEGORY yet still never revokes.
+    const bare = classifyHttpError(403, new Headers(), 'quota debounce')
+    expect(bare.kind).toBe('rate-limit')
+    expect(bare.rateLimitCategory).toBe('unknown')
     const plain = classifyHttpError(403, new Headers(), '{"error":"access_denied"}')
     expect(plain.kind).toBe('auth-failure')
   })
