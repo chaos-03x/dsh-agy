@@ -66,7 +66,13 @@ export function isCoolingDown(account: ManagedAccount, now = Date.now()): boolea
 export function isFamilyRateLimited(account: ManagedAccount, family: string | undefined, now = Date.now()): boolean {
   if (!family) return false
   const resetAt = account.rateLimitResetTimes?.[family]
-  return typeof resetAt === 'number' && resetAt > now
+  if (typeof resetAt === 'number' && resetAt > now) return true
+  const normalized = family.startsWith('claude') ? 'claude' : family.startsWith('gemini') ? 'gemini' : undefined
+  if (normalized && normalized !== family) {
+    const normReset = account.rateLimitResetTimes?.[normalized]
+    if (typeof normReset === 'number' && normReset > now) return true
+  }
+  return false
 }
 
 /**
@@ -252,6 +258,37 @@ export function decideRotation(
 }
 
 /**
+ * Whether a specific account is known to support the requested model.
+ * If the account does not yet have cached models, returns true (permissive fallback).
+ * Otherwise filters out disabled entries and checks for exact model, tiered variants,
+ * level variants, and base models matching discrete thinking variants.
+ */
+export function isModelSupportedByAccount(account: ManagedAccount, model?: string): boolean {
+  if (!model) return true
+  if (!account.cachedModels || account.cachedModels.length === 0) return true
+
+  const validModels = account.cachedModels.filter((m) => !m.endsWith('-disabled'))
+  if (validModels.includes(model)) return true
+
+  const tieredMatch = /^(.*)-tiered$/.exec(model)
+  if (tieredMatch && tieredMatch[1]) {
+    const base = tieredMatch[1]
+    if (validModels.some((m) => m === model || m === base || m.startsWith(base + '-'))) return true
+  }
+
+  const levelMatch = /^(.*)-(?:low|medium|high|max)$/.exec(model)
+  if (levelMatch && levelMatch[1]) {
+    const base = levelMatch[1]
+    if (validModels.some((m) => m === model || m === base || m === `${base}-tiered` || m.startsWith(base + '-'))) return true
+  }
+
+  // Base model matching discrete variants (e.g. gemini-4-argon matching gemini-4-argon-low/medium/high, claude-opus-5-5, etc.)
+  if (validModels.some((m) => m === model || m === `${model}-tiered` || m.startsWith(model + '-'))) return true
+
+  return false
+}
+
+/**
  * Pick the next account index for rotation (round-robin across enabled,
  * non-cooling accounts; falls back to the active one when all are cooling).
  */
@@ -267,14 +304,7 @@ export function pickNextAccountIndex(
       if (index === currentIndex || account.enabled === false) return false
       if (isCoolingDown(account, now)) return false
       if (modelOrFamily && isFamilyRateLimited(account, modelOrFamily, now)) return false
-      if (modelOrFamily && account.cachedModels && account.cachedModels.length > 0) {
-        if (!account.cachedModels.includes(modelOrFamily)) {
-          const base = modelOrFamily.replace(/-(?:low|medium|high|tiered)$/, '')
-          if (!account.cachedModels.some((m) => m === modelOrFamily || m.startsWith(base + '-'))) {
-            return false
-          }
-        }
-      }
+      if (modelOrFamily && !isModelSupportedByAccount(account, modelOrFamily)) return false
       return true
     })
   if (enabled.length === 0) return currentIndex

@@ -12,6 +12,7 @@ import {
   decideRotation,
   isCoolingDown,
   isFamilyRateLimited,
+  isModelSupportedByAccount,
   pickNextAccountIndex,
   pickProbeProxyUrl,
   recordRateLimit,
@@ -391,6 +392,33 @@ describe('rotation state machine', () => {
     expect(pickNextAccountIndex([a, cooling, c], 0)).toBe(2)
     // single account stays put
     expect(pickNextAccountIndex([a], 0)).toBe(0)
+
+    // respects model-support filtering
+    const accArgon = { ...account(), email: 'argon', cachedModels: ['gemini-4-argon-high'] }
+    const accFlash = { ...account(), email: 'flash', cachedModels: ['gemini-3.8-flash-tiered', 'gemini-4-argon-disabled'] }
+    const accEmpty = { ...account(), email: 'empty' } // empty cachedModels is permissive
+    expect(pickNextAccountIndex([accArgon, accFlash], 0, Date.now(), 'gemini-4-argon')).toBe(0) // accFlash has disabled argon, stays at 0
+    expect(pickNextAccountIndex([accArgon, accFlash, accEmpty], 0, Date.now(), 'gemini-4-argon')).toBe(2) // accEmpty is permissive
+    expect(pickNextAccountIndex([accArgon, accFlash], 0, Date.now(), 'gemini-3.8-flash-tiered')).toBe(1) // both can support flash
+  })
+
+  it('determines whether account supports a requested model correctly', () => {
+    const accWithArgon = { ...account(), cachedModels: ['gemini-4-argon-low', 'gemini-4-argon-high', 'claude-opus-5-5-high'] }
+    const accWithDisabled = { ...account(), cachedModels: ['gemini-4-argon-disabled', 'gemini-3.8-flash-tiered'] }
+    const accEmpty = { ...account() }
+
+    expect(isModelSupportedByAccount(accWithArgon, 'gemini-4-argon')).toBe(true)
+    expect(isModelSupportedByAccount(accWithArgon, 'gemini-4-argon-high')).toBe(true)
+    expect(isModelSupportedByAccount(accWithArgon, 'claude-opus-5-5')).toBe(true)
+    expect(isModelSupportedByAccount(accWithArgon, 'gemini-3.8-flash')).toBe(false)
+
+    expect(isModelSupportedByAccount(accWithDisabled, 'gemini-4-argon')).toBe(false)
+    expect(isModelSupportedByAccount(accWithDisabled, 'gemini-3.8-flash')).toBe(true)
+    expect(isModelSupportedByAccount(accWithDisabled, 'gemini-3.8-flash-tiered')).toBe(true)
+
+    // Empty cachedModels falls back to permissive true
+    expect(isModelSupportedByAccount(accEmpty, 'gemini-4-argon')).toBe(true)
+    expect(isModelSupportedByAccount(accEmpty, undefined)).toBe(true)
   })
 
   it('tracks rate limits and cooldowns', () => {

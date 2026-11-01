@@ -1694,5 +1694,40 @@ describe('fingerprint version freshness', () => {
       const unprobed: ManagedAccount = { refresh: 'r', addedAt: 1, lastUsed: 1 }
       expect(isModelSupportedByAccount(unprobed, 'claude-3-7-sonnet')).toBe(true)
     })
+
+    it('routes exclusive model to the account that supports it and locks without rotating to unsupported account', async () => {
+      stubTokenEndpoint()
+      const acc0 = {
+        ...account('acc0@example.com'),
+        cachedModels: ['gemini-4-argon-low', 'gemini-4-argon-high', 'gemini-3.8-flash-tiered'],
+      }
+      const acc1 = {
+        ...account('acc1@example.com'),
+        cachedModels: ['gemini-4-argon-disabled', 'gemini-3.8-flash-tiered'],
+      }
+      // acc1 is active by default in the store
+      const store = new InMemoryAccountStore(storage([acc0, acc1], 1))
+      const sessions = new AgySessionManager({ store })
+
+      // gemini-4-argon is only supported by acc0 (acc1 only has gemini-4-argon-disabled)
+      const sessionArgon = await sessions.getSession('gemini-4-argon', undefined, 'conv-argon')
+      expect(sessionArgon).toBeDefined()
+      expect(sessionArgon!.index).toBe(0)
+      expect(sessionArgon!.account.email).toBe('acc0@example.com')
+
+      // Borrowing argon for this conversation MUST NOT mutate global activeIndex,
+      // because acc1 is healthy and was only bypassed for this model.
+      expect((await store.load()).activeIndex).toBe(1)
+
+      // When borrowed acc0 hits rate-limit on gemini-4-argon, it enters cooldown,
+      // but activeIndex remains 1 because acc0 was never the active account.
+      await sessions.reportFailure('rate-limit', sessionArgon!, { model: 'gemini-4-argon' })
+      expect((await store.load()).activeIndex).toBe(1)
+
+      // A concurrent or subsequent session using flash continues to route to acc1
+      const sessionFlash = await sessions.getSession('gemini-3.8-flash-tiered', undefined, 'conv-flash')
+      expect(sessionFlash!.index).toBe(1)
+      expect(sessionFlash!.account.email).toBe('acc1@example.com')
+    })
   })
 })
