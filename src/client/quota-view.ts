@@ -296,15 +296,18 @@ export function toPercent(fraction: number | null | undefined): number | null {
 /**
  * Quota tint by remaining fraction: healthy / low / critical.
  *
- * The thresholds are the Settings section's own, so the badge's bars read the
- * same colour as the limits card's beside them. Built from `--dsw-alias-*`
- * tokens (with the literal as a pre-theme fallback) rather than fixed hex: a
- * private palette does not follow the host's light/dark switch.
+ * ONE rule for every quota surface — the header badge, the popover's window
+ * bars, and the Settings limits card all call this, so a reading never renders
+ * green on one surface and amber on another. Thresholds follow the user-facing
+ * contract: 0% is exhausted (red), below 20% is nearly drained (warn), anything
+ * above is healthy (green). Built from `--dsw-alias-*` tokens (with the literal
+ * as a pre-theme fallback) rather than fixed hex: a private palette does not
+ * follow the host's light/dark switch.
  */
 export function quotaColor(fraction: number): string {
-  if (fraction > 0.7) return aliasVar('state-success-primary')
-  if (fraction >= 0.3) return aliasVar('state-warn-primary')
-  return aliasVar('state-error-primary')
+  if (fraction <= 0) return aliasVar('state-error-primary')
+  if (fraction < 0.2) return aliasVar('state-warn-primary')
+  return aliasVar('state-success-primary')
 }
 
 /**
@@ -435,6 +438,80 @@ export function pickBadgeQuota(accounts: readonly AccountView[], now: number = D
   const percent = toPercent(window.remainingFraction)
   if (percent === null) return null
   return { percent, window: window.window }
+}
+
+/**
+ * The account's live 5-hour and weekly readings, as fractions 0..1.
+ *
+ * THE shared read both display surfaces use: the header badge renders these
+ * two figures (rotating between them) and the rotation rule below judges
+ * exhaustion from them, so the badge's red light and the actual switch can
+ * never disagree about what "no quota" means. Within a kind the TIGHTEST live
+ * window wins (same rule as `pickBadgeWindow`: the pool blocks on the smallest
+ * runway). A window whose reset has passed is not evidence — the fraction
+ * described a period that already ended — and a null reading stays null.
+ */
+export interface AccountQuotaRead {
+  /** Live 5-hour fraction, or null when unmeasured/stale. */
+  fiveHour: number | null
+  /** Live weekly fraction, or null when unmeasured/stale. */
+  weekly: number | null
+}
+
+export function accountQuotaRead(view: AccountView | undefined, now: number): AccountQuotaRead {
+  const read = (token: '5h' | 'weekly'): number | null => {
+    if (!view?.limits) return null
+    let best: number | null = null
+    for (const group of view.limits) {
+      for (const window of group.windows) {
+        if (window.window !== token) continue
+        if (window.remainingFraction === null) continue
+        if (resetInPast(window.resetTime, now)) continue
+        const fraction = Math.max(window.remainingFraction, 0)
+        if (best === null || fraction < best) best = fraction
+      }
+    }
+    return best
+  }
+  return { fiveHour: read('5h'), weekly: read('weekly') }
+}
+
+/**
+ * Whether the account has no quota the pool would honour: EITHER blocked
+ * window at exactly 0% — the same condition `pickAccount` treats as unusable,
+ * so the badge's red light and the pool's own rotation verdict agree by
+ * construction. Unknown readings are not exhaustion.
+ */
+export function isAccountQuotaExhausted(view: AccountView | undefined, now: number): boolean {
+  if (!view) return false
+  const read = accountQuotaRead(view, now)
+  return read.fiveHour === 0 || read.weekly === 0
+}
+
+/**
+ * The next account the pool should switch to when the ACTIVE one is drained.
+ *
+ * The same rotation rule the pool itself applies, expressed over the listing
+ * both surfaces already hold: skip disabled rows (they cannot serve), skip
+ * quota-exhausted ones (switching to them changes nothing), start AFTER the
+ * active account and wrap. `null` means there is nowhere healthy to go — the
+ * caller must NOT rotate, or two exhausted accounts would chase each other in
+ * a loop. Exported because the Settings section reuses the rule for its own
+ * display, so both surfaces can never rotate differently.
+ */
+export function nextHealthyIndex(accounts: readonly AccountView[], now: number): number | null {
+  const pool = accounts.filter((candidate) => candidate.state !== 'disabled')
+  const healthy = pool.filter((candidate) => !isAccountQuotaExhausted(candidate, now))
+  if (healthy.length === 0) return null
+  const activeIndex = accounts.find((candidate) => candidate.active)?.index ?? pool[0]?.index
+  if (activeIndex === undefined) return healthy[0]!.index
+  const pos = pool.findIndex((candidate) => candidate.index === activeIndex)
+  const start = pos >= 0 ? pos + 1 : 0
+  for (let step = 0; step < pool.length; step++) {
+    const candidate = pool[(start + step) % pool.length]!
+    if (healthy.some((entry) => entry.index === candidate.index)) return candidate.index
+  }
+  return null
 }
 
 /** Build the window rows of one group card. */

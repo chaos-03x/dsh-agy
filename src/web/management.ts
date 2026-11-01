@@ -29,7 +29,7 @@ import type { AccountStore } from '../store/accounts.ts'
 import type { AgySessionManager } from '../session.ts'
 import type { ModelVisibility } from '../model-visibility.ts'
 import type { UsageStats } from '../stats.ts'
-import { UiPrefsStore } from '../ui-prefs.ts'
+import { sanitizeQuotaRefreshMinutes, UiPrefsStore } from '../ui-prefs.ts'
 import type {
   AccountState,
   AccountUsageView,
@@ -691,16 +691,27 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
     'ui.prefs.get': async () => uiPrefs.get(),
 
     'ui.prefs.set': async (payload) => {
-      const body = payload as { conversationBadge?: unknown; detailedQuotaReset?: unknown } | undefined
+      const body = payload as {
+        conversationBadge?: unknown
+        detailedQuotaReset?: unknown
+        quotaRefreshMinutes?: unknown
+      } | undefined
       if (body?.conversationBadge !== undefined && typeof body.conversationBadge !== 'boolean') {
         fail('conversationBadge must be a boolean')
       }
       if (body?.detailedQuotaReset !== undefined && typeof body.detailedQuotaReset !== 'boolean') {
         fail('detailedQuotaReset must be a boolean')
       }
+      // `null` is the "never" choice and passes; garbage (0, 1.5, 121, strings)
+      // is rejected rather than silently clamped, so the caller knows the save
+      // did not happen.
+      if (body?.quotaRefreshMinutes !== undefined && sanitizeQuotaRefreshMinutes(body.quotaRefreshMinutes) === undefined) {
+        fail('quotaRefreshMinutes must be an integer between 1 and 120, or null for never')
+      }
       return uiPrefs.set({
         conversationBadge: body?.conversationBadge as boolean | undefined,
         detailedQuotaReset: body?.detailedQuotaReset as boolean | undefined,
+        quotaRefreshMinutes: sanitizeQuotaRefreshMinutes(body?.quotaRefreshMinutes),
       })
     },
   }

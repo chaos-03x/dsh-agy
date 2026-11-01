@@ -939,9 +939,10 @@ describe('agy management RPC', () => {
   describe('ui preferences', () => {
     it('reads default preferences and updates them', async () => {
       const { management } = makeHarness()
-      const initial = await management.call('ui.prefs.get', {}) as { conversationBadge: boolean; detailedQuotaReset: boolean }
+      const initial = await management.call('ui.prefs.get', {}) as { conversationBadge: boolean; detailedQuotaReset: boolean; quotaRefreshMinutes: number | null }
       expect(initial.conversationBadge).toBe(false)
       expect(initial.detailedQuotaReset).toBe(false)
+      expect(initial.quotaRefreshMinutes).toBe(5)
 
       const updated = await management.call('ui.prefs.set', { conversationBadge: true, detailedQuotaReset: true }) as { conversationBadge: boolean; detailedQuotaReset: boolean }
       expect(updated.conversationBadge).toBe(true)
@@ -958,6 +959,30 @@ describe('agy management RPC', () => {
         .rejects.toThrow(/must be a boolean/)
       await expect(management.call('ui.prefs.set', { detailedQuotaReset: 123 as never }))
         .rejects.toThrow(/must be a boolean/)
+    })
+
+    it('stores the quota refresh interval, or null for never, and rejects garbage', async () => {
+      const { management } = makeHarness()
+      const custom = await management.call('ui.prefs.set', { quotaRefreshMinutes: 15 }) as { quotaRefreshMinutes: number | null }
+      expect(custom.quotaRefreshMinutes).toBe(15)
+      expect(await management.call('ui.prefs.get', {}) as { quotaRefreshMinutes: number | null })
+        .toMatchObject({ quotaRefreshMinutes: 15 })
+
+      const never = await management.call('ui.prefs.set', { quotaRefreshMinutes: null }) as { quotaRefreshMinutes: number | null }
+      expect(never.quotaRefreshMinutes).toBeNull()
+      expect(await management.call('ui.prefs.get', {}) as { quotaRefreshMinutes: number | null })
+        .toMatchObject({ quotaRefreshMinutes: null })
+
+      // Zero, fractional, and out-of-bounds values fail the call — the caller
+      // must know the save did not happen, not read back a clamped number.
+      await expect(management.call('ui.prefs.set', { quotaRefreshMinutes: 0 }))
+        .rejects.toThrow(/quotaRefreshMinutes/)
+      await expect(management.call('ui.prefs.set', { quotaRefreshMinutes: 1.5 }))
+        .rejects.toThrow(/quotaRefreshMinutes/)
+      await expect(management.call('ui.prefs.set', { quotaRefreshMinutes: 121 }))
+        .rejects.toThrow(/quotaRefreshMinutes/)
+      await expect(management.call('ui.prefs.set', { quotaRefreshMinutes: '10' as never }))
+        .rejects.toThrow(/quotaRefreshMinutes/)
     })
   })
 })

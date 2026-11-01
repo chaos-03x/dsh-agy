@@ -453,6 +453,19 @@ export const AGY_STYLES_CSS = `
   color: ${aliasVar('label-tertiary')};
   margin-top: 2px;
 }
+/* The auto-refresh row packs the minutes input and its switch on one side;
+   the input is deliberately narrow (a two-digit number) and reads as the
+   switch's parameter, not a second field. */
+.agy-pref-refresh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.agy-pref-refresh input {
+  width: 64px;
+  text-align: right;
+}
 
 /* ── Conversation-header quota badge & popover ─────────────────────────── */
 .agy-ui-badge {
@@ -486,36 +499,35 @@ export const AGY_STYLES_CSS = `
   box-shadow: 0 0 0 1px ${aliasVar('brand-primary')}, 0 3px 10px rgba(0, 0, 0, 0.12);
 }
 
-/* The next-account switch rides next to the badge, sharing its capsule look so
-   the two read as one control: click the badge for the panel, the arrow to
-   rotate accounts. */
+/* The next-account rotate affordance rides INSIDE the quota capsule, at the
+   reading's right: one control, not two — the capsule opens the board, the
+   arrow rotates accounts. It inherits the capsule's colors, so it needs only
+   its own hit area and hover feedback. */
 .agy-ui-badge-switch {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  background: ${aliasVar('bg-layer-2')};
-  border: 0.5px solid ${aliasVar('border-l2')};
-  border-radius: 9999px;
-  padding: 3px;
-  font: var(--dsw-font-xxs-12);
-  color: ${aliasVar('label-secondary')};
+  margin-left: 2px;
+  padding: 1px;
+  border-radius: 4px;
+  color: inherit;
   cursor: pointer;
   user-select: none;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  font-family: inherit;
-  height: auto;
+  transition: color 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.agy-ui-badge-switch:hover:not(:disabled) {
+.agy-ui-badge-switch:hover:not(.disabled) {
   color: ${aliasVar('brand-primary')};
   background: ${aliasVar('bg-layer-3')};
-  border-color: ${aliasVar('border-l1')};
 }
 
-.agy-ui-badge-switch:disabled {
-  opacity: 0.5;
+.agy-ui-badge-switch:focus-visible {
+  outline: 1px solid ${aliasVar('brand-primary')};
+  outline-offset: 1px;
+}
+
+.agy-ui-badge-switch.disabled {
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
@@ -557,6 +569,20 @@ export const AGY_STYLES_CSS = `
 .agy-ui-dot.cooling.updating,
 .agy-ui-dot[data-state="warning"].updating {
   box-shadow: 0 0 10px ${aliasVar('state-warn-primary')};
+}
+
+/* The quota traffic light overrides the account-state tint when both land on
+   the dot: 0% on EITHER tracked window is the exhausted red, a live 5h reading
+   below 20% the near-drain amber. Declared AFTER the state rules above so the
+   quota verdict wins the cascade at equal specificity. */
+.agy-ui-dot.quota-error {
+  background-color: ${aliasVar('state-error-primary')};
+  box-shadow: 0 0 6px ${aliasVar('state-error-primary')};
+}
+
+.agy-ui-dot.quota-warn {
+  background-color: ${aliasVar('state-warn-primary')};
+  box-shadow: 0 0 6px ${aliasVar('state-warn-primary')};
 }
 
 @keyframes agy-ui-pulse {
@@ -749,9 +775,13 @@ export const AGY_STYLES_CSS = `
 }
 
 /* The switcher is a NATIVE <select> (the primitives catalog has no Select):
-   only the frame is themed here, the popup itself stays the platform's. */
+   only the frame is themed here, the popup itself stays the platform's. It
+   occupies the state tag's old slot beside the identity column, so it sizes to
+   its content and yields the row's remainder to the text. */
 .agy-ui-account-select {
-  width: 100%;
+  width: auto;
+  max-width: 56%;
+  flex: 0 1 auto;
   font: var(--dsw-font-xxs-12);
   color: ${aliasVar('label-primary')};
   background: ${aliasVar('bg-layer-3')};

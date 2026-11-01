@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  accountQuotaRead,
   agoText,
   buildQuotaCards,
   desensitizeEmail,
@@ -16,6 +17,8 @@ import {
   drainThresholdFor,
   formatDetailedReset,
   formatQuotaReset,
+  isAccountQuotaExhausted,
+  nextHealthyIndex,
   pickBadgeQuota,
   pickBadgeWindow,
   PROBE_FAILURE_BACKOFF_MS,
@@ -345,10 +348,16 @@ describe('account identity', () => {
 })
 
 describe('quota tints and drain thresholds', () => {
-  it('tints by the theme tokens the Settings panel already uses', () => {
+  it('tints every surface by the one quota contract', () => {
+    // 0% is exhausted (red), below 20% nearly drained (amber), the rest
+    // healthy (green). The header badge, its window bars and the Settings
+    // limits card all call this one rule, so the same reading can never
+    // render two colours on two surfaces.
     expect(quotaColor(0.8)).toContain('--dsw-alias-state-success-primary')
-    expect(quotaColor(0.5)).toContain('--dsw-alias-state-warn-primary')
-    expect(quotaColor(0.1)).toContain('--dsw-alias-state-error-primary')
+    expect(quotaColor(0.2)).toContain('--dsw-alias-state-success-primary')
+    expect(quotaColor(0.19)).toContain('--dsw-alias-state-warn-primary')
+    expect(quotaColor(0.05)).toContain('--dsw-alias-state-warn-primary')
+    expect(quotaColor(0)).toContain('--dsw-alias-state-error-primary')
   })
 
   it('imports the pool thresholds rather than restating them', () => {
@@ -479,6 +488,96 @@ describe('refresh policy', () => {
       failedAt: NOW - PROBE_FAILURE_BACKOFF_MS,
       now: NOW,
     })).toBe('auto')
+  })
+})
+
+describe('account quota read and the shared rotation rule', () => {
+  const withLimits = (index: number, windows: QuotaWindow[], overrides: Partial<AccountView> = {}): AccountView =>
+    account({ index, limits: [group('g', windows)], ...overrides })
+
+  const healthy = (index: number, overrides: Partial<AccountView> = {}): AccountView =>
+    withLimits(index, [
+      window('h', '5h', 0.8, at(60)),
+      window('w', 'weekly', 0.9, at(5000)),
+    ], overrides)
+
+  const fiveHourDrained = (index: number, overrides: Partial<AccountView> = {}): AccountView =>
+    withLimits(index, [
+      window('h', '5h', 0, at(60)),
+      window('w', 'weekly', 0.9, at(5000)),
+    ], overrides)
+
+  const weeklyDrained = (index: number, overrides: Partial<AccountView> = {}): AccountView =>
+    withLimits(index, [
+      window('h', '5h', 0.8, at(60)),
+      window('w', 'weekly', 0, at(5000)),
+    ], overrides)
+
+  it('reads the tightest live 5h and weekly fraction per account', () => {
+    // Two pools report the same kind; the smaller live fraction is the one the
+    // rotation would block on, so that is the number the badge shows.
+    const view = account({
+      limits: [
+        group('Gemini Models', [window('h', '5h', 0.4, at(60)), window('w', 'weekly', 0.9, at(5000))]),
+        group('3p', [window('3p-h', '5h', 0.6, at(60))]),
+      ],
+    })
+    expect(accountQuotaRead(view, NOW)).toEqual({ fiveHour: 0.4, weekly: 0.9 })
+  })
+
+  it('withholds readings whose window already reset, and null stays null', () => {
+    const view = account({
+      limits: [group('g', [
+        window('h', '5h', 0, at(-30)),
+        window('w', 'weekly', null, at(60)),
+      ])],
+    })
+    // A fraction from a period that already ended is not evidence, and an
+    // unmeasured window is unknown — neither may read as a live 0%.
+    expect(accountQuotaRead(view, NOW)).toEqual({ fiveHour: null, weekly: null })
+    expect(isAccountQuotaExhausted(view, NOW)).toBe(false)
+    expect(isAccountQuotaExhausted(account(), NOW)).toBe(false)
+    expect(isAccountQuotaExhausted(undefined, NOW)).toBe(false)
+  })
+
+  it('judges exhaustion from EITHER tracked window at exactly 0', () => {
+    // The pool's own verdict (`isFamilyQuotaExhausted`) blocks on a zero 5h
+    // window OR a spent week; the badge's red light is the same condition, so
+    // the display can never call drained what the pool would still ride.
+    expect(isAccountQuotaExhausted(weeklyDrained(0), NOW)).toBe(true)
+    expect(isAccountQuotaExhausted(fiveHourDrained(0), NOW)).toBe(true)
+    expect(isAccountQuotaExhausted(healthy(0), NOW)).toBe(false)
+  })
+
+  it('rotates to the next healthy account, skipping drained and disabled ones', () => {
+    // Active 0 is drained: the next healthy in pool order wins.
+    expect(nextHealthyIndex(
+      [fiveHourDrained(0, { active: true }), healthy(1, { active: false }), weeklyDrained(2, { active: false }), healthy(3, { active: false })],
+      NOW,
+    )).toBe(1)
+
+    // A disabled row between healthy ones is not a destination.
+    expect(nextHealthyIndex(
+      [fiveHourDrained(0, { active: true }), healthy(1, { state: 'disabled', active: false }), healthy(2, { active: false })],
+      NOW,
+    )).toBe(2)
+
+    // No healthy account after the active one wraps back to the front.
+    expect(nextHealthyIndex(
+      [healthy(0, { active: false }), healthy(1, { active: true }), fiveHourDrained(2, { active: false })],
+      NOW,
+    )).toBe(0)
+
+    // Everyone drained (or disabled): nowhere to go — the caller must NOT
+    // rotate, or two drained accounts would chase each other forever.
+    expect(nextHealthyIndex(
+      [fiveHourDrained(0, { active: true }), weeklyDrained(1, { active: false })],
+      NOW,
+    )).toBeNull()
+    expect(nextHealthyIndex(
+      [fiveHourDrained(0, { active: true }), healthy(1, { state: 'disabled', active: false })],
+      NOW,
+    )).toBeNull()
   })
 })
 

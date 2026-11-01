@@ -35,6 +35,11 @@ import { agoText, formatQuotaReset, quotaColor, stateLabel, untilText, windowLab
 import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
+import {
+  DEFAULT_QUOTA_REFRESH_MINUTES,
+  QUOTA_REFRESH_MAX_MINUTES,
+  QUOTA_REFRESH_MIN_MINUTES,
+} from '../ui-prefs-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -702,7 +707,6 @@ function AccountDetail(props: {
  * the account is already the pool's preference, or it is DISABLED — `activate`
  * only writes the preference and cannot re-enable, so on a disabled row the
  * button was a no-op the user would read as broken. The repair path for a
- * button was a no-op the user would read as broken. The repair path for a
  * disabled account is `actionVerify`, which stays on the row.
  */
 export function canActivateAccount(account: AccountView): boolean {
@@ -736,6 +740,10 @@ function PreferencesCard(props: {
   const { rpc, t, onBadgePrefChange, onDetailedPrefChange } = props
   const [badgeEnabled, setBadgeEnabled] = useState(false)
   const [detailedReset, setDetailedReset] = useState(false)
+  // Auto quota-refresh: null = never. The draft is the input's own text state;
+  // it commits on blur/Enter so typing "1" mid-way toward "15" does not save 1.
+  const [refreshMinutes, setRefreshMinutes] = useState<number | null>(DEFAULT_QUOTA_REFRESH_MINUTES)
+  const [minutesDraft, setMinutesDraft] = useState(String(DEFAULT_QUOTA_REFRESH_MINUTES))
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -751,6 +759,9 @@ function PreferencesCard(props: {
       if (active) {
         setBadgeEnabled(prefs?.conversationBadge === true)
         setDetailedReset(prefs?.detailedQuotaReset === true)
+        const minutes = prefs === null ? DEFAULT_QUOTA_REFRESH_MINUTES : prefs.quotaRefreshMinutes
+        setRefreshMinutes(minutes)
+        setMinutesDraft(minutes === null ? '' : String(minutes))
         onDetailedPrefChange?.(prefs?.detailedQuotaReset === true)
         setLoading(false)
       }
@@ -804,6 +815,61 @@ function PreferencesCard(props: {
     }
   }, [rpc, t, onDetailedPrefChange])
 
+  const saveRefreshMinutes = useCallback(async (minutes: number | null) => {
+    setSaving(true)
+    const prev = refreshMinutes
+    const prevDraft = minutesDraft
+    setRefreshMinutes(minutes)
+    if (minutes !== null) setMinutesDraft(String(minutes))
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+    try {
+      const res = await rpc.call('ui.prefs.set', { quotaRefreshMinutes: minutes })
+      setRefreshMinutes(res.quotaRefreshMinutes)
+      setSaveError(null)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agy:ui-prefs-changed', { detail: res }))
+      }
+    } catch (err) {
+      setRefreshMinutes(prev)
+      setMinutesDraft(prevDraft)
+      setSaveError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
+    } finally {
+      setSaving(false)
+    }
+  }, [rpc, t, refreshMinutes, minutesDraft])
+
+  const toggleAutoRefresh = useCallback(async (checked: boolean) => {
+    if (!checked) {
+      await saveRefreshMinutes(null)
+      return
+    }
+    // Turning the switch back on reuses the draft when it holds a valid
+    // interval, and falls back to the shipped default when the box was cleared
+    // — the alternative (disabled input) hides where the value would come from.
+    const parsed = Number.parseInt(minutesDraft, 10)
+    const minutes = Number.isInteger(parsed)
+      && parsed >= QUOTA_REFRESH_MIN_MINUTES
+      && parsed <= QUOTA_REFRESH_MAX_MINUTES
+      ? parsed
+      : DEFAULT_QUOTA_REFRESH_MINUTES
+    setMinutesDraft(String(minutes))
+    await saveRefreshMinutes(minutes)
+  }, [minutesDraft, saveRefreshMinutes])
+
+  const commitMinutesDraft = useCallback(() => {
+    if (refreshMinutes === null) return
+    const parsed = Number.parseInt(minutesDraft, 10)
+    if (!Number.isInteger(parsed) || parsed < QUOTA_REFRESH_MIN_MINUTES || parsed > QUOTA_REFRESH_MAX_MINUTES) {
+      setSaveError(t('prefQuotaRefreshInvalid'))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
+      setMinutesDraft(String(refreshMinutes))
+      return
+    }
+    if (parsed === refreshMinutes) return
+    void saveRefreshMinutes(parsed)
+  }, [minutesDraft, refreshMinutes, t, saveRefreshMinutes])
+
   const rows = [
     h('div', { className: 'agy-pref-row', key: 'detailed' },
       h('div', { className: 'agy-pref-info' },
@@ -815,6 +881,28 @@ function PreferencesCard(props: {
         disabled: loading || saving,
         onChange: (checked: boolean) => void toggleDetailed(checked),
       })),
+    h('div', { className: 'agy-pref-row', key: 'refresh' },
+      h('div', { className: 'agy-pref-info' },
+        h('div', { className: 'agy-pref-name' }, t('prefQuotaRefresh')),
+        h('div', { className: 'agy-pref-desc' }, t('prefQuotaRefreshDesc'))),
+      h('div', { className: 'agy-pref-refresh' },
+        h(Input, {
+          value: minutesDraft,
+          placeholder: t('prefQuotaRefreshNever'),
+          inputMode: 'numeric',
+          disabled: loading || saving || refreshMinutes === null,
+          title: t('prefQuotaRefreshInterval'),
+          'aria-label': t('prefQuotaRefreshInterval'),
+          onChange: (event: { target: { value: string } }) => { setMinutesDraft(event.target.value) },
+          onBlur: commitMinutesDraft,
+          onKeyDown: (event: { key: string }) => { if (event.key === 'Enter') commitMinutesDraft() },
+        }),
+        h(Switch, {
+          label: t('prefQuotaRefresh'),
+          checked: refreshMinutes !== null,
+          disabled: loading || saving,
+          onChange: (checked: boolean) => void toggleAutoRefresh(checked),
+        }))),
     h('div', { className: 'agy-pref-row', key: 'badge' },
       h('div', { className: 'agy-pref-info' },
         h('div', { className: 'agy-pref-name' }, t('prefConversationBadge')),

@@ -10,6 +10,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { agyDataFile } from './store/paths.ts'
 import type { SetUiPrefsPayload, UiPrefsDocument, UiPrefsView } from './ui-prefs-types.ts'
+import { quotaRefreshMinutesView, sanitizeQuotaRefreshMinutes } from './ui-prefs-types.ts'
 
 export * from './ui-prefs-types.ts'
 
@@ -27,6 +28,10 @@ export function sanitizeUiPrefs(raw: unknown): UiPrefsDocument {
   }
   if (typeof obj.detailedQuotaReset === 'boolean') {
     doc.detailedQuotaReset = obj.detailedQuotaReset
+  }
+  if (obj.quotaRefreshMinutes !== undefined) {
+    const minutes = sanitizeQuotaRefreshMinutes(obj.quotaRefreshMinutes)
+    if (minutes !== undefined) doc.quotaRefreshMinutes = minutes
   }
   return doc
 }
@@ -58,6 +63,7 @@ export class UiPrefsStore {
     return {
       conversationBadge: this.doc.conversationBadge === true,
       detailedQuotaReset: this.doc.detailedQuotaReset === true,
+      quotaRefreshMinutes: quotaRefreshMinutesView(this.doc),
     }
   }
 
@@ -67,6 +73,7 @@ export class UiPrefsStore {
       version: UI_PREFS_VERSION,
       ...(this.doc.conversationBadge !== undefined ? { conversationBadge: this.doc.conversationBadge } : {}),
       ...(this.doc.detailedQuotaReset !== undefined ? { detailedQuotaReset: this.doc.detailedQuotaReset } : {}),
+      ...(this.doc.quotaRefreshMinutes !== undefined ? { quotaRefreshMinutes: this.doc.quotaRefreshMinutes } : {}),
     }
     if (typeof prefs.conversationBadge === 'boolean') {
       next.conversationBadge = prefs.conversationBadge
@@ -74,12 +81,17 @@ export class UiPrefsStore {
     if (typeof prefs.detailedQuotaReset === 'boolean') {
       next.detailedQuotaReset = prefs.detailedQuotaReset
     }
+    const minutes = sanitizeQuotaRefreshMinutes(prefs.quotaRefreshMinutes)
+    if (minutes !== undefined) {
+      next.quotaRefreshMinutes = minutes
+    }
     this.write(next)
     this.doc = next
     this.raw = UiPrefsStore.serialize(next)
     return {
       conversationBadge: next.conversationBadge === true,
       detailedQuotaReset: next.detailedQuotaReset === true,
+      quotaRefreshMinutes: quotaRefreshMinutesView(next),
     }
   }
 

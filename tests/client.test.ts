@@ -128,7 +128,7 @@ describe('dsh-agy client plugin', () => {
     let capturedFactory: (() => unknown) | undefined
     const { ctx, entries, dispose } = makeContext({
       rpcHandler: async (method) => {
-        if (method === 'ui.prefs.get') return { conversationBadge: true }
+        if (method === 'ui.prefs.get') return { conversationBadge: true, detailedQuotaReset: false, quotaRefreshMinutes: 5 }
         return {}
       },
       onRegister: (registration, factory) => {
