@@ -970,6 +970,12 @@ function PreferencesCard(props: {
           onBlur: commitMinutesDraft,
           onKeyDown: (event: { key: string }) => { if (event.key === 'Enter') commitMinutesDraft() },
         }),
+        // The unit rides the box so the number reads as a duration — but only
+        // while an interval is active: beside the never-placeholder it would
+        // read as that placeholder's unit, which is nonsense.
+        ...(refreshMinutes !== null
+          ? [h('span', { className: 'agy-pref-unit', key: 'unit' }, t('prefQuotaRefreshUnit'))]
+          : []),
         h(Switch, {
           label: t('prefQuotaRefresh'),
           checked: refreshMinutes !== null,

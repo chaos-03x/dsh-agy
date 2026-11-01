@@ -494,9 +494,9 @@ export const AGY_STYLES_CSS = `
   color: ${aliasVar('label-tertiary')};
   margin-top: 2px;
 }
-/* The auto-refresh row packs the minutes input and its switch on one side;
-   the input is deliberately narrow (a two-digit number) and reads as the
-   switch's parameter, not a second field. */
+/* The auto-refresh row packs the minutes input, its unit label, and the
+   switch on one side; the input is deliberately narrow (a two-digit number)
+   and reads as the switch's parameter, not a second field. */
 .agy-pref-refresh {
   display: flex;
   align-items: center;
@@ -506,6 +506,11 @@ export const AGY_STYLES_CSS = `
 .agy-pref-refresh input {
   width: 64px;
   text-align: right;
+}
+.agy-pref-unit {
+  font: var(--dsw-font-xxs-12);
+  color: ${aliasVar('label-tertiary')};
+  margin-left: -4px;
 }
 
 /* ── Conversation-header quota badge & popover ─────────────────────────── */
