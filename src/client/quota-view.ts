@@ -710,3 +710,28 @@ export function shouldProbeLimits(input: {
   if (input.failedAt !== null && input.now - input.failedAt < PROBE_FAILURE_BACKOFF_MS) return 'off'
   return 'auto'
 }
+
+/**
+ * Whether any MEASURED snapshot predates the user's auto-refresh interval.
+ *
+ * ONE freshness rule for every automatic quota load — the header badge's mount
+ * and wake paths and the Settings cards' page loads all call this — so the
+ * configured interval is the age the data on screen can reach, not merely the
+ * timer's cadence. The host's own TTL is longer and would otherwise answer an
+ * automatic load from cache, which is exactly how a board showed a reading
+ * minutes older than the setting promised.
+ *
+ * Never-measured snapshots stay out: a null timestamp means the host's
+ * non-forced pass already probes that account immediately, and forcing the
+ * whole pool because one row was never measured would multiply the upstream
+ * cost without bounds.
+ */
+export function limitsOlderThanInterval(
+  updatedAts: readonly (number | null | undefined)[],
+  intervalMinutes: number,
+  now: number,
+): boolean {
+  if (!(intervalMinutes > 0)) return false
+  const intervalMs = intervalMinutes * 60_000
+  return updatedAts.some((at) => typeof at === 'number' && Number.isFinite(at) && now - at > intervalMs)
+}

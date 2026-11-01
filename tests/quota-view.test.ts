@@ -19,6 +19,7 @@ import {
   formatDetailedReset,
   formatQuotaReset,
   isAccountQuotaExhausted,
+  limitsOlderThanInterval,
   modelLabelForGroup,
   nextHealthyIndex,
   pickBadgeQuota,
@@ -508,6 +509,29 @@ describe('refresh policy', () => {
       failedAt: NOW - PROBE_FAILURE_BACKOFF_MS,
       now: NOW,
     })).toBe('auto')
+  })
+
+  it('upgrades an automatic load to a probe when a snapshot outlives the interval', () => {
+    // ONE freshness rule for every automatic quota load (badge mount/wake and
+    // the Settings cards alike): the configured interval is the age the data on
+    // screen can reach, so a snapshot older than it must force a re-probe even
+    // though the host's own TTL would still serve it from cache.
+    expect(limitsOlderThanInterval([NOW - 4 * 60_000], 5, NOW)).toBe(false)
+    expect(limitsOlderThanInterval([NOW - 5 * 60_000], 5, NOW)).toBe(false)
+    expect(limitsOlderThanInterval([NOW - 5 * 60_000 - 1], 5, NOW)).toBe(true)
+    // One stale row among fresh ones is enough — the board would render it.
+    expect(limitsOlderThanInterval([NOW - 60_000, NOW - 9 * 60_000], 5, NOW)).toBe(true)
+    // An empty pool and a "never" interval are both trivially non-expired.
+    expect(limitsOlderThanInterval([], 5, NOW)).toBe(false)
+    expect(limitsOlderThanInterval([NOW - 99 * 60_000], 0, NOW)).toBe(false)
+  })
+
+  it('never counts an unmeasured snapshot as interval-stale', () => {
+    // A null timestamp means the host's non-forced pass already probes that
+    // account immediately; forcing the pool because one row was never measured
+    // would multiply the upstream cost without bounds.
+    expect(limitsOlderThanInterval([null, undefined, NOW - 60_000], 5, NOW)).toBe(false)
+    expect(limitsOlderThanInterval([null, undefined], 5, NOW)).toBe(false)
   })
 })
 

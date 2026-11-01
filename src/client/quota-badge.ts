@@ -28,6 +28,7 @@ import {
   desensitizeEmail,
   dotStateFor,
   isAccountQuotaExhausted,
+  limitsOlderThanInterval,
   modelLabelForGroup,
   nextHealthyIndex,
   pickBadgeQuota,
@@ -257,9 +258,32 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       }
       setError(null)
 
-      const probe = shouldProbeLimits({ force: isManual || forceProbe, failedAt: failedAtRef.current, now: Date.now() })
-      if (probe !== 'off') {
-        const limits = await rpc.call('account.limits', probe === 'force' ? { force: true } : {})
+      // The configured interval is the FRESHNESS BOUND of every automatic load,
+      // not just the timer's cadence: a mount or a window-wake that finds a
+      // snapshot older than the interval force-probes instead of serving the
+      // host's longer-TTL cache — that longer TTL is how the board could show a
+      // reading minutes older than the setting promises. Accounts never
+      // measured stay out of this rule: the host's own non-forced pass already
+      // probes those immediately.
+      const staleBeyondInterval = !isManual && !forceProbe && refreshMinutes !== null
+        && limitsOlderThanInterval(
+          listed.accounts
+            // A disabled row's windows are frozen (the host never re-measures
+            // one), so its age is not evidence the POOL's data went stale —
+            // counting it would force-probe the enabled accounts on every load.
+            .filter((account) => account.state !== 'disabled')
+            .map((account) => account.limitsUpdatedAt),
+          refreshMinutes,
+          currentNow,
+        )
+
+      const base = shouldProbeLimits({ force: isManual || forceProbe, failedAt: failedAtRef.current, now: Date.now() })
+      // An upgrade to `force` never overrides an active failure backoff: a run
+      // that measured nothing and failed must not be retried by every
+      // automatic load for the next ten minutes.
+      const decision: 'force' | 'auto' | 'off' = base === 'auto' && staleBeyondInterval ? 'force' : base
+      if (decision !== 'off') {
+        const limits = await rpc.call('account.limits', decision === 'force' ? { force: true } : {})
         const byIndex = new Map(limits.limits.map((entry) => [entry.index, entry]))
         setAccounts((current) => current.map((account) => {
           const entry = byIndex.get(account.index)
@@ -469,33 +493,21 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   let badgeReadingStr: string
 
   if (!badgeDetailedMode) {
-    // Non-detailed mode: original chaos-03x/dsh-agy badge
+    // Non-detailed mode: the simple pill, kept in step with the last commit not
+    // authored here — the pill carries NO quota figure, only the pool size, and
+    // the light is the POOL's state light (serving / cooling / empty), not a
+    // quota tint. Quota coloring belongs to the detailed pill and the cards;
+    // the readings themselves stay one hover (tooltip) or one click (board) away.
     const badgeQuota = pickBadgeQuota(accounts, now)
     const badgeWindow = badgeQuota?.window && badgeQuota.window !== '5h' ? `${windowLabel(badgeQuota.window, t)} ` : ''
-    displayText = badgeQuota !== null
-      ? (badgeWindow !== ''
-          ? t('badgeWindowQuotaFormat', { window: badgeWindow, percent: badgeQuota.percent })
-          : t('badgeQuotaFormat', { percent: badgeQuota.percent }))
-      : t('badgeCountFormat', { count: accountCount })
+    displayText = t('badgeCountFormat', { count: accountCount })
 
     badgeReadingStr = badgeQuota !== null
       ? t('badgeReading', { window: badgeWindow, percent: badgeQuota.percent })
       : t('badgeUnmeasured')
 
-    if (badgeQuota !== null) {
-      if (badgeQuota.percent <= 0) {
-        effectiveDotState = 'error'
-        statusClass = 'quota-error'
-      } else if (badgeQuota.percent <= 20) {
-        effectiveDotState = 'warning'
-        statusClass = 'quota-warn'
-      } else {
-        effectiveDotState = 'done'
-        statusClass = ''
-      }
-    } else {
-      effectiveDotState = rawDot as StateDotState
-    }
+    effectiveDotState = rawDot
+    statusClass = ''
   } else {
     // Detailed mode
     const targetGroup = resolveQuotaGroup(

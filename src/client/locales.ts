@@ -75,9 +75,6 @@ export const zh = {
   limitsRefreshOk: '已刷新 {measured} 个账号的额度',
   limitsRefreshFresh: '额度仍是新鲜的，无需刷新',
   limitsRefreshFailed: '{failed} 个账号的额度刷新失败',
-  // Spoken only when the sampled burn rate would empty the window BEFORE its
-  // reset — otherwise the reset time beside it is already the answer.
-  limitBurnWarn: '按此速度{value}后耗尽',
   quotaWindow5h: '5 小时',
   quotaWindowWeekly: '每周',
   quotaWindowDaily: '每日',
@@ -138,8 +135,6 @@ export const zh = {
   badgeCountdownHours: '{hours}小时后',
   badgeCountdownMins: '{mins}分钟后',
   badgeResetFullDate: '{month}月{day}日 {time} ({countdown})',
-  badgeQuotaFormat: 'AGY · {percent}%',
-  badgeWindowQuotaFormat: 'AGY · {window}{percent}%',
   badgeAccountQuotaFormat: '{account} · {model} {window}{percent}%',
   badgeCountFormat: 'AGY ✦ {count}',
   fieldProject: '项目',
@@ -378,8 +373,6 @@ export const en: Record<AgyLocaleKey, string> = {
   limitsRefreshOk: 'Refreshed quota for {measured} account(s)',
   limitsRefreshFresh: 'Quota is already fresh — nothing to refresh',
   limitsRefreshFailed: 'Quota refresh failed for {failed} account(s)',
-  // Spoken only when the rate would empty the window before its reset.
-  limitBurnWarn: 'at this rate, empty in {value}',
   quotaWindow5h: '5 hours',
   quotaWindowWeekly: 'Weekly',
   quotaWindowDaily: 'Daily',
@@ -440,8 +433,6 @@ export const en: Record<AgyLocaleKey, string> = {
   badgeCountdownHours: '{hours}h later',
   badgeCountdownMins: '{mins}m later',
   badgeResetFullDate: '{month}/{day} {time} ({countdown})',
-  badgeQuotaFormat: 'AGY · {percent}%',
-  badgeWindowQuotaFormat: 'AGY · {window}{percent}%',
   badgeAccountQuotaFormat: '{account} · {model} {window}{percent}%',
   badgeCountFormat: 'AGY ✦ {count}',
   fieldProject: 'Project',

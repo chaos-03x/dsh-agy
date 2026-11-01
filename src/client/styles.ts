@@ -361,12 +361,6 @@ export const AGY_STYLES_CSS = `
   color: ${aliasVar('label-primary')}; }
 .agy-limit-reset { text-align: right; font: var(--dsw-font-xxxs-11);
   color: ${aliasVar('label-tertiary')}; }
-/* The burn projection: indented to align with the bar (58px label + 10px gap),
-   warn-tinted because "this window runs dry before it resets" is the one
-   projection that asks the reader to act. */
-.agy-limit-burn { padding: 0 0 4px 68px;
-  font: var(--dsw-font-xxxs-11);
-  color: ${aliasVar('state-warn-primary')}; }
 
 /* ── Dense breakdown tables (Usage tab only) ─────────────────────────────── */
 .agy-table-wrap { padding: 6px 0 2px; }

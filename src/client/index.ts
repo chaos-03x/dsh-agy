@@ -31,7 +31,7 @@ import { aliasVar, installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
-import { accountQuotaRead, agoText, barColorFor, formatQuotaReset, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
+import { accountQuotaRead, agoText, barColorFor, formatQuotaReset, limitsOlderThanInterval, stateLabel, untilText, windowLabel, MINUTE_MS } from './quota-view.ts'
 import type { AccountView, AgyRpcClient, AgyRpcResult, ModelRoutingTarget, ModelRoutingView, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
@@ -262,19 +262,6 @@ function levelLabel(level: string, t: T): string {
     case 'high': return t('thinkingLevelHigh')
     default: return level
   }
-}
-
-/**
- * Humanize a burn horizon (hours until a window runs dry at the sampled rate).
- *
- * Reuses the shared `rel*` magnitudes so the phrasing matches every other
- * duration on the panel; under an hour falls to minutes rather than rounding
- * to a false zero.
- */
-function burnHorizon(hours: number, t: T): string {
-  if (hours < 1) return t('relMinutes', { n: Math.max(1, Math.round(hours * 60)) })
-  if (hours < 48) return t('relHours', { n: Math.round(hours) })
-  return t('relDays', { n: Math.round(hours / 24) })
 }
 
 /**
@@ -622,19 +609,6 @@ function AccountDetail(props: {
             h('div', { className: 'agy-limit-group-name' }, group.name),
             ...group.windows.map((window) => {
               const fraction = window.remainingFraction
-              // Burn projection: rate (fraction/hour) over remaining fraction
-              // gives hours-to-empty. Spoken ONLY when that lands BEFORE the
-              // window's reset — otherwise the reset time this row already shows
-              // is the answer, and a "won't run dry" line is noise.
-              const burn = account.limitBurn?.[window.bucketId]
-              const hoursLeft = fraction !== null && burn !== undefined && burn > 0
-                ? fraction / burn
-                : null
-              const resetHours = window.resetTime === null
-                ? null
-                : (new Date(window.resetTime).getTime() - now) / HOUR_MS
-              const exhaustsFirst = hoursLeft !== null && resetHours !== null
-                && hoursLeft < resetHours
               return h('div', { key: window.bucketId },
                 h('div', { className: 'agy-limit-row' },
                   h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),
@@ -648,11 +622,7 @@ function AccountDetail(props: {
                   // for the value it renders.
                   h('span', { className: 'agy-limit-p' }, fraction === null ? t('valueUnknown') : `${Math.round(fraction * 100)}%`),
                   h('span', { className: 'agy-limit-reset' },
-                    window.resetTime === null ? null : formatQuotaReset(window.window, window.resetTime, t, now, props.detailedQuotaReset))),
-                exhaustsFirst
-                  ? h('div', { className: 'agy-limit-burn' },
-                    t('limitBurnWarn', { value: burnHorizon(hoursLeft!, t) }))
-                  : null)
+                    window.resetTime === null ? null : formatQuotaReset(window.window, window.resetTime, t, now, props.detailedQuotaReset))))
             }))
         })),
     limitsAside)
@@ -2320,16 +2290,36 @@ export function AgySettings(props: {
 }): ReactNode {
   const { rpc, t } = props
   const [detailedQuotaReset, setDetailedQuotaReset] = useState(false)
+  // The auto-refresh interval the Preferences card owns (minutes; null =
+  // never). ONE setting governs every automatic quota refresh in the plugin —
+  // the header badge's timer AND this section's windows — so it is read here
+  // too, and kept current through the same event the badge listens to.
+  const [quotaRefreshMinutes, setQuotaRefreshMinutes] = useState<number | null>(DEFAULT_QUOTA_REFRESH_MINUTES)
+  /** Read by `loadLimits` without joining its identity to every prefs save. */
+  const refreshMinutesRef = useRef<number | null>(DEFAULT_QUOTA_REFRESH_MINUTES)
+  useEffect(() => { refreshMinutesRef.current = quotaRefreshMinutes }, [quotaRefreshMinutes])
   useEffect(() => {
     installAgyStyles()
     void rpc.call('ui.prefs.get', {}).then((prefs) => {
       if (alive.current && prefs) {
         setDetailedQuotaReset(prefs.detailedQuotaReset === true)
+        if (prefs.quotaRefreshMinutes !== undefined) setQuotaRefreshMinutes(prefs.quotaRefreshMinutes)
       }
     }).catch(() => {})
+    const onPrefsChange = (e: Event): void => {
+      const detail = (e as CustomEvent<UiPrefsView>).detail
+      if (detail?.quotaRefreshMinutes !== undefined && alive.current) {
+        setQuotaRefreshMinutes(detail.quotaRefreshMinutes)
+      }
+    }
+    window.addEventListener('agy:ui-prefs-changed', onPrefsChange)
+    return () => { window.removeEventListener('agy:ui-prefs-changed', onPrefsChange) }
   }, [rpc])
   const [tab, setTab] = useState<TabId>('accounts')
   const [accounts, setAccounts] = useState<AccountView[]>([])
+  /** Mirrors `accounts` for `loadLimits` (see its staleness rule). */
+  const accountsRef = useRef<AccountView[]>(accounts)
+  useEffect(() => { accountsRef.current = accounts })
   const [models, setModels] = useState<ModelView[]>([])
   const [modelAccount, setModelAccount] = useState<string | null>(null)
   /** Model-discovery failure, shown on the Models tab only (see loadModels). */
@@ -2454,9 +2444,11 @@ export function AgySettings(props: {
    * for a single enabled account (measuring that one could block the only
    * account), so this endpoint is the only thing that fills `cachedLimits` there.
    *
-   * @param force - re-probe inside the TTL. Only an EXPLICIT refresh does this;
-   *   an automatic one must respect the TTL, or every action that reloads the
-   *   page would spend an upstream quota call.
+   * @param force - re-probe inside the TTL. An EXPLICIT refresh does this; an
+   *   automatic one upgrades itself to a probe only when the snapshot it just
+   *   read is older than the user's auto-refresh interval — ONE setting governs
+   *   every automatic quota refresh in the plugin, so a page opened onto stale
+   *   numbers re-measures instead of serving the host's longer-TTL cache.
    * @param report - whether to surface the outcome. Set only when the user asked
    *   for the refresh, since an automatic one must stay silent.
    * @param index - restrict the refresh to ONE account (the limits card's
@@ -2465,12 +2457,37 @@ export function AgySettings(props: {
    *   the merge below is already by index, so nothing else changes.
    */
   const loadLimits = useCallback(async (force = false, report = false, index?: number) => {
+    // The interval is read through a ref so this callback's identity (and the
+    // mount/tab effects that key on it) does not churn on every prefs save.
+    const intervalMinutes = refreshMinutesRef.current
     try {
       const payload: { force?: boolean, index?: number } = force || index !== undefined
         ? { force: true, ...(index === undefined ? {} : { index }) }
         : {}
-      const result = await rpc.call('account.limits', payload)
+      let result = await rpc.call('account.limits', payload)
       if (!alive.current) return
+      // Automatic full-pool load + a configured interval + a measured snapshot
+      // older than it → one forced re-probe. Never-measured accounts stay out
+      // (the host's non-forced pass already probes those), an explicit request
+      // never double-probes, and a DISABLED row's frozen snapshot is not
+      // evidence the pool went stale — the host never re-measures one, so
+      // counting its age would force-probe on every load.
+      if (!force && index === undefined && intervalMinutes !== null) {
+        const enabledIndexes = new Set(accountsRef.current
+          .filter((account) => account.state !== 'disabled')
+          .map((account) => account.index))
+        const expired = limitsOlderThanInterval(
+          result.limits
+            .filter((entry) => enabledIndexes.has(entry.index))
+            .map((entry) => entry.updatedAt),
+          intervalMinutes,
+          Date.now(),
+        )
+        if (expired) {
+          result = await rpc.call('account.limits', { force: true })
+          if (!alive.current) return
+        }
+      }
       const byIndex = new Map(result.limits.map((entry) => [entry.index, entry]))
       setAccounts((current) => current.map((account) => {
         const entry = byIndex.get(account.index)
@@ -2524,12 +2541,27 @@ export function AgySettings(props: {
     // something to write into.
     //
     // TTL-respecting (no `force`): this fires on mount and whenever the account
-    // COUNT changes, and neither is a request for fresh numbers. Note the
-    // dependency is the LENGTH, so a plain `refresh()` — which replaces the
-    // array without changing its length — does not re-run this. That is why the
-    // toolbar's Refresh calls `refreshAll` rather than relying on this effect.
+    // COUNT changes, and neither is a request for fresh numbers — `loadLimits`
+    // itself upgrades the automatic load to a forced probe when the snapshot is
+    // older than the configured interval. Note the dependency is the LENGTH, so
+    // a plain `refresh()` — which replaces the array without changing its
+    // length — does not re-run this. That is why the toolbar's Refresh calls
+    // `refreshAll` rather than relying on this effect.
     if (tab === 'accounts' && accounts.length > 0) void loadLimits()
   }, [tab, accounts.length, loadLimits])
+
+  // While the accounts tab is showing the quota cards, the configured interval
+  // governs them exactly as it governs the header badge's board: a tick
+  // force-probes past the host's TTL. Leaving the tab — or the browser tab
+  // hiding — stops the cadence, because quota nobody can see is not probed.
+  // "Never" (null) keeps the open/manual-only behavior.
+  useEffect(() => {
+    if (tab !== 'accounts' || quotaRefreshMinutes === null) return
+    const timer = setInterval(() => {
+      if (!document.hidden && alive.current) void loadLimits(true)
+    }, quotaRefreshMinutes * 60_000)
+    return () => { clearInterval(timer) }
+  }, [tab, quotaRefreshMinutes, loadLimits])
 
   /**
    * The toolbar's Refresh: reload the page AND force the quota windows.
