@@ -835,7 +835,16 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       h(StateDot, {
         state: effectiveDotState,
         size: 7,
-        className: `agy-ui-dot ${dotState}${statusClass ? ` ${statusClass}` : ''}${isUpdating ? ' updating' : ''}`,
+        // ONE painter per mode. Simple mode: the POOL light — the state classes
+        // (`active`/`cooling`/`disabled`) own the color, exactly the last commit
+        // not authored here. Detailed mode: the QUOTA traffic light — the
+        // `data-state` verdict owns the color and the pool class is REMOVED,
+        // because a cooling pool beside a healthy reading used to paint the
+        // element orange (`.cooling` wins the bg cascade) around a green
+        // currentColor core: the green-center-orange-ring mismatch.
+        className: badgeDetailedMode
+          ? `agy-ui-dot detailed${statusClass ? ` ${statusClass}` : ''}${isUpdating ? ' updating' : ''}`
+          : `agy-ui-dot ${dotState}${isUpdating ? ' updating' : ''}`,
       }),
       badgeDetailedMode
         ? h('span', { key: shownToken, className: 'agy-ui-badge-text' }, displayText)

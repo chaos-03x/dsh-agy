@@ -579,6 +579,14 @@ export const AGY_STYLES_CSS = `
   border-radius: 50%;
   flex-shrink: 0;
   transition: background-color 0.3s, color 0.3s, box-shadow 0.3s;
+}
+
+/* The steady breathing is the DETAILED pill's signature only. The simple pill
+   keeps the last non-authored commit's light: a solid pool-state color that
+   moves only while a refresh is in flight (the updating pulse below).
+   NOTE: no backticks inside this template — one silently re-parses the
+   literal as a tagged template and truncates the whole stylesheet. */
+.agy-ui-dot.detailed {
   animation: agy-ui-pulse 2.4s ease-in-out infinite;
 }
 
