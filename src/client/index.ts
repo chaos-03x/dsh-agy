@@ -31,7 +31,7 @@ import { aliasVar, installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
-import { accountQuotaRead, accountRecoveryTime, agoText, barColorFor, formatDetailedReset, formatQuotaReset, isAccountAllQuotaExhausted, limitsOlderThanInterval, stateLabel, untilText, windowLabel, MINUTE_MS } from './quota-view.ts'
+import { accountQuotaRead, accountRecoveryTime, agoText, barColorFor, effectiveFraction, formatDetailedReset, formatQuotaReset, isAccountAllQuotaExhausted, limitsOlderThanInterval, stateLabel, untilText, windowLabel, MINUTE_MS } from './quota-view.ts'
 import type { AccountView, AgyRpcClient, AgyRpcResult, ModelRoutingTarget, ModelRoutingView, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
@@ -610,11 +610,12 @@ function AccountDetail(props: {
           : h('div', { className: 'agy-limit-age' },
             t('limitsMeasured', { ago: agoText(new Date(account.limitsUpdatedAt).toISOString(), t, now) })),
         ...account.limits.map((group) => {
-          const groupWeekly = group.windows.find((w) => w.window === 'weekly')?.remainingFraction ?? null
+          const weeklyWindow = group.windows.find((w) => w.window === 'weekly')
+          const groupWeekly = weeklyWindow ? effectiveFraction(weeklyWindow, now) : null
           return h('div', { className: 'agy-limit-group', key: group.name },
             h('div', { className: 'agy-limit-group-name' }, group.name),
             ...group.windows.map((window) => {
-              const fraction = window.remainingFraction
+              const fraction = effectiveFraction(window, now)
               return h('div', { key: window.bucketId },
                 h('div', { className: 'agy-limit-row' },
                   h('span', { className: 'agy-limit-k' }, windowLabel(window.window, t)),

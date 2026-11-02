@@ -79,8 +79,6 @@ export const zh = {
   quotaWindowWeekly: '每周',
   quotaWindowDaily: '每日',
   quotaWindowMonthly: '每月',
-  quotaResetPassed: '已重置',
-  quotaStaleNote: '该窗口已重置，等待下次刷新',
   quotaUnmeasuredNote: '上游未返回该窗口的剩余额度',
   quotaGroupFallback: '配额分组',
 
@@ -385,8 +383,6 @@ export const en: Record<AgyLocaleKey, string> = {
   quotaWindowWeekly: 'Weekly',
   quotaWindowDaily: 'Daily',
   quotaWindowMonthly: 'Monthly',
-  quotaResetPassed: 'already reset',
-  quotaStaleNote: 'This window has already reset — waiting for the next refresh',
   quotaUnmeasuredNote: 'Upstream reported no remaining fraction for this window',
   quotaGroupFallback: 'Quota group',
 

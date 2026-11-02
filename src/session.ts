@@ -255,7 +255,7 @@ export class AgySessionManager {
   private readonly projectRetryFailed = new Set<string>()
 
   /** Bound for one quota poll so selection never stalls on a hung endpoint. */
-  private static readonly QUOTA_FETCH_TIMEOUT_MS = 3_000
+  private static readonly QUOTA_FETCH_TIMEOUT_MS = 10_000
   /** Refresh the token this far ahead of expiry so a request never blocks on the token endpoint. */
   private static readonly REFRESH_SKEW_MS = 2 * 60 * 1000
 

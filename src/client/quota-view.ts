@@ -192,8 +192,7 @@ export function agoText(iso: string | null, t: QuotaTranslate, now: number): str
 export function resetText(resetTime: string | null, t: QuotaTranslate, now: number): string | null {
   if (resetTime === null) return null
   const at = Date.parse(resetTime)
-  if (Number.isNaN(at)) return null
-  if (at <= now) return t('quotaResetPassed')
+  if (Number.isNaN(at) || at <= now) return null
   return untilText(resetTime, t, now)
 }
 
@@ -214,8 +213,7 @@ export function formatDetailedReset(
 ): string | null {
   if (!resetTime) return null
   const at = Date.parse(resetTime)
-  if (Number.isNaN(at)) return null
-  if (at <= now) return t('quotaResetPassed')
+  if (Number.isNaN(at) || at <= now) return null
 
   const resetDate = new Date(at)
   const diffMs = at - now
@@ -347,19 +345,21 @@ function rotationWindows(group: QuotaGroup): QuotaWindow[] {
  * A window that reported no reset moment at all is NOT stale — the pool keeps
  * using its fraction, and so does this.
  */
-function resetInPast(resetTime: string | null | undefined, now: number): boolean {
+export function resetInPast(resetTime: string | null | undefined, now: number): boolean {
   if (!resetTime) return false
   return parseFutureResetMs(resetTime, now) === undefined
 }
 
 /**
- * Whether a window's fraction is a leftover from a period that has ended.
+ * Effective fraction remaining in a quota window.
  *
- * Only a window that DID report a fraction can be stale: one that never reported
- * stays "unknown", which the row already renders as its own case.
+ * When a window's reset time has passed, the period has reset and quota is refilled (1.0).
+ * An unmeasured fraction remains null.
  */
-function windowIsStale(window: QuotaWindow, now: number): boolean {
-  return window.remainingFraction !== null && resetInPast(window.resetTime, now)
+export function effectiveFraction(window: QuotaWindow, now: number): number | null {
+  if (window.remainingFraction === null) return null
+  if (resetInPast(window.resetTime, now)) return 1
+  return window.remainingFraction
 }
 
 /**
@@ -373,11 +373,11 @@ function windowIsStale(window: QuotaWindow, now: number): boolean {
  * genuinely nearly spent.
  */
 function windowPressure(window: QuotaWindow, now: number): number | null {
-  if (window.remainingFraction === null) return null
-  if (resetInPast(window.resetTime, now)) return null
+  const fraction = effectiveFraction(window, now)
+  if (fraction === null) return null
   const threshold = drainThresholdFor(window.window)
   if (threshold === undefined || threshold <= 0) return null
-  return Math.max(window.remainingFraction, 0) / threshold
+  return Math.max(fraction, 0) / threshold
 }
 
 /**
@@ -409,16 +409,13 @@ export function pickBadgeWindow(limits: readonly QuotaGroup[] | null | undefined
       }
     }
     if (best !== null) return best
-    // Every rotating window of this group is unmeasured or already reset.
-    // Returning null rather than the first candidate keeps a leftover fraction
-    // from rendering as the live reading.
     return null
   }
   // No group reports a window we block on: the shortest window that is still
   // live is the best remaining proxy, so an upstream window vocabulary added
   // later still yields a number instead of a fallback count.
   for (const group of limits) {
-    const usable = sortWindows(group.windows).filter((window) => !windowIsStale(window, now))
+    const usable = sortWindows(group.windows).filter((window) => effectiveFraction(window, now) !== null)
     const first = usable[0]
     if (first !== undefined) return first
   }
@@ -437,7 +434,7 @@ export function pickBadgeQuota(accounts: readonly AccountView[], now: number = D
   const active = accounts.find((account) => account.active) ?? accounts[0]
   const window = pickBadgeWindow(active?.limits, now)
   if (window === null) return null
-  const percent = toPercent(window.remainingFraction)
+  const percent = toPercent(effectiveFraction(window, now))
   if (percent === null) return null
   return { percent, window: window.window }
 }
@@ -522,10 +519,10 @@ export function accountQuotaRead(
     for (const group of groupsToRead) {
       for (const window of group.windows) {
         if (window.window !== token) continue
-        if (window.remainingFraction === null) continue
-        if (resetInPast(window.resetTime, now)) continue
-        const fraction = Math.max(window.remainingFraction, 0)
-        if (best === null || fraction < best) best = fraction
+        const fraction = effectiveFraction(window, now)
+        if (fraction === null) continue
+        const valid = Math.max(fraction, 0)
+        if (best === null || valid < best) best = valid
       }
     }
     return best
@@ -581,8 +578,8 @@ export function nextHealthyIndex(accounts: readonly AccountView[], now: number):
 export function isGroupQuotaExhausted(group: QuotaGroup, now: number): boolean {
   for (const window of group.windows) {
     if (drainThresholdFor(window.window) === undefined) continue
-    if (window.remainingFraction === null || window.remainingFraction > 0) continue
-    if (resetInPast(window.resetTime, now)) continue
+    const fraction = effectiveFraction(window, now)
+    if (fraction === null || fraction > 0) continue
     return true
   }
   return false
@@ -623,8 +620,8 @@ export function accountRecoveryTime(view: AccountView | undefined, now: number):
     let promised = true
     for (const window of group.windows) {
       if (drainThresholdFor(window.window) === undefined) continue
-      if (window.remainingFraction === null || window.remainingFraction > 0) continue
-      if (resetInPast(window.resetTime, now)) continue
+      const fraction = effectiveFraction(window, now)
+      if (fraction === null || fraction > 0) continue
       const reset = parseFutureResetMs(window.resetTime ?? undefined, now)
       if (reset === undefined) {
         promised = false
@@ -672,16 +669,14 @@ export function windowRows(
   detailed: boolean = false,
 ): QuotaWindowRow[] {
   return sortWindows(windows).map((window) => {
-    const stale = windowIsStale(window, now)
-    // A stale row withholds its fraction instead of showing it as live: the
-    // percentage described a period that ended, and the reset copy says so.
+    const fraction = effectiveFraction(window, now)
     return {
       bucketId: window.bucketId,
       window: window.window,
       label: windowLabel(window.window, t),
-      percent: stale ? null : toPercent(window.remainingFraction),
+      percent: toPercent(fraction),
       reset: formatQuotaReset(window.window, window.resetTime, t, now, detailed),
-      stale,
+      stale: false,
     }
   })
 }

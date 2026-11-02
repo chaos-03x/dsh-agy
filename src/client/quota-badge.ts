@@ -147,17 +147,17 @@ function renderWindow(
     ),
     window.reset
       ? h(
-          'div',
-          { className: 'agy-ui-quota-footer' },
-          h('span', null, window.reset),
-        )
+        'div',
+        { className: 'agy-ui-quota-footer' },
+        h('span', null, window.reset),
+      )
       : null,
     window.percent === null
       ? h(
-          'div',
-          { className: 'agy-ui-window-note' },
-          window.stale ? t('quotaStaleNote') : t('quotaUnmeasuredNote'),
-        )
+        'div',
+        { className: 'agy-ui-window-note' },
+        t('quotaUnmeasuredNote'),
+      )
       : null,
   )
 }
@@ -181,6 +181,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   // automatically — rotation and the rotate arrow both move it (sync effect
   // below).
   const [viewIndex, setViewIndex] = useState<number | null>(null)
+  const viewIndexRef = useRef<number | null>(null)
 
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -255,7 +256,11 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     }
   }, [setPause])
 
-  const load = useCallback(async (isManual: boolean = false, forceProbe: boolean = false) => {
+  const load = useCallback(async (
+    isManual: boolean = false,
+    forceProbe: boolean = false,
+    targetIndex?: number | null,
+  ) => {
     const currentNow = Date.now()
     // Smart pause holds BEFORE any RPC: a paused tick is free — no account
     // read, no limits probe, nothing. A manual load overrides (and clears) the
@@ -303,19 +308,15 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       const activeIndex = listed.accounts.find((candidate) => candidate.active)?.index
         ?? (listed.accounts.length > 0 ? listed.accounts[0]!.index : null)
       const automatic = !isManual && activeIndex !== null
+      // When a target index is requested (or manual refresh in the popover), probe that
+      // account only so sibling account failures never affect the current view.
+      // Automatic ticks probe the active account.
+      const resolvedTarget = targetIndex !== undefined
+        ? targetIndex
+        : (isManual ? (viewIndexRef.current ?? activeIndex) : activeIndex)
 
-      // The configured interval is the FRESHNESS BOUND of every automatic load,
-      // not just the timer's cadence: a mount or a window-wake that finds a
-      // snapshot older than the interval force-probes instead of serving the
-      // host's longer-TTL cache — that longer TTL is how the board could show a
-      // reading minutes older than the setting promises. The test reads the set
-      // that will actually be probed (the active account only, under the
-      // narrowed automatic load): forcing because ANOTHER row is old would
-      // spend a forced probe the narrowed call never answers. Accounts never
-      // measured stay out of this rule: the host's own non-forced pass already
-      // probes those immediately.
-      const probedAccounts = automatic
-        ? listed.accounts.filter((account) => account.index === activeIndex)
+      const probedAccounts = resolvedTarget !== null
+        ? listed.accounts.filter((account) => account.index === resolvedTarget)
         : listed.accounts
       const staleBeyondInterval = !isManual && !forceProbe && refreshMinutes !== null
         && limitsOlderThanInterval(
@@ -336,7 +337,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       const decision: 'force' | 'auto' | 'off' = base === 'auto' && staleBeyondInterval ? 'force' : base
       if (decision !== 'off') {
         const payload: { force?: boolean, index?: number } = decision === 'force' ? { force: true } : {}
-        if (automatic) payload.index = activeIndex!
+        if (resolvedTarget !== null) payload.index = resolvedTarget
         const limits = await rpc.call('account.limits', payload)
         const byIndex = new Map(limits.limits.map((entry) => [entry.index, entry]))
         setAccounts((current) => current.map((account) => {
@@ -346,6 +347,9 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
             : { ...account, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
         }))
         failedAtRef.current = limits.measured === 0 && limits.failed > 0 ? Date.now() : null
+        if (isManual && limits.measured === 0 && limits.failed > 0) {
+          setError(t('limitsRefreshFailed', { failed: limits.failed }))
+        }
 
         // Smart pause, judged from the data THIS probe just brought back: the
         // observation and its confirmation are the same call, so pausing costs
@@ -459,7 +463,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       await rpc.call('account.activate', { index: next })
       // The activated account may see different windows; a forced reload reads
       // them now rather than waiting out the limits cache TTL.
-      await load(true)
+      await load(true, false, next)
       lastManualIndexRef.current = next
       announceAccountChanged(next)
     } catch (err) {
@@ -480,6 +484,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     ?? (accounts.length > 0 ? accounts[0]!.index : null)
   useEffect(() => {
     setViewIndex(activeIndex)
+    viewIndexRef.current = activeIndex
   }, [activeIndex])
 
   // A manual pick is an explicit override: the user chose to sit on this
@@ -517,7 +522,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       try {
         await rpc.call('account.activate', { index: next })
         announceAccountChanged(next)
-        await load(true)
+        await load(true, false, next)
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       } finally {
@@ -565,7 +570,8 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const handleRefreshClick = async (e: { stopPropagation: () => void }) => {
     e.stopPropagation()
     if (loading) return
-    await load(true)
+    const currentTarget = viewAccount?.index ?? activeIndex
+    await load(true, false, currentTarget)
   }
 
   const activeAccount = accounts.find((a) => a.active) ?? accounts[0]
@@ -634,11 +640,11 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     const accountName = activeAccount?.email ? desensitizeEmail(activeAccount.email) : null
     displayText = shownFraction !== null && accountName !== null
       ? t('badgeAccountQuotaFormat', {
-          account: accountName,
-          model: modelLabel,
-          window: shownWindowWithSpace,
-          percent: shownPercent,
-        })
+        account: accountName,
+        model: modelLabel,
+        window: shownWindowWithSpace,
+        percent: shownPercent,
+      })
       : t('badgeCountFormat', { count: accountCount })
 
     badgeReadingStr = shownFraction !== null
@@ -707,13 +713,13 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       className: `agy-ui-popover ${isMobile ? 'mobile' : 'desktop'}`,
       style: !isMobile
         ? (anchored === null
-            ? { visibility: 'hidden' as const }
-            : {
-                position: 'fixed' as const,
-                top: `${anchored.top}px`,
-                left: `${anchored.left}px`,
-                visibility: 'visible' as const,
-              })
+          ? { visibility: 'hidden' as const }
+          : {
+            position: 'fixed' as const,
+            top: `${anchored.top}px`,
+            left: `${anchored.left}px`,
+            visibility: 'visible' as const,
+          })
         : undefined,
       onClick: (e: { stopPropagation: () => void }) => { e.stopPropagation() },
     },
@@ -736,20 +742,20 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         { className: 'agy-ui-header-actions' },
         !isMobile
           ? h(
-              Button,
-              {
-                variant: 'ghost',
-                size: 'sm',
-                className: `agy-ui-icon-btn ${isPinned ? 'active' : ''}`,
-                title: isPinned ? t('badgeUnpinHint') : t('badgeHint'),
-                onClick: handleTogglePin,
-              },
-              h(
-                'svg',
-                { width: '13', height: '13', viewBox: '0 0 24 24', fill: isPinned ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: '2' },
-                h('path', { d: 'M12 2v8m0 0l3-3m-3 3L9 7M5 10h14a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 1 2-2zM12 15v7' }),
-              ),
-            )
+            Button,
+            {
+              variant: 'ghost',
+              size: 'sm',
+              className: `agy-ui-icon-btn ${isPinned ? 'active' : ''}`,
+              title: isPinned ? t('badgeUnpinHint') : t('badgeHint'),
+              onClick: handleTogglePin,
+            },
+            h(
+              'svg',
+              { width: '13', height: '13', viewBox: '0 0 24 24', fill: isPinned ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: '2' },
+              h('path', { d: 'M12 2v8m0 0l3-3m-3 3L9 7M5 10h14a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 1 2-2zM12 15v7' }),
+            ),
+          )
           : null,
         h(
           Button,
@@ -802,63 +808,73 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       { className: 'agy-ui-modal-body' },
       viewAccount
         ? h(
-            'div',
-            { className: 'agy-ui-account-card' },
-            // The account picker directly replaces the static email text in
-            // the card's top slot: selecting an account changes the viewed
-            // row and nothing else (zero RPC).
-            h(
-              'select',
-              {
-                className: 'agy-ui-account-select',
-                value: String(viewAccount.index),
-                title: t('badgeAccountView'),
-                'aria-label': t('badgeAccountView'),
-                onChange: (event: { target: { value: string } }) => {
-                  setViewIndex(Number(event.target.value))
-                },
+          'div',
+          { className: 'agy-ui-account-card' },
+          // The account picker directly replaces the static email text in
+          // the card's top slot: selecting an account changes the viewed
+          // row and nothing else (zero RPC).
+          h(
+            'select',
+            {
+              className: 'agy-ui-account-select',
+              value: String(viewAccount.index),
+              title: t('badgeAccountView'),
+              'aria-label': t('badgeAccountView'),
+              onChange: (event: { target: { value: string } }) => {
+                const val = Number(event.target.value)
+                viewIndexRef.current = val
+                setViewIndex(val)
               },
-              selectOptions.map((candidate) =>
-                h('option',
-                  { key: candidate.index, value: String(candidate.index) },
-                  candidate.email ? desensitizeEmail(candidate.email) : `#${candidate.index}`)),
-            ),
-            h(
-              'div',
-              null,
-              h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${viewAccount.projectId || t('thinkingDefaultAll')}`),
-              // The model version upstream actually routed the last request
-              // to. Plain text only — NO state tag: upstream's version suffix
-              // does not reliably imply a production/canary split, and a
-              // guessed label is a false alarm the reader acts on.
-              viewAccount.actualModel === null
-                ? null
-                : h('div', { className: 'agy-ui-account-project' },
-                  `${t('actualModelLabel')}: ${viewAccount.actualModel}`),
-            ),
-          )
-        : h(
-            'div',
-            { className: 'agy-ui-account-card' },
-            h('div', { className: 'agy-ui-account-email', style: { color: aliasVar('label-tertiary') } }, error ?? t('badgeNoAccount')),
+            },
+            selectOptions.map((candidate) =>
+              h('option',
+                { key: candidate.index, value: String(candidate.index) },
+                candidate.email ? desensitizeEmail(candidate.email) : `#${candidate.index}`)),
           ),
+          h(
+            'div',
+            null,
+            h('div', { className: 'agy-ui-account-project' }, `${t('fieldProject')}: ${viewAccount.projectId || t('thinkingDefaultAll')}`),
+            // The model version upstream actually routed the last request
+            // to. Plain text only — NO state tag: upstream's version suffix
+            // does not reliably imply a production/canary split, and a
+            // guessed label is a false alarm the reader acts on.
+            viewAccount.actualModel === null
+              ? null
+              : h('div', { className: 'agy-ui-account-project' },
+                `${t('actualModelLabel')}: ${viewAccount.actualModel}`),
+          ),
+        )
+        : h(
+          'div',
+          { className: 'agy-ui-account-card' },
+          h('div', { className: 'agy-ui-account-email', style: { color: aliasVar('label-tertiary') } }, error ?? t('badgeNoAccount')),
+        ),
+
+      error && viewAccount
+        ? h(
+          'div',
+          { className: 'agy-ui-window-note', style: { color: aliasVar('state-error-primary') } },
+          error,
+        )
+        : null,
 
       viewAccount?.verificationRequired && viewAccount?.verificationUrl
         ? h(
-            'div',
-            { className: 'agy-ui-verify-note' },
-            h('span', null, t('badgeVerifyRequired')),
-            h(
-              'a',
-              {
-                className: 'agy-ui-link-btn',
-                href: viewAccount.verificationUrl,
-                target: '_blank',
-                rel: 'noopener noreferrer',
-              },
-              t('badgeAppealLink'),
-            ),
-          )
+          'div',
+          { className: 'agy-ui-verify-note' },
+          h('span', null, t('badgeVerifyRequired')),
+          h(
+            'a',
+            {
+              className: 'agy-ui-link-btn',
+              href: viewAccount.verificationUrl,
+              target: '_blank',
+              rel: 'noopener noreferrer',
+            },
+            t('badgeAppealLink'),
+          ),
+        )
         : null,
 
       h('div', { className: 'agy-ui-section-label' }, t('badgeSectionMonitor')),
@@ -886,12 +902,12 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       // countdown stays live without any timer of its own.
       pausedUntil !== null
         ? h(
-            'div',
-            { className: 'agy-ui-window-note' },
-            t('smartPausedNote', {
-              time: formatDetailedReset('5h', new Date(pausedUntil).toISOString(), t, now) ?? '—',
-            }),
-          )
+          'div',
+          { className: 'agy-ui-window-note' },
+          t('smartPausedNote', {
+            time: formatDetailedReset('5h', new Date(pausedUntil).toISOString(), t, now) ?? '—',
+          }),
+        )
         : null,
 
       limitsAge ? h('div', { className: 'agy-ui-limit-age' }, t('badgeMeasuredAt', { time: limitsAge })) : null,
@@ -908,15 +924,15 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
 
   const popoverNode = isOpen
     ? (isMobile
-        ? h(
-            'div',
-            {
-              className: 'agy-ui-popover-container mobile',
-              onClick: handleClose,
-            },
-            popoverContent,
-          )
-        : popoverContent)
+      ? h(
+        'div',
+        {
+          className: 'agy-ui-popover-container mobile',
+          onClick: handleClose,
+        },
+        popoverContent,
+      )
+      : popoverContent)
     : null
 
   return h(
@@ -954,33 +970,33 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         : h('span', null, displayText),
       badgeDetailedMode
         ? h(
-            'span',
-            {
-              className: `agy-ui-badge-switch${switchableAccounts.length < 2 || isUpdating ? ' disabled' : ''}`,
-              role: 'button',
-              tabIndex: 0,
-              title: t('badgeSwitchNext'),
-              'aria-label': t('badgeSwitchNext'),
-              onClick: (e: { stopPropagation: () => void }) => {
-                e.stopPropagation()
-                if (!isUpdating && switchableAccounts.length >= 2) void handleSwitchNext()
-              },
-              onKeyDown: (e: { key: string, stopPropagation: () => void, preventDefault: () => void }) => {
-                if (e.key !== 'Enter' && e.key !== ' ') return
-                e.stopPropagation()
-                e.preventDefault()
-                if (!isUpdating && switchableAccounts.length >= 2) void handleSwitchNext()
-              },
+          'span',
+          {
+            className: `agy-ui-badge-switch${switchableAccounts.length < 2 || isUpdating ? ' disabled' : ''}`,
+            role: 'button',
+            tabIndex: 0,
+            title: t('badgeSwitchNext'),
+            'aria-label': t('badgeSwitchNext'),
+            onClick: (e: { stopPropagation: () => void }) => {
+              e.stopPropagation()
+              if (!isUpdating && switchableAccounts.length >= 2) void handleSwitchNext()
             },
-            h(
-              'svg',
-              { width: '12', height: '12', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round' },
-              h('path', { d: 'M17 2l4 4-4 4' }),
-              h('path', { d: 'M3 11v-1a4 4 0 0 1 4-4h14' }),
-              h('path', { d: 'M7 22l-4-4 4-4' }),
-              h('path', { d: 'M21 13v1a4 4 0 0 1-4 4H3' }),
-            ),
-          )
+            onKeyDown: (e: { key: string, stopPropagation: () => void, preventDefault: () => void }) => {
+              if (e.key !== 'Enter' && e.key !== ' ') return
+              e.stopPropagation()
+              e.preventDefault()
+              if (!isUpdating && switchableAccounts.length >= 2) void handleSwitchNext()
+            },
+          },
+          h(
+            'svg',
+            { width: '12', height: '12', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round' },
+            h('path', { d: 'M17 2l4 4-4 4' }),
+            h('path', { d: 'M3 11v-1a4 4 0 0 1 4-4h14' }),
+            h('path', { d: 'M7 22l-4-4 4-4' }),
+            h('path', { d: 'M21 13v1a4 4 0 0 1-4 4H3' }),
+          ),
+        )
         : null,
     ),
     popoverNode,

@@ -175,13 +175,13 @@ describe('badge window selection', () => {
     expect(quota).toEqual({ percent: 2, window: 'weekly' })
   })
 
-  it('ignores a reading whose reset has already passed', () => {
-    // The cached fraction describes a period that ENDED: the pool treats that
-    // window as unmeasured, so the badge must not keep showing it as spent.
+  it('treats a reading whose reset has already passed as refilled to 100%', () => {
+    // The cached fraction describes a period that ENDED and reset: the window
+    // has refilled to 100% full headroom.
     const quota = pickBadgeQuota([account({
       limits: [group('Gemini Models', [window('h', '5h', 0.02, at(-60)), window('w', 'weekly', 0.5)])],
     })], NOW)
-    expect(quota).toEqual({ percent: 50, window: 'weekly' })
+    expect(quota).toEqual({ percent: 100, window: '5h' })
   })
 
   it('keeps a reading that reported no reset moment at all', () => {
@@ -193,20 +193,18 @@ describe('badge window selection', () => {
     expect(quota).toEqual({ percent: 31, window: '5h' })
   })
 
-  it('treats an unparseable reset moment as passed', () => {
-    // A wall that cannot be shown to be in the future cannot date a live
-    // reading; the conservative reading is the stale one.
+  it('treats an unparseable reset moment as passed, refilling to 100%', () => {
     const quota = pickBadgeQuota([account({
       limits: [group('Gemini Models', [window('h', '5h', 0.02, 'not-a-date'), window('w', 'weekly', 0.5)])],
     })], NOW)
-    expect(quota).toEqual({ percent: 50, window: 'weekly' })
+    expect(quota).toEqual({ percent: 100, window: '5h' })
   })
 
-  it('reports nothing when every window of the deciding group is stale', () => {
+  it('reports refilled 100% when windows of the deciding group have already reset', () => {
     const quota = pickBadgeQuota([account({
       limits: [group('Gemini Models', [window('h', '5h', 0.02, at(-1)), window('w', 'weekly', 0.01, at(-600))])],
     })], NOW)
-    expect(quota).toBeNull()
+    expect(quota).toEqual({ percent: 100, window: '5h' })
   })
 
   it('never lets daily or monthly drive the badge', () => {
@@ -293,15 +291,15 @@ describe('quota cards', () => {
     expect(cards[0]?.key).toBe('group-0')
   })
 
-  it('withholds the figure of a stale row and explains why', () => {
+  it('displays refilled 100% for a window whose reset time has passed', () => {
     const rows = windowRows([window('h', '5h', 0.02, at(-30))], t, NOW)
     expect(rows[0]).toEqual({
       bucketId: 'h',
       window: '5h',
       label: zh.quotaWindow5h,
-      percent: null,
-      reset: zh.quotaResetPassed,
-      stale: true,
+      percent: 100,
+      reset: null,
+      stale: false,
     })
   })
 
@@ -414,10 +412,8 @@ describe('relative time', () => {
     expect(untilText('not-a-date', t, NOW)).toBe(zh.valueUnknown)
   })
 
-  it('names a reset that has already passed as its own state', () => {
-    // `untilText` answers "shortly" for a passed wall, which reads as a promise
-    // the window has already kept.
-    expect(resetText(at(-5), t, NOW)).toBe(zh.quotaResetPassed)
+  it('returns null for a reset that has already passed', () => {
+    expect(resetText(at(-5), t, NOW)).toBeNull()
     expect(resetText(at(120), t, NOW)).toBe(zh.quotaResetIn.replace('{value}', zh.relHours.replace('{n}', '2')))
     expect(resetText(null, t, NOW)).toBeNull()
     expect(resetText('not-a-date', t, NOW)).toBeNull()
@@ -471,8 +467,8 @@ describe('relative time', () => {
     )
 
     // Passed reset
-    expect(formatDetailedReset('5h', at(-5), t, NOW)).toBe(zh.quotaResetPassed)
-    expect(formatDetailedReset('weekly', at(-10), t, NOW)).toBe(zh.quotaResetPassed)
+    expect(formatDetailedReset('5h', at(-5), t, NOW)).toBeNull()
+    expect(formatDetailedReset('weekly', at(-10), t, NOW)).toBeNull()
 
     // Null or invalid reset
     expect(formatDetailedReset('5h', null, t, NOW)).toBeNull()
@@ -597,16 +593,14 @@ describe('account quota read and the shared rotation rule', () => {
     expect(accountQuotaRead(view, NOW, 'Claude and GPT models')).toEqual({ fiveHour: 1.0, weekly: 0 })
   })
 
-  it('withholds readings whose window already reset, and null stays null', () => {
+  it('treats readings whose window already reset as refilled to 100%, and null stays null', () => {
     const view = account({
       limits: [group('g', [
         window('h', '5h', 0, at(-30)),
         window('w', 'weekly', null, at(60)),
       ])],
     })
-    // A fraction from a period that already ended is not evidence, and an
-    // unmeasured window is unknown — neither may read as a live 0%.
-    expect(accountQuotaRead(view, NOW)).toEqual({ fiveHour: null, weekly: null })
+    expect(accountQuotaRead(view, NOW)).toEqual({ fiveHour: 1, weekly: null })
     expect(isAccountQuotaExhausted(view, NOW)).toBe(false)
     expect(isAccountQuotaExhausted(account(), NOW)).toBe(false)
     expect(isAccountQuotaExhausted(undefined, NOW)).toBe(false)
