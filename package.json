@@ -39,7 +39,7 @@
     }
   },
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=20.18.1"
   },
   "scripts": {
     "build": "tsdown",
@@ -80,7 +80,7 @@
   "dependencies": {
     "commander": "^14.0.0",
     "proper-lockfile": "^4.1.2",
-    "undici": "^8.12.3",
+    "undici": "^7.29.0",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
