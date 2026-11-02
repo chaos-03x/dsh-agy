@@ -1120,15 +1120,15 @@ export const AGY_STYLES_CSS = `
  *  removing the element there stripped every .agy-* style mid-session; the
  *  element is unique by id and inert once the section is gone. */
 export function installAgyStyles(): () => void {
-  if (typeof document === 'undefined') return () => {}
+  if (typeof document === 'undefined') return () => { }
   const existing = document.getElementById(STYLE_ID)
   if (existing !== null) {
     if (existing.textContent !== AGY_STYLES_CSS) existing.textContent = AGY_STYLES_CSS
-    return () => {}
+    return () => { }
   }
   const style = document.createElement('style')
   style.id = STYLE_ID
   style.textContent = AGY_STYLES_CSS
   document.head.appendChild(style)
-  return () => {}
+  return () => { }
 }
