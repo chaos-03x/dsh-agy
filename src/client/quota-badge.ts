@@ -97,6 +97,44 @@ export function nextSwitchableIndex(accounts: readonly AccountView[]): number | 
   return next.index === activeIndex ? null : next.index
 }
 
+export interface AccountOptionItem {
+  index: number
+  label: string
+  disabled: boolean
+}
+
+/**
+ * Build options for the popover account select dropdown.
+ *
+ * Lists all accounts in the pool. Non-active accounts that are disabled, cooling,
+ * or require verification are marked disabled in the select and tagged with their
+ * localized status suffix. The active account remains enabled so the select value
+ * accurately displays the current account.
+ */
+export function buildAccountSelectOptions(
+  accounts: readonly AccountView[],
+  activeAccountIndex: number | null,
+  t: QuotaTranslate,
+): AccountOptionItem[] {
+  return accounts.map((candidate) => {
+    const baseEmail = candidate.email ? desensitizeEmail(candidate.email) : `#${candidate.index}`
+    let suffix = ''
+    if (candidate.state === 'disabled') {
+      suffix = ` (${t('stateDisabled')})`
+    } else if (candidate.state === 'cooling') {
+      suffix = ` (${t('stateCooling')})`
+    } else if (candidate.state === 'verification-required') {
+      suffix = ` (${t('stateVerificationRequired')})`
+    }
+    const isSelectable = candidate.state === 'active' || candidate.index === activeAccountIndex
+    return {
+      index: candidate.index,
+      label: `${baseEmail}${suffix}`,
+      disabled: !isSelectable,
+    }
+  })
+}
+
 interface EnrichedWindow {
   bucketId: string
   label: string
@@ -175,13 +213,6 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const [now, setNow] = useState(() => Date.now())
   const [detailedReset, setDetailedReset] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // The account the PANEL displays, named by the popover's dropdown. It is a
-  // VIEW, not an activation: picking a row changes what this board shows and
-  // nothing else (zero RPC), and it follows the pool's active account
-  // automatically — rotation and the rotate arrow both move it (sync effect
-  // below).
-  const [viewIndex, setViewIndex] = useState<number | null>(null)
-  const viewIndexRef = useRef<number | null>(null)
 
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -313,7 +344,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       // Automatic ticks probe the active account.
       const resolvedTarget = targetIndex !== undefined
         ? targetIndex
-        : (isManual ? (viewIndexRef.current ?? activeIndex) : activeIndex)
+        : activeIndex
 
       // Quota badge only ever probes a single target account (the current viewed
       // account for manual refreshes, or the active account for automatic loads).
@@ -448,9 +479,42 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
    */
   const announceAccountChanged = (index: number): void => {
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('agy:account-changed', { detail: { index } }))
+      window.dispatchEvent(new CustomEvent('agy:account-changed', { detail: { index, source: 'badge' } }))
     }
   }
+
+  const activeAccount = accounts.find((a) => a.active) ?? accounts[0]
+  const activeIndex = activeAccount?.index ?? null
+
+  const handleActivateAccount = useCallback(async (targetIndex: number) => {
+    if (targetIndex === activeIndex && !isUpdating) return
+    setIsUpdating(true)
+    setError(null)
+    lastManualIndexRef.current = targetIndex
+
+    // Optimistically update the active account in local state so the badge and
+    // popover dropdown/cards switch in unison without waiting for network.
+    setAccounts((current) => current.map((account) => ({
+      ...account,
+      active: account.index === targetIndex,
+    })))
+
+    try {
+      await rpc.call('account.activate', { index: targetIndex })
+      announceAccountChanged(targetIndex)
+      await load(true, false, targetIndex)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      try {
+        const listed = await rpc.call('account.list', {})
+        setAccounts(listed.accounts)
+      } catch {
+        // preserve original error
+      }
+    } finally {
+      setIsUpdating(false)
+    }
+  }, [activeIndex, isUpdating, load, rpc])
 
   /**
    * Rotate the pool's active account forward one position (wrapping around),
@@ -460,34 +524,8 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   const handleSwitchNext = useCallback(async () => {
     const next = nextSwitchableIndex(accounts)
     if (next === null) return
-    setIsUpdating(true)
-    try {
-      await rpc.call('account.activate', { index: next })
-      // The activated account may see different windows; a forced reload reads
-      // them now rather than waiting out the limits cache TTL.
-      await load(true, false, next)
-      lastManualIndexRef.current = next
-      announceAccountChanged(next)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setIsUpdating(false)
-    }
-  }, [accounts, load, rpc])
-
-  /**
-   * Switch the pool's active account to the given index, then refresh its quota.
-   */
-  // The panel follows the pool's active account automatically: a rotation or
-  // a rotate-arrow switch both land here, so the board's current account is
-  // always the one the pool is serving (the user's manual view pick survives
-  // loads that do not change the active index).
-  const activeIndex = accounts.find((candidate) => candidate.active)?.index
-    ?? (accounts.length > 0 ? accounts[0]!.index : null)
-  useEffect(() => {
-    setViewIndex(activeIndex)
-    viewIndexRef.current = activeIndex
-  }, [activeIndex])
+    await handleActivateAccount(next)
+  }, [accounts, handleActivateAccount])
 
   // A manual pick is an explicit override: the user chose to sit on this
   // account, so the auto-rotate below must not bounce them off it until the
@@ -519,19 +557,27 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     if (next === null || next === active.index) return
     autoRotateAttemptedRef.current = true
     lastManualIndexRef.current = null
-    void (async () => {
-      setIsUpdating(true)
-      try {
-        await rpc.call('account.activate', { index: next })
-        announceAccountChanged(next)
-        await load(true, false, next)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      } finally {
-        setIsUpdating(false)
+    void handleActivateAccount(next)
+  }, [accounts, handleActivateAccount])
+
+  // Listen for account changes broadcast from other surfaces (e.g. Settings Accounts tab)
+  useEffect(() => {
+    const onAccountChanged = (e: Event): void => {
+      const detail = (e as CustomEvent<{ index?: number, source?: string }>).detail
+      if (!detail || detail.source === 'badge') return
+      if (typeof detail.index === 'number') {
+        const targetIndex = detail.index
+        setAccounts((current) => {
+          const currentActive = current.find((a) => a.active)?.index
+          if (currentActive === targetIndex) return current
+          return current.map((a) => ({ ...a, active: a.index === targetIndex }))
+        })
       }
-    })()
-  }, [accounts, load, rpc])
+      void load(false, false, detail.index)
+    }
+    window.addEventListener('agy:account-changed', onAccountChanged)
+    return () => { window.removeEventListener('agy:account-changed', onAccountChanged) }
+  }, [load])
 
   // Click-only popover: no hover open. The badge toggles open/close, while
   // the pin control inside the popover locks it against outside dismiss.
@@ -569,16 +615,15 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     setIsPinned(false)
   }
 
-  const activeAccount = accounts.find((a) => a.active) ?? accounts[0]
   const accountCount = accounts.length
   const rawDot = dotStateFor(accounts)
   const dotState = rawDot === 'done' ? 'active' : rawDot === 'warning' ? 'cooling' : 'disabled'
-  const viewAccount = accounts.find((candidate) => candidate.index === viewIndex) ?? activeAccount
+  const viewAccount = activeAccount
 
   const handleRefreshClick = async (e: { stopPropagation: () => void }) => {
     e.stopPropagation()
-    if (loading) return
-    const currentTarget = viewAccount?.index ?? activeIndex
+    if (loading || isUpdating) return
+    const currentTarget = activeAccount?.index ?? activeIndex
     if (currentTarget === undefined || currentTarget === null) return
     await load(true, false, currentTarget)
   }
@@ -675,16 +720,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     }
   }
 
-  // The picker lists every serviceable account. The viewed row joins even when
-  // the switch rules would exclude it (a disabled active row in an all-drained
-  // pool stays selectable-looking) so the select's value always has an option
-  // to show instead of rendering blank.
-  const selectOptions = viewAccount !== undefined
-    && switchableAccounts.some((candidate) => candidate.index === viewAccount.index)
-    ? switchableAccounts
-    : viewAccount
-      ? [viewAccount, ...switchableAccounts.filter((candidate) => candidate.index !== viewAccount.index)]
-      : switchableAccounts
+  const selectOptions = buildAccountSelectOptions(accounts, activeIndex, t)
 
   const rawCards = buildQuotaCards(viewAccount, t, now, detailedReset)
   // Each card is an upstream group (e.g. Gemini, Claude+GPT). The 5h bar turns
@@ -758,8 +794,21 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
             },
             h(
               'svg',
-              { width: '13', height: '13', viewBox: '0 0 24 24', fill: isPinned ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: '2' },
-              h('path', { d: 'M12 2v8m0 0l3-3m-3 3L9 7M5 10h14a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 1 2-2zM12 15v7' }),
+              {
+                width: '13',
+                height: '13',
+                viewBox: '0 0 24 24',
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: '2',
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              },
+              h('line', { x1: '12', y1: '17', x2: '12', y2: '22' }),
+              h('path', {
+                d: 'M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z',
+                fill: isPinned ? 'currentColor' : 'none',
+              }),
             ),
           )
           : null,
@@ -816,26 +865,29 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         ? h(
           'div',
           { className: 'agy-ui-account-card' },
-          // The account picker directly replaces the static email text in
-          // the card's top slot: selecting an account changes the viewed
-          // row and nothing else (zero RPC).
           h(
             'select',
             {
               className: 'agy-ui-account-select',
-              value: String(viewAccount.index),
+              value: String(activeIndex ?? ''),
+              disabled: isUpdating || loading,
               title: t('badgeAccountView'),
               'aria-label': t('badgeAccountView'),
               onChange: (event: { target: { value: string } }) => {
                 const val = Number(event.target.value)
-                viewIndexRef.current = val
-                setViewIndex(val)
+                if (!Number.isNaN(val)) {
+                  void handleActivateAccount(val)
+                }
               },
             },
-            selectOptions.map((candidate) =>
+            selectOptions.map((opt) =>
               h('option',
-                { key: candidate.index, value: String(candidate.index) },
-                candidate.email ? desensitizeEmail(candidate.email) : `#${candidate.index}`)),
+                {
+                  key: opt.index,
+                  value: String(opt.index),
+                  disabled: opt.disabled,
+                },
+                opt.label)),
           ),
           h(
             'div',

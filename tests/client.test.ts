@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, it, describe, vi } from 'vitest'
 import { apply, canActivateAccount, orderModels, resolveSelectedAccountIndex, throughputTokenPerSecond, tokenText, truncateIdentity } from '../src/client/index.ts'
-import { AgyQuotaBadge, nextSwitchableIndex } from '../src/client/quota-badge.ts'
+import { AgyQuotaBadge, buildAccountSelectOptions, nextSwitchableIndex } from '../src/client/quota-badge.ts'
 import { h } from '../src/client/element.ts'
 import { installAgyStyles, AGY_STYLES_CSS, ALIAS_FALLBACKS } from '../src/client/styles.ts'
 import { en, zh } from '../src/client/locales.ts'
@@ -738,5 +738,83 @@ describe('nextSwitchableIndex', () => {
     expect(nextSwitchableIndex([])).toBeNull()
     // Two disabled accounts + one active-looking-but-disabled edge: still null.
     expect(nextSwitchableIndex([view(0, 'disabled', true), view(1, 'disabled')])).toBeNull()
+  })
+})
+
+
+describe('buildAccountSelectOptions', () => {
+  const view = (index: number, state: AccountView['state'], active = false): AccountView => ({
+    index,
+    email: `user${index}@example.com`,
+    state,
+    active,
+  }) as AccountView
+
+  const t: QuotaTranslate = (key: string) => (zh as Record<string, string>)[key] ?? key
+
+  it('renders all accounts and disables non-active cooling/disabled/verification rows with suffixes', () => {
+    const accounts = [
+      view(0, 'active', true),
+      view(1, 'cooling', false),
+      view(2, 'disabled', false),
+      view(3, 'verification-required', false),
+      view(4, 'active', false),
+    ]
+
+    const options = buildAccountSelectOptions(accounts, 0, t)
+    expect(options).toHaveLength(5)
+
+    // Active account
+    expect(options[0]).toEqual({
+      index: 0,
+      label: 'us***@example.com',
+      disabled: false,
+    })
+
+    // Cooling account
+    expect(options[1]).toEqual({
+      index: 1,
+      label: 'us***@example.com (冷却中)',
+      disabled: true,
+    })
+
+    // Disabled account
+    expect(options[2]).toEqual({
+      index: 2,
+      label: 'us***@example.com (已停用)',
+      disabled: true,
+    })
+
+    // Verification-required account
+    expect(options[3]).toEqual({
+      index: 3,
+      label: 'us***@example.com (待验证)',
+      disabled: true,
+    })
+
+    // Another active account (not currently active, but selectable)
+    expect(options[4]).toEqual({
+      index: 4,
+      label: 'us***@example.com',
+      disabled: false,
+    })
+  })
+
+  it('allows an active account to stay selectable even when cooling', () => {
+    const accounts = [
+      view(0, 'cooling', true),
+      view(1, 'active', false),
+    ]
+    const options = buildAccountSelectOptions(accounts, 0, t)
+    expect(options[0]).toEqual({
+      index: 0,
+      label: 'us***@example.com (冷却中)',
+      disabled: false,
+    })
+    expect(options[1]).toEqual({
+      index: 1,
+      label: 'us***@example.com',
+      disabled: false,
+    })
   })
 })

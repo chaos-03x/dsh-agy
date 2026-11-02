@@ -2852,6 +2852,7 @@ export function AgySettings(props: {
     t,
     onActivate: (index) => {
       void act(() => rpc.call('account.activate', { index })).then(() => {
+        window.dispatchEvent(new CustomEvent('agy:account-changed', { detail: { index } }))
         // The activated account may carry a different catalog: reload the model
         // list now (also clearing a stale model error) instead of leaving the
         // Models tab showing the previous account's models until a remount.
