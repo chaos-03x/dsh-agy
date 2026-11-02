@@ -22,11 +22,14 @@ import { h } from './element.ts'
 import { aliasVar, installAgyStyles } from './styles.ts'
 import {
   accountQuotaRead,
+  accountRecoveryTime,
   agoText,
   barColorFor,
   buildQuotaCards,
   desensitizeEmail,
   dotStateFor,
+  formatDetailedReset,
+  isAccountAllQuotaExhausted,
   isAccountQuotaExhausted,
   limitsOlderThanInterval,
   modelLabelForGroup,
@@ -34,6 +37,7 @@ import {
   pickBadgeQuota,
   resolveQuotaGroup,
   shouldProbeLimits,
+  smartQuotaVerdict,
   toPercent,
   windowLabel,
   type QuotaTranslate,
@@ -45,6 +49,7 @@ import {
   DEFAULT_BADGE_SKIP_ZERO_WEEKLY,
   DEFAULT_BADGE_WINDOW_TYPE,
   DEFAULT_QUOTA_REFRESH_MINUTES,
+  DEFAULT_SMART_MODE,
   type BadgeWindowType,
 } from '../ui-prefs-types.ts'
 import type { QuotaWindow } from '../types.ts'
@@ -185,6 +190,21 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   // never. The state defaults to the shipped interval so the timer runs before
   // the first prefs read lands.
   const [refreshMinutes, setRefreshMinutes] = useState<number | null>(DEFAULT_QUOTA_REFRESH_MINUTES)
+  // Smart mode: pause the automatic cadence while the ACTIVE account has no
+  // usable window (every measured group exhausted). The ref mirrors the state
+  // for the load callback, which must read it without re-joining its identity
+  // to every prefs save.
+  const [smartMode, setSmartMode] = useState<boolean>(DEFAULT_SMART_MODE)
+  const smartModeRef = useRef<boolean>(DEFAULT_SMART_MODE)
+  // When the paused cadence re-opens (Unix ms), or null while running. State
+  // drives the popover's recovery note; the ref is what the load path and the
+  // render tick read. Set together, always.
+  const [pausedUntil, setPausedUntil] = useState<number | null>(null)
+  const pausedUntilRef = useRef<number | null>(null)
+  const setPause = useCallback((until: number | null): void => {
+    pausedUntilRef.current = until
+    setPausedUntil(until)
+  }, [])
   const [badgeDetailedMode, setBadgeDetailedMode] = useState<boolean>(DEFAULT_BADGE_DETAILED_MODE)
   const [badgeModelGroup, setBadgeModelGroup] = useState<string>(DEFAULT_BADGE_MODEL_GROUP)
   const [badgeWindowType, setBadgeWindowType] = useState<BadgeWindowType>(DEFAULT_BADGE_WINDOW_TYPE)
@@ -205,6 +225,14 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         }
         if (detail.quotaRefreshMinutes !== undefined) {
           setRefreshMinutes(detail.quotaRefreshMinutes)
+          // Smart mode is scoped to auto-refresh being ON: turning the interval
+          // off ends any pause, or a "never" pool would stay frozen with no
+          // timer left to re-open it.
+          if (detail.quotaRefreshMinutes === null) setPause(null)
+        }
+        if (typeof detail.smartMode === 'boolean') {
+          setSmartMode(detail.smartMode)
+          smartModeRef.current = detail.smartMode
         }
         if (typeof detail.badgeDetailedMode === 'boolean') {
           setBadgeDetailedMode(detail.badgeDetailedMode)
@@ -225,10 +253,19 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       window.removeEventListener('resize', checkMobile)
       window.removeEventListener('agy:ui-prefs-changed', onPrefsChange)
     }
-  }, [])
+  }, [setPause])
 
   const load = useCallback(async (isManual: boolean = false, forceProbe: boolean = false) => {
     const currentNow = Date.now()
+    // Smart pause holds BEFORE any RPC: a paused tick is free — no account
+    // read, no limits probe, nothing. A manual load overrides (and clears) the
+    // pause: the click IS the user asking for numbers. The pause re-opens
+    // through the render tick at the promised recovery moment.
+    if (!isManual && smartModeRef.current && refreshMinutes !== null && pausedUntilRef.current !== null) {
+      if (currentNow < pausedUntilRef.current) return
+      setPause(null)
+    }
+    if (isManual) setPause(null)
     // The configured interval is the throttle's floor: a 1-minute setting must
     // not be swallowed by the 2-minute wake guard. "Never" keeps the plain
     // guard so a wake refresh cannot stack onto a fresh one.
@@ -251,6 +288,8 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       if (prefs) {
         setDetailedReset(prefs.detailedQuotaReset === true)
         setRefreshMinutes(prefs.quotaRefreshMinutes)
+        setSmartMode(prefs.smartMode ?? DEFAULT_SMART_MODE)
+        smartModeRef.current = prefs.smartMode ?? DEFAULT_SMART_MODE
         setBadgeDetailedMode(prefs.badgeDetailedMode === true)
         setBadgeModelGroup(prefs.badgeModelGroup ?? DEFAULT_BADGE_MODEL_GROUP)
         setBadgeWindowType(prefs.badgeWindowType ?? DEFAULT_BADGE_WINDOW_TYPE)
@@ -258,16 +297,29 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       }
       setError(null)
 
+      // The active account: the pool serves it, so the AUTOMATIC refresh
+      // watches it and nothing else — other rows are measured when their own
+      // surface opens them, not on a cadence nobody is looking at.
+      const activeIndex = listed.accounts.find((candidate) => candidate.active)?.index
+        ?? (listed.accounts.length > 0 ? listed.accounts[0]!.index : null)
+      const automatic = !isManual && activeIndex !== null
+
       // The configured interval is the FRESHNESS BOUND of every automatic load,
       // not just the timer's cadence: a mount or a window-wake that finds a
       // snapshot older than the interval force-probes instead of serving the
       // host's longer-TTL cache — that longer TTL is how the board could show a
-      // reading minutes older than the setting promises. Accounts never
+      // reading minutes older than the setting promises. The test reads the set
+      // that will actually be probed (the active account only, under the
+      // narrowed automatic load): forcing because ANOTHER row is old would
+      // spend a forced probe the narrowed call never answers. Accounts never
       // measured stay out of this rule: the host's own non-forced pass already
       // probes those immediately.
+      const probedAccounts = automatic
+        ? listed.accounts.filter((account) => account.index === activeIndex)
+        : listed.accounts
       const staleBeyondInterval = !isManual && !forceProbe && refreshMinutes !== null
         && limitsOlderThanInterval(
-          listed.accounts
+          probedAccounts
             // A disabled row's windows are frozen (the host never re-measures
             // one), so its age is not evidence the POOL's data went stale —
             // counting it would force-probe the enabled accounts on every load.
@@ -283,7 +335,9 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       // automatic load for the next ten minutes.
       const decision: 'force' | 'auto' | 'off' = base === 'auto' && staleBeyondInterval ? 'force' : base
       if (decision !== 'off') {
-        const limits = await rpc.call('account.limits', decision === 'force' ? { force: true } : {})
+        const payload: { force?: boolean, index?: number } = decision === 'force' ? { force: true } : {}
+        if (automatic) payload.index = activeIndex!
+        const limits = await rpc.call('account.limits', payload)
         const byIndex = new Map(limits.limits.map((entry) => [entry.index, entry]))
         setAccounts((current) => current.map((account) => {
           const entry = byIndex.get(account.index)
@@ -292,6 +346,29 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
             : { ...account, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
         }))
         failedAtRef.current = limits.measured === 0 && limits.failed > 0 ? Date.now() : null
+
+        // Smart pause, judged from the data THIS probe just brought back: the
+        // observation and its confirmation are the same call, so pausing costs
+        // no extra upstream spend. Every measured group of the active account
+        // drained (weekly 0%, or all models' 5h 0%, or a mix — any shape where
+        // NO model is usable) closes the cadence until the earliest group's
+        // reset; ONE group becoming usable is what re-opens it. A recovery the
+        // data cannot promise (no usable reset moment) keeps the regular
+        // cadence — a pause with no end would freeze the board on stale data.
+        if (automatic && smartModeRef.current && refreshMinutes !== null) {
+          const entry = byIndex.get(activeIndex!)
+          const row = probedAccounts.find((account) => account.index === activeIndex)
+          if (entry?.groups && row) {
+            const freshNow = Date.now()
+            const freshView = { ...row, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
+            if (isAccountAllQuotaExhausted(freshView, freshNow)) {
+              const recoverAt = accountRecoveryTime(freshView, freshNow)
+              if (recoverAt !== null) setPause(recoverAt)
+            } else {
+              setPause(null)
+            }
+          }
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -302,11 +379,23 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         setIsUpdating(false)
       }, 1200)
     }
-  }, [rpc, refreshMinutes])
+  }, [rpc, refreshMinutes, setPause])
 
   useEffect(() => {
     void load(false)
-    const tick = window.setInterval(() => setNow(Date.now()), RENDER_TICK_MS)
+    const tick = window.setInterval(() => {
+      setNow(Date.now())
+      // The paused cadence re-opens at the promised recovery moment: this tick
+      // is already the fastest clock the badge runs (it drives the countdown
+      // text), so the resumed probe lands within one 5s tick of the reset —
+      // without a second timer and without polling while paused (the load
+      // itself refuses RPCs until here).
+      const until = pausedUntilRef.current
+      if (until !== null && refreshMinutes !== null && Date.now() >= until && document.visibilityState !== 'hidden') {
+        setPause(null)
+        void load(false, true)
+      }
+    }, RENDER_TICK_MS)
     const onWake = (): void => {
       if (document.visibilityState !== 'hidden') void load(false)
     }
@@ -317,7 +406,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       window.removeEventListener('focus', onWake)
       document.removeEventListener('visibilitychange', onWake)
     }
-  }, [load])
+  }, [load, refreshMinutes, setPause])
 
   // The user-configured auto-refresh: a load on a timer, honouring the
   // interval the Settings card stores (default 5 minutes; "never" mounts no
@@ -789,6 +878,20 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
 
       cards.length === 0
         ? h('div', { className: 'agy-ui-window-note' }, t('badgeNoQuotaData'))
+        : null,
+
+      // Smart pause note. The {time} string carries the absolute wall-clock
+      // moment AND a minute-precision countdown, recomputed from `now` — which
+      // this popover's renders already refresh on the 5s render tick — so the
+      // countdown stays live without any timer of its own.
+      pausedUntil !== null
+        ? h(
+            'div',
+            { className: 'agy-ui-window-note' },
+            t('smartPausedNote', {
+              time: formatDetailedReset('5h', new Date(pausedUntil).toISOString(), t, now) ?? '—',
+            }),
+          )
         : null,
 
       limitsAge ? h('div', { className: 'agy-ui-limit-age' }, t('badgeMeasuredAt', { time: limitsAge })) : null,

@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   accountQuotaRead,
+  accountRecoveryTime,
   agoText,
   barColorFor,
   buildQuotaCards,
@@ -18,7 +19,9 @@ import {
   drainThresholdFor,
   formatDetailedReset,
   formatQuotaReset,
+  isAccountAllQuotaExhausted,
   isAccountQuotaExhausted,
+  isGroupQuotaExhausted,
   limitsOlderThanInterval,
   modelLabelForGroup,
   nextHealthyIndex,
@@ -29,6 +32,7 @@ import {
   resetText,
   resolveQuotaGroup,
   shouldProbeLimits,
+  smartQuotaVerdict,
   sortWindows,
   stateLabel,
   toPercent,
@@ -646,6 +650,169 @@ describe('account quota read and the shared rotation rule', () => {
       [fiveHourDrained(0, { active: true }), healthy(1, { state: 'disabled', active: false })],
       NOW,
     )).toBeNull()
+  })
+})
+
+describe('smart pause verdicts', () => {
+  /**
+   * The smart-mode question is the POOL-WIDE one — "can ANY model serve" — so
+   * these helpers read EVERY measured group, unlike `isAccountQuotaExhausted`
+   * above, which watches the one group the badge displays.
+   */
+  it('judges a group exhausted only on a live 0% of a window the pool blocks on', () => {
+    expect(isGroupQuotaExhausted(group('g', [
+      window('h', '5h', 0, at(60)),
+      window('w', 'weekly', 0, at(5000)),
+    ]), NOW)).toBe(true)
+    // Weekly 0% alone exhausts the group too.
+    expect(isGroupQuotaExhausted(group('g', [
+      window('h', '5h', 0.8, at(60)),
+      window('w', 'weekly', 0, at(5000)),
+    ]), NOW)).toBe(true)
+    // The pool blocks on EITHER window — its own isFamilyQuotaExhausted rule —
+    // so a spent 5h window exhausts the group even with weekly runway left.
+    expect(isGroupQuotaExhausted(group('g', [
+      window('h', '5h', 0, at(60)),
+      window('w', 'weekly', 0.1, at(5000)),
+    ]), NOW)).toBe(true)
+    // A group with no drained window at all is servable.
+    expect(isGroupQuotaExhausted(group('g', [
+      window('h', '5h', 0.8, at(60)),
+      window('w', 'weekly', 0.1, at(5000)),
+    ]), NOW)).toBe(false)
+    // daily/monthly never block the pool, so their 0% is display-only.
+    expect(isGroupQuotaExhausted(group('g', [window('d', 'daily', 0, at(60))]), NOW)).toBe(false)
+    // A 0% from a period that already ended is not evidence.
+    expect(isGroupQuotaExhausted(group('g', [window('h', '5h', 0, at(-30))]), NOW)).toBe(false)
+    // Unmeasured is unknown, not spent.
+    expect(isGroupQuotaExhausted(group('g', [window('h', '5h', null, at(60))]), NOW)).toBe(false)
+  })
+
+  it('pauses only when EVERY measured group is unusable, and unmeasured is never exhausted', () => {
+    const allDrained = account({
+      limits: [
+        group('Gemini Models', [window('h', '5h', 0, at(60)), window('w', 'weekly', 0, at(5000))]),
+        group('Claude and GPT models', [window('3p-h', '5h', 0, at(90))]),
+      ],
+    })
+    expect(isAccountAllQuotaExhausted(allDrained, NOW)).toBe(true)
+    // One group with a usable window still has a model to route to.
+    const oneUsable = account({
+      limits: [
+        group('Gemini Models', [window('h', '5h', 0, at(60)), window('w', 'weekly', 0, at(5000))]),
+        group('Claude and GPT models', [window('3p-h', '5h', 0.5, at(90))]),
+      ],
+    })
+    expect(isAccountAllQuotaExhausted(oneUsable, NOW)).toBe(false)
+    // Never measured is unknown — pausing on it would freeze the board on nothing.
+    expect(isAccountAllQuotaExhausted(account(), NOW)).toBe(false)
+    expect(isAccountAllQuotaExhausted(account({ limits: [] }), NOW)).toBe(false)
+    expect(isAccountAllQuotaExhausted(undefined, NOW)).toBe(false)
+    // A disabled row cannot serve either — but only when it IS measured, so the
+    // shape of the answer stays "known unusable", not "no data".
+    expect(isAccountAllQuotaExhausted(account({
+      state: 'disabled',
+      limits: [group('g', [window('h', '5h', 0.9, at(60))])],
+    }), NOW)).toBe(true)
+  })
+
+  it('promises recovery at the earliest usable group, whose reset is the max of its drained windows', () => {
+    // Group A: both windows drained — usable when the LATER one resets (the
+    // week). Group B: only the 5h drained — usable at its own reset. The
+    // account is back the moment the FIRST group returns, so B's 30 minutes.
+    const mixed = account({
+      limits: [
+        group('Gemini Models', [
+          window('h', '5h', 0, at(60)),
+          window('w', 'weekly', 0, at(5000)),
+        ]),
+        group('Claude and GPT models', [window('3p-h', '5h', 0, at(30))]),
+      ],
+    })
+    expect(accountRecoveryTime(mixed, NOW)).toBe(NOW + 30 * 60_000)
+
+    // One drained account, one exhausted group: usable when its later window resets.
+    const single = account({
+      limits: [group('g', [
+        window('h', '5h', 0, at(20)),
+        window('w', 'weekly', 0, at(5000)),
+      ])],
+    })
+    expect(accountRecoveryTime(single, NOW)).toBe(NOW + 5000 * 60_000)
+
+    // The shape upstream actually reports on a spent week: weekly 0% blocks the
+    // family even while the 5h window still has runway, so the group's recovery
+    // waits for the WEEK — the 5h reading does not shorten the wait, and the
+    // pause must not end at the earlier 5h reset only to re-pause.
+    const weeklyOnly = account({
+      limits: [group('g', [
+        window('h', '5h', 0.8, at(20)),
+        window('w', 'weekly', 0, at(5000)),
+      ])],
+    })
+    expect(isAccountAllQuotaExhausted(weeklyOnly, NOW)).toBe(true)
+    expect(accountRecoveryTime(weeklyOnly, NOW)).toBe(NOW + 5000 * 60_000)
+
+    // A group that is not exhausted at all makes the account usable NOW.
+    const oneUsable = account({
+      limits: [
+        group('Gemini Models', [window('h', '5h', 0.3, at(60))]),
+        group('Claude and GPT models', [window('3p-h', '5h', 0, at(30))]),
+      ],
+    })
+    expect(accountRecoveryTime(oneUsable, NOW)).toBe(NOW)
+  })
+
+  it('never promises a pause without an end: unusable resets keep the regular cadence', () => {
+    // A 0% window with no reset moment at all cannot promise when it returns.
+    const noReset = account({
+      limits: [group('g', [window('h', '5h', 0, null)])],
+    })
+    expect(accountRecoveryTime(noReset, NOW)).toBeNull()
+
+    // A reset moment that cannot be parsed counts as PASSED (the shared
+    // stale-reading rule), so the group reads usable and the answer is now —
+    // the one shape where "unknown reset" means resume rather than never pause.
+    const badReset = account({
+      limits: [group('g', [window('h', '5h', 0, 'not-a-date')])],
+    })
+    expect(accountRecoveryTime(badReset, NOW)).toBe(NOW)
+
+    // The unpromisable group is skipped when ANOTHER group does promise.
+    const partiallyPromised = account({
+      limits: [
+        group('Gemini Models', [window('h', '5h', 0, null)]),
+        group('Claude and GPT models', [window('3p-h', '5h', 0, at(45))]),
+      ],
+    })
+    expect(accountRecoveryTime(partiallyPromised, NOW)).toBe(NOW + 45 * 60_000)
+
+    // And nothing measured promises nothing.
+    expect(accountRecoveryTime(account(), NOW)).toBeNull()
+    expect(accountRecoveryTime(undefined, NOW)).toBeNull()
+  })
+
+  it('reads the verdict from the ACTIVE account, falling back to the first row', () => {
+    const drainedActive = account({
+      index: 2,
+      active: true,
+      limits: [group('g', [window('h', '5h', 0, at(60))])],
+    })
+    const idleHealthy = account({ index: 5, active: false, limits: [group('g', [window('h', '5h', 0.9, at(60))])] })
+
+    const verdict = smartQuotaVerdict([drainedActive, idleHealthy], NOW)
+    expect(verdict.index).toBe(2)
+    expect(verdict.exhausted).toBe(true)
+    expect(verdict.recoverAt).toBe(NOW + 60 * 60_000)
+
+    // No active row marked: the first account is what the pool would serve.
+    const fallback = smartQuotaVerdict([idleHealthy], NOW)
+    expect(fallback.index).toBe(5)
+    expect(fallback.exhausted).toBe(false)
+    expect(fallback.recoverAt).toBe(NOW)
+
+    // An empty pool has no subject and pauses nothing.
+    expect(smartQuotaVerdict([], NOW)).toEqual({ index: null, exhausted: false, recoverAt: null })
   })
 })
 

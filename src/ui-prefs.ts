@@ -15,6 +15,7 @@ import {
   DEFAULT_BADGE_MODEL_GROUP,
   DEFAULT_BADGE_SKIP_ZERO_WEEKLY,
   DEFAULT_BADGE_WINDOW_TYPE,
+  DEFAULT_SMART_MODE,
   quotaRefreshMinutesView,
   sanitizeQuotaRefreshMinutes,
 } from './ui-prefs-types.ts'
@@ -52,6 +53,9 @@ export function sanitizeUiPrefs(raw: unknown): UiPrefsDocument {
   if (typeof obj.badgeSkipZeroWeekly === 'boolean') {
     doc.badgeSkipZeroWeekly = obj.badgeSkipZeroWeekly
   }
+  if (typeof obj.smartMode === 'boolean') {
+    doc.smartMode = obj.smartMode
+  }
   return doc
 }
 
@@ -87,6 +91,7 @@ export class UiPrefsStore {
       badgeModelGroup: this.doc.badgeModelGroup ?? DEFAULT_BADGE_MODEL_GROUP,
       badgeWindowType: this.doc.badgeWindowType ?? DEFAULT_BADGE_WINDOW_TYPE,
       badgeSkipZeroWeekly: this.doc.badgeSkipZeroWeekly ?? DEFAULT_BADGE_SKIP_ZERO_WEEKLY,
+      smartMode: this.doc.smartMode ?? DEFAULT_SMART_MODE,
     }
   }
 
@@ -101,6 +106,7 @@ export class UiPrefsStore {
       ...(this.doc.badgeModelGroup !== undefined ? { badgeModelGroup: this.doc.badgeModelGroup } : {}),
       ...(this.doc.badgeWindowType !== undefined ? { badgeWindowType: this.doc.badgeWindowType } : {}),
       ...(this.doc.badgeSkipZeroWeekly !== undefined ? { badgeSkipZeroWeekly: this.doc.badgeSkipZeroWeekly } : {}),
+      ...(this.doc.smartMode !== undefined ? { smartMode: this.doc.smartMode } : {}),
     }
     if (typeof prefs.conversationBadge === 'boolean') {
       next.conversationBadge = prefs.conversationBadge
@@ -123,6 +129,9 @@ export class UiPrefsStore {
     }
     if (typeof prefs.badgeSkipZeroWeekly === 'boolean') {
       next.badgeSkipZeroWeekly = prefs.badgeSkipZeroWeekly
+    }
+    if (typeof prefs.smartMode === 'boolean') {
+      next.smartMode = prefs.smartMode
     }
     this.write(next)
     this.doc = next

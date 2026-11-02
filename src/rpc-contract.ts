@@ -257,6 +257,8 @@ export interface AgyRpcMethods {
     result: { recent: RecentRequestView[] }
   }
   'account.activate': { payload: { index: number }; result: { ok: true; index: number } }
+  /** Manually lift a cooling account's cooldown and rate-limit walls. */
+  'account.recover': { payload: { index: number }; result: { ok: true; index: number } }
   'account.delete': { payload: { index: number }; result: { ok: true } }
   'account.verify': { payload: { index: number }; result: { ok: boolean; email?: string; error?: string } }
   'account.health': { payload: { indices?: number[] }; result: { results: unknown[] } }

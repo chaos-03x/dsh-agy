@@ -31,7 +31,7 @@ import { aliasVar, installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
-import { accountQuotaRead, agoText, barColorFor, formatQuotaReset, limitsOlderThanInterval, stateLabel, untilText, windowLabel, MINUTE_MS } from './quota-view.ts'
+import { accountQuotaRead, accountRecoveryTime, agoText, barColorFor, formatDetailedReset, formatQuotaReset, isAccountAllQuotaExhausted, limitsOlderThanInterval, stateLabel, untilText, windowLabel, MINUTE_MS } from './quota-view.ts'
 import type { AccountView, AgyRpcClient, AgyRpcResult, ModelRoutingTarget, ModelRoutingView, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
@@ -41,6 +41,7 @@ import {
   DEFAULT_BADGE_SKIP_ZERO_WEEKLY,
   DEFAULT_BADGE_WINDOW_TYPE,
   DEFAULT_QUOTA_REFRESH_MINUTES,
+  DEFAULT_SMART_MODE,
   QUOTA_REFRESH_MAX_MINUTES,
   QUOTA_REFRESH_MIN_MINUTES,
   type BadgeWindowType,
@@ -450,6 +451,8 @@ interface AccountHandlers {
   /** Localized copy, resolved per render so a language switch applies. */
   t: T
   onActivate: (index: number) => void
+  /** Lift a cooling account's cooldown and rate-limit walls (manual recovery). */
+  onRecover: (index: number) => void
   onVerify: (index: number) => void
   onDelete: (index: number) => void
   onTest: (index: number) => void
@@ -566,6 +569,9 @@ function AccountDetail(props: {
   // destructive one.
   const actions = card(t('colActions'), h('div', { className: 'agy-actions' },
     button(t('actionTest'), () => { handlers.onTest(account.index) }, { disabled: busy }),
+    account.state === 'cooling'
+      ? button(t('actionRecover'), () => { handlers.onRecover(account.index) }, { disabled: busy })
+      : null,
     button(t('actionExport'), () => { handlers.onExport(account.index) }, { disabled: busy }),
     button(t('actionRegenerateFingerprint'), () => { handlers.onRegenerateFingerprint(account.index) }, { disabled: busy }),
     button(t('actionDelete'), () => { handlers.onDelete(account.index) }, { variant: 'danger', disabled: busy })))
@@ -723,6 +729,9 @@ function PreferencesCard(props: {
   const [badgeModelGroup, setBadgeModelGroup] = useState<string>(DEFAULT_BADGE_MODEL_GROUP)
   const [badgeWindowType, setBadgeWindowType] = useState<BadgeWindowType>(DEFAULT_BADGE_WINDOW_TYPE)
   const [badgeSkipZeroWeekly, setBadgeSkipZeroWeekly] = useState(DEFAULT_BADGE_SKIP_ZERO_WEEKLY)
+  // Smart mode: scope the auto-refresh to the current account and pause it
+  // while no model is usable. Shown only while the interval is on (below).
+  const [smartMode, setSmartMode] = useState(DEFAULT_SMART_MODE)
   // Auto quota-refresh: null = never. The draft is the input's own text state;
   // it commits on blur/Enter so typing "1" mid-way toward "15" does not save 1.
   const [refreshMinutes, setRefreshMinutes] = useState<number | null>(DEFAULT_QUOTA_REFRESH_MINUTES)
@@ -735,6 +744,18 @@ function PreferencesCard(props: {
   useEffect(() => () => {
     if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
   }, [])
+
+  // The load effect must run ONCE per mount — its only purpose is seeding the
+  // card's state from storage. `onDetailedPrefChange` is a callback PROP that
+  // the section recreates on every render (it re-renders on its 3s pool poll),
+  // and keying this effect on the callback's identity re-fetched the prefs and
+  // reset the interval input's DRAFT to the stored value mid-typing: the box
+  // visibly jumped back to 5 while a new interval was being typed. Route the
+  // callback through a ref so a new identity cannot re-run the load.
+  const detailedPrefRef = useRef(onDetailedPrefChange)
+  useEffect(() => {
+    detailedPrefRef.current = onDetailedPrefChange
+  })
 
   useEffect(() => {
     let active = true
@@ -749,14 +770,15 @@ function PreferencesCard(props: {
         setBadgeModelGroup(prefs?.badgeModelGroup ?? DEFAULT_BADGE_MODEL_GROUP)
         setBadgeWindowType(prefs?.badgeWindowType ?? DEFAULT_BADGE_WINDOW_TYPE)
         setBadgeSkipZeroWeekly(prefs?.badgeSkipZeroWeekly ?? DEFAULT_BADGE_SKIP_ZERO_WEEKLY)
-        onDetailedPrefChange?.(prefs?.detailedQuotaReset === true)
+        setSmartMode(prefs?.smartMode ?? DEFAULT_SMART_MODE)
+        detailedPrefRef.current?.(prefs?.detailedQuotaReset === true)
         setLoading(false)
       }
     }).catch(() => {
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [rpc, onDetailedPrefChange])
+  }, [rpc])
 
   const toggleBadge = useCallback(async (checked: boolean) => {
     setSaving(true)
@@ -884,6 +906,26 @@ function PreferencesCard(props: {
     }
   }, [rpc, t])
 
+  const toggleSmartMode = useCallback(async (checked: boolean) => {
+    setSaving(true)
+    setSmartMode(checked)
+    if (errorTimer.current !== undefined) clearTimeout(errorTimer.current)
+    try {
+      const res = await rpc.call('ui.prefs.set', { smartMode: checked })
+      setSmartMode(res.smartMode)
+      setSaveError(null)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agy:ui-prefs-changed', { detail: res }))
+      }
+    } catch (err) {
+      setSmartMode(!checked)
+      setSaveError(t('prefSaveFailed', { message: err instanceof Error ? err.message : String(err) }))
+      errorTimer.current = setTimeout(() => setSaveError(null), ACTION_MESSAGE_TTL_MS)
+    } finally {
+      setSaving(false)
+    }
+  }, [rpc, t])
+
   const saveRefreshMinutes = useCallback(async (minutes: number | null) => {
     setSaving(true)
     const prev = refreshMinutes
@@ -982,6 +1024,21 @@ function PreferencesCard(props: {
           disabled: loading || saving,
           onChange: (checked: boolean) => void toggleAutoRefresh(checked),
         }))),
+    // Smart mode only exists while the interval runs: with auto-refresh off
+    // there is no cadence to scope or pause, so the row would promise a
+    // behavior nothing can observe.
+    refreshMinutes !== null
+      ? h('div', { className: 'agy-pref-row', key: 'smartMode' },
+          h('div', { className: 'agy-pref-info' },
+            h('div', { className: 'agy-pref-name' }, t('prefSmartMode')),
+            h('div', { className: 'agy-pref-desc' }, t('prefSmartModeDesc'))),
+          h(Switch, {
+            label: t('prefSmartMode'),
+            checked: smartMode,
+            disabled: loading || saving,
+            onChange: (checked: boolean) => void toggleSmartMode(checked),
+          }))
+      : null,
     h('div', { className: 'agy-pref-row', key: 'badge' },
       h('div', { className: 'agy-pref-info' },
         h('div', { className: 'agy-pref-name' }, t('prefConversationBadge')),
@@ -1067,6 +1124,12 @@ function AccountsTab(props: {
   lang?: string
   t: T
   detailedQuotaReset?: boolean
+  /**
+   * When smart mode has parked the automatic quota cadence (Unix ms), or null.
+   * Rendered as a note; the countdown inside recomputes on renders the pool
+   * poll already drives.
+   */
+  smartPausedUntil?: number | null
   onBadgePrefChange?: (enabled: boolean) => void
   onDetailedPrefChange?: (enabled: boolean) => void
 }): ReactNode {
@@ -1161,6 +1224,11 @@ function AccountsTab(props: {
       setSelected(at)
       handlers.onActivate(account.index)
     }, { size: 'sm', disabled: busy }) : null,
+    // A cooling row's park is a backoff, not a verdict — the reader must be
+    // able to override it the moment they believe upstream recovered.
+    account.state === 'cooling'
+      ? button(t('actionRecover'), () => { handlers.onRecover(account.index) }, { size: 'sm', disabled: busy })
+      : null,
     button(t('actionVerify'), () => { handlers.onVerify(account.index) }, { size: 'sm', disabled: busy }))))
 
   return h('div', { className: 'agy-root' },
@@ -1171,6 +1239,16 @@ function AccountsTab(props: {
         card(t('colAccount'),
           h('div', null,
             liveLine,
+            // Smart pause note: the automatic cadence is parked on this pool
+            // until the promised recovery moment. The {time} fragment carries
+            // the absolute moment AND a minute-precision countdown; the text
+            // recomputes on renders the pool poll already drives, so the
+            // countdown stays live without a timer of its own.
+            props.smartPausedUntil != null
+              ? hint(t('smartPausedNote', {
+                  time: formatDetailedReset('5h', new Date(props.smartPausedUntil).toISOString(), t, now) ?? '—',
+                }))
+              : null,
             h('div', { className: 'agy-rows' }, ...rows)),
           `${accounts.length}`),
         // `key` remounts the detail per account so its proxy draft cannot carry
@@ -2304,18 +2382,35 @@ export function AgySettings(props: {
   /** Read by `loadLimits` without joining its identity to every prefs save. */
   const refreshMinutesRef = useRef<number | null>(DEFAULT_QUOTA_REFRESH_MINUTES)
   useEffect(() => { refreshMinutesRef.current = quotaRefreshMinutes }, [quotaRefreshMinutes])
+  // Smart mode: pause the accounts tab's automatic cadence while the ACTIVE
+  // account has no usable window. The ref is what `loadLimits` reads; the
+  // state drives the tab's paused note (recomputed on renders the existing
+  // pool poll already triggers — no timer of its own).
+  const smartModeRef = useRef(DEFAULT_SMART_MODE)
+  const [smartPausedUntil, setSmartPausedUntil] = useState<number | null>(null)
+  const smartPausedUntilRef = useRef<number | null>(null)
   useEffect(() => {
     installAgyStyles()
     void rpc.call('ui.prefs.get', {}).then((prefs) => {
       if (alive.current && prefs) {
         setDetailedQuotaReset(prefs.detailedQuotaReset === true)
         if (prefs.quotaRefreshMinutes !== undefined) setQuotaRefreshMinutes(prefs.quotaRefreshMinutes)
+        smartModeRef.current = prefs.smartMode ?? DEFAULT_SMART_MODE
       }
     }).catch(() => {})
     const onPrefsChange = (e: Event): void => {
       const detail = (e as CustomEvent<UiPrefsView>).detail
       if (detail?.quotaRefreshMinutes !== undefined && alive.current) {
         setQuotaRefreshMinutes(detail.quotaRefreshMinutes)
+        // Smart pause is scoped to the interval being on: with "never" there is
+        // no timer left to re-open a pause, so it ends here.
+        if (detail.quotaRefreshMinutes === null && smartPausedUntilRef.current !== null) {
+          smartPausedUntilRef.current = null
+          setSmartPausedUntil(null)
+        }
+      }
+      if (typeof detail?.smartMode === 'boolean' && alive.current) {
+        smartModeRef.current = detail.smartMode
       }
     }
     window.addEventListener('agy:ui-prefs-changed', onPrefsChange)
@@ -2462,10 +2557,20 @@ export function AgySettings(props: {
    *   click must be able to deliver something newer than the TTL holds — while
    *   the merge below is already by index, so nothing else changes.
    */
-  const loadLimits = useCallback(async (force = false, report = false, index?: number) => {
+  const loadLimits = useCallback(async (force = false, report = false, index?: number, auto = false) => {
     // The interval is read through a ref so this callback's identity (and the
     // mount/tab effects that key on it) does not churn on every prefs save.
     const intervalMinutes = refreshMinutesRef.current
+    // Smart pause holds BEFORE any RPC — a paused tick is free — and re-opens
+    // on the first tick at/after the recovery moment it was set from. Scoped
+    // to the interval being on: with "never" there is no timer left to re-open
+    // a pause, so smart mode stays inert there.
+    if (auto && smartModeRef.current && refreshMinutesRef.current !== null && smartPausedUntilRef.current !== null) {
+      const until = smartPausedUntilRef.current
+      if (Date.now() < until) return
+      smartPausedUntilRef.current = null
+      setSmartPausedUntil(null)
+    }
     try {
       const payload: { force?: boolean, index?: number } = force || index !== undefined
         ? { force: true, ...(index === undefined ? {} : { index }) }
@@ -2509,6 +2614,32 @@ export function AgySettings(props: {
           limitBurn: entry.burn ?? account.limitBurn,
         }
       }))
+      // Smart pause, judged from the data THIS probe just brought back: the
+      // observation and its confirmation are the same call, so pausing spends
+      // no extra upstream request. Every measured group of the probed account
+      // drained (weekly 0%, or all models' 5h 0%, or a mix — any shape where
+      // NO model is usable) closes the cadence until the earliest group's
+      // reset; ONE group becoming usable is what re-opens it. A recovery the
+      // data cannot promise (no usable reset moment) keeps the regular
+      // cadence — a pause with no end would freeze the tab on stale data.
+      if (auto && smartModeRef.current && refreshMinutesRef.current !== null && index !== undefined) {
+        const entry = byIndex.get(index)
+        const row = accountsRef.current.find((account) => account.index === index)
+        if (entry?.groups && row) {
+          const freshNow = Date.now()
+          const freshView = { ...row, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
+          if (isAccountAllQuotaExhausted(freshView, freshNow)) {
+            const recoverAt = accountRecoveryTime(freshView, freshNow)
+            if (recoverAt !== null) {
+              smartPausedUntilRef.current = recoverAt
+              setSmartPausedUntil(recoverAt)
+            }
+          } else if (smartPausedUntilRef.current !== null) {
+            smartPausedUntilRef.current = null
+            setSmartPausedUntil(null)
+          }
+        }
+      }
       // An explicit refresh reports itself. Without this a forced probe that
       // failed changed nothing on screen — no new numbers, no new timestamp —
       // so the click looked inert. "Still fresh" and "probe failed" are
@@ -2561,10 +2692,17 @@ export function AgySettings(props: {
   // force-probes past the host's TTL. Leaving the tab — or the browser tab
   // hiding — stops the cadence, because quota nobody can see is not probed.
   // "Never" (null) keeps the open/manual-only behavior.
+  //
+  // The tick probes the ACTIVE account only (`auto` marks it for smart mode's
+  // pause): an automatic cadence watches the row the pool serves, while other
+  // rows keep their page-open and per-row refresh paths.
   useEffect(() => {
     if (tab !== 'accounts' || quotaRefreshMinutes === null) return
     const timer = setInterval(() => {
-      if (!document.hidden && alive.current) void loadLimits(true)
+      if (!document.hidden && alive.current) {
+        const active = accountsRef.current.find((candidate) => candidate.active) ?? accountsRef.current[0]
+        void loadLimits(true, false, active?.index, true)
+      }
     }, quotaRefreshMinutes * 60_000)
     return () => { clearInterval(timer) }
   }, [tab, quotaRefreshMinutes, loadLimits])
@@ -2719,6 +2857,11 @@ export function AgySettings(props: {
         void loadModels()
       })
     },
+    onRecover: (index) => {
+      // `act` refreshes on success, so the row's cooling-until badge disappears
+      // the moment the clear lands. No notice: the state change IS the feedback.
+      void act(() => rpc.call('account.recover', { index }))
+    },
     onVerify: (index) => {
       void runAction(async () => {
         const result = await rpc.call('account.verify', { index })
@@ -2813,6 +2956,7 @@ export function AgySettings(props: {
       rpc,
       t,
       detailedQuotaReset,
+      smartPausedUntil,
       onBadgePrefChange: props.onBadgePrefChange,
       onDetailedPrefChange: (enabled: boolean) => {
         setDetailedQuotaReset(enabled)

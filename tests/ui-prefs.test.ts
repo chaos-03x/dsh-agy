@@ -34,6 +34,12 @@ describe('ui-prefs parser and sanitizer', () => {
       conversationBadge: false,
       detailedQuotaReset: false,
     })
+    expect(sanitizeUiPrefs({ smartMode: true })).toEqual({
+      version: UI_PREFS_VERSION,
+      smartMode: true,
+    })
+    // A non-boolean flag is absent, not false — the view's default applies.
+    expect(sanitizeUiPrefs({ smartMode: 'yes' })).toEqual({ version: UI_PREFS_VERSION })
   })
 
   it('parses malformed json softly', () => {
@@ -88,6 +94,7 @@ describe('UiPrefsStore', () => {
         badgeModelGroup: 'auto',
         badgeWindowType: 'both',
         badgeSkipZeroWeekly: true,
+        smartMode: false,
       })
     } finally {
       if (existsSync(file)) rmSync(file)
@@ -172,6 +179,26 @@ describe('UiPrefsStore', () => {
       expect(store2.get().badgeModelGroup).toBe('Gemini Models')
       expect(store2.get().badgeWindowType).toBe('5h')
       expect(store2.get().badgeSkipZeroWeekly).toBe(false)
+    } finally {
+      if (existsSync(file)) rmSync(file)
+    }
+  })
+
+  it('persists smart mode across instances and partial sets', () => {
+    const file = join(tmpdir(), `agy-ui-prefs-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+    try {
+      const store = new UiPrefsStore(file)
+      expect(store.get().smartMode).toBe(false)
+
+      const updated = store.set({ smartMode: true })
+      expect(updated.smartMode).toBe(true)
+      // An unrelated save must not reset the flag — the silent-pref-reset
+      // regression every persisted boolean here guards against.
+      expect(store.set({ conversationBadge: true }).smartMode).toBe(true)
+      expect(new UiPrefsStore(file).get().smartMode).toBe(true)
+
+      expect(store.set({ smartMode: false }).smartMode).toBe(false)
+      expect(new UiPrefsStore(file).get().smartMode).toBe(false)
     } finally {
       if (existsSync(file)) rmSync(file)
     }

@@ -377,6 +377,12 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       return { ok: true, index }
     },
 
+    'account.recover': async (payload) => {
+      const index = asIndex(payload)
+      await sessions.recoverAccount(index)
+      return { ok: true, index }
+    },
+
     'account.delete': async (payload) => {
       const index = asIndex(payload)
       await store.mutate((storage) => {
@@ -708,6 +714,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         badgeModelGroup?: unknown
         badgeWindowType?: unknown
         badgeSkipZeroWeekly?: unknown
+        smartMode?: unknown
       } | undefined
       if (body?.conversationBadge !== undefined && typeof body.conversationBadge !== 'boolean') {
         fail('conversationBadge must be a boolean')
@@ -733,6 +740,9 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       if (body?.badgeSkipZeroWeekly !== undefined && typeof body.badgeSkipZeroWeekly !== 'boolean') {
         fail('badgeSkipZeroWeekly must be a boolean')
       }
+      if (body?.smartMode !== undefined && typeof body.smartMode !== 'boolean') {
+        fail('smartMode must be a boolean')
+      }
       return uiPrefs.set({
         conversationBadge: body?.conversationBadge as boolean | undefined,
         detailedQuotaReset: body?.detailedQuotaReset as boolean | undefined,
@@ -741,6 +751,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         badgeModelGroup: body?.badgeModelGroup as string | undefined,
         badgeWindowType: body?.badgeWindowType as any,
         badgeSkipZeroWeekly: body?.badgeSkipZeroWeekly as boolean | undefined,
+        smartMode: body?.smartMode as boolean | undefined,
       })
     },
 

@@ -118,6 +118,9 @@ export const zh = {
   prefQuotaRefreshNever: '永不',
   prefQuotaRefreshInvalid: '间隔需为 1-120 的整数分钟',
   prefQuotaRefreshUnit: '分钟',
+  prefSmartMode: '智能模式',
+  prefSmartModeDesc: '仅刷新当前账号；无可用模型或额度耗尽时重新确认恢复时间并暂停自动刷新，直到额度恢复',
+  smartPausedNote: '智能暂停：当前无可用额度，{time} 自动恢复刷新',
   prefBadgeDetailedMode: '徽章详细模式',
   prefBadgeDetailedModeDesc: '在顶栏徽章中显示账号、指定模型类型与额度；关闭后恢复未修改前的简洁模式',
   prefBadgeModelGroup: '展示模型类型',
@@ -180,6 +183,10 @@ export const zh = {
   // Switches the pool PREFERENCE to this account; it does not enable a disabled
   // one (that is what 验证 does), which is why the verb is "set as current".
   actionActivate: '设为当前',
+  // Lifts a cooling account's timed park AND its family rate-limit walls — a
+  // backoff is not a verdict, so the user may override it; a genuinely spent
+  // family just re-parks on its next 429.
+  actionRecover: '解除冷却',
   actionVerify: '验证',
   actionDelete: '删除',
   actionTest: '测试调用',
@@ -417,6 +424,9 @@ export const en: Record<AgyLocaleKey, string> = {
   prefQuotaRefreshNever: 'Never',
   prefQuotaRefreshInvalid: 'Interval must be a whole number of minutes between 1 and 120',
   prefQuotaRefreshUnit: 'min',
+  prefSmartMode: 'Smart mode',
+  prefSmartModeDesc: 'Only refresh the current account; when no models or quota are available, verify recovery time and pause auto-refresh until quota recovers',
+  smartPausedNote: 'Smart pause: no usable quota — refresh resumes {time}',
   prefBadgeDetailedMode: 'Detailed badge mode',
   prefBadgeDetailedModeDesc: 'Show account and specified model quota in the header badge; off reverts to the original simple badge',
   prefBadgeModelGroup: 'Model type to show',
@@ -478,6 +488,8 @@ export const en: Record<AgyLocaleKey, string> = {
 
   // Sets the pool preference; does not enable a disabled account — see the zh note.
   actionActivate: 'Set as current',
+  // Lifts a cooling account's timed park AND its family rate-limit walls — see the zh note.
+  actionRecover: 'Clear cooldown',
   actionVerify: 'Verify',
   actionDelete: 'Delete',
   actionTest: 'Test call',

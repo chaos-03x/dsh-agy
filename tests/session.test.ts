@@ -208,6 +208,42 @@ describe('AgySessionManager', () => {
     expect(second!.index).toBe(1)
   })
 
+  it('recoverAccount lifts the cooldown and the family walls so the pool serves the account again', async () => {
+    stubTokenEndpoint()
+    const parked = {
+      ...account('parked@x'),
+      coolingDownUntil: Date.now() + 30 * 60 * 1000,
+      cooldownReason: 'rate-limit' as const,
+      cooldownSetAt: Date.now() - 60_000,
+      rateLimitResetTimes: { google: Date.now() + 30 * 60 * 1000 },
+    }
+    const store = new InMemoryAccountStore(storage([parked, account('spare@x')], 0))
+    const sessions = new AgySessionManager({ store })
+
+    // While the park stands, ranking hands the conversation to the spare.
+    const during = await sessions.getSession('gemini-3.5-flash', undefined, 'chat-1')
+    expect(during!.index).toBe(1)
+
+    // The manual override clears every gate at once: the timed park fields,
+    // the persisted per-family reset wall, and (in memory) the failure count.
+    // Recovery lifts the GATE only — it deliberately leaves the pool's
+    // preference alone (the earlier getSession promoted the spare to
+    // activeIndex), so steering back is the user's explicit second action.
+    await sessions.recoverAccount(0)
+    const after = await store.load()
+    expect(after.accounts[0]!.coolingDownUntil).toBeUndefined()
+    expect(after.accounts[0]!.cooldownReason).toBeUndefined()
+    expect(after.accounts[0]!.cooldownSetAt).toBeUndefined()
+    expect(after.accounts[0]!.rateLimitResetTimes).toBeUndefined()
+    expect(after.activeIndex).toBe(1)
+
+    // Re-activate the recovered account; a fresh conversation serves it again.
+    await sessions.activateAccount(0)
+    expect((await sessions.getSession('gemini-3.5-flash', undefined, 'chat-2'))!.index).toBe(0)
+
+    await expect(sessions.recoverAccount(99)).rejects.toThrow(/account not found/)
+  })
+
   it('rotates active index on 429 quota_exhausted', async () => {
     stubTokenEndpoint()
     const store = new InMemoryAccountStore(storage([account('a@x'), account('b@x')], 0))

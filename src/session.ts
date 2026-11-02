@@ -448,6 +448,39 @@ export class AgySessionManager {
     this.clearAllAffinity()
   }
 
+  /**
+   * Manually lift one account's cooldown ("冷却至 …") and its rate-limit walls.
+   *
+   * The park is a computed backoff, not a verdict — the user pressing this
+   * button IS the new evidence, so every gate that keeps the pool from trying
+   * the account clears at once: the timed cooldown fields, the persisted
+   * per-family reset walls (`rateLimitResetTimes`, which can outlive the
+   * cooldown and would keep the account ranked out even with the park lifted),
+   * and the in-memory consecutive-failure counter, so the NEXT failure starts
+   * from the shortest backoff tier instead of inheriting the accumulated one.
+   * A genuinely spent family simply re-parks on its next 429 — the honest
+   * outcome of overriding a backoff early.
+   *
+   * Deliberately narrower than `activateAccount`: nothing here changes which
+   * account the pool prefers (`activeIndex` stays untouched), and it cannot
+   * re-enable a disabled account — that repair path is `verify`.
+   */
+  async recoverAccount(index: number): Promise<void> {
+    let key: string | undefined
+    await this.store.mutate((storage) => {
+      const account = storage.accounts[index]
+      if (!account) {
+        throw new Error('account not found')
+      }
+      key = this.accountKey(account)
+      account.coolingDownUntil = undefined
+      account.cooldownReason = undefined
+      account.cooldownSetAt = undefined
+      account.rateLimitResetTimes = undefined
+    })
+    if (key !== undefined) this.failureCounts.delete(key)
+  }
+
   constructor(options: SessionManagerOptions) {
     this.store = options.store
     this.onRotate = options.onRotate

@@ -117,6 +117,19 @@ function makeHarness(options: {
         storage.activeIndex = index
       })
     },
+    // The real recoverAccount lifts the parked fields and the family walls
+    // through the same store contract; the stub mirrors that shape.
+    recoverAccount: async (index: number) => {
+      calls.push({ method: 'recoverAccount', args: [index] })
+      await store.mutate((storage) => {
+        const target = storage.accounts[index]
+        if (!target) throw new Error('account not found')
+        target.coolingDownUntil = undefined
+        target.cooldownReason = undefined
+        target.cooldownSetAt = undefined
+        target.rateLimitResetTimes = undefined
+      })
+    },
   } as unknown as AgySessionManager
   let notifications = 0
   let cacheInvalidations = 0
@@ -361,6 +374,28 @@ describe('agy management RPC', () => {
     await harness.management.call('account.delete', { index: 0 })
     const after = await harness.store.load()
     expect(after.accounts.map((entry) => entry.email)).toEqual(['b@y.com'])
+  })
+
+  it('recovers a cooling account by lifting its cooldown and rate-limit walls', async () => {
+    const parked = account({
+      email: 'parked@x.com',
+      coolingDownUntil: Date.now() + 30 * 60 * 1000,
+      cooldownReason: 'rate-limit',
+      cooldownSetAt: Date.now() - 60_000,
+      rateLimitResetTimes: { google: Date.now() + 30 * 60 * 1000 },
+    })
+    const harness = makeHarness({ accounts: [parked, account({ email: 'b@y.com' })] })
+
+    const result = await harness.management.call('account.recover', { index: 0 }) as { ok: boolean; index: number }
+    expect(result).toEqual({ ok: true, index: 0 })
+
+    const after = await harness.store.load()
+    expect(after.accounts[0]!.coolingDownUntil).toBeUndefined()
+    expect(after.accounts[0]!.cooldownReason).toBeUndefined()
+    expect(after.accounts[0]!.cooldownSetAt).toBeUndefined()
+    expect(after.accounts[0]!.rateLimitResetTimes).toBeUndefined()
+
+    await expect(harness.management.call('account.recover', { index: 99 })).rejects.toThrow(/account not found/)
   })
 
   it('carries each account\'s last routed model in the listing', async () => {
@@ -971,6 +1006,21 @@ describe('agy management RPC', () => {
         .rejects.toThrow(/must be one of: both, 5h, weekly/)
       await expect(management.call('ui.prefs.set', { badgeSkipZeroWeekly: 456 as never }))
         .rejects.toThrow(/must be a boolean/)
+      await expect(management.call('ui.prefs.set', { smartMode: 'on' as never }))
+        .rejects.toThrow(/must be a boolean/)
+    })
+
+    it('stores smart mode and reports it in the prefs view', async () => {
+      const { management } = makeHarness()
+      const on = await management.call('ui.prefs.set', { smartMode: true }) as { smartMode: boolean }
+      expect(on.smartMode).toBe(true)
+      expect(await management.call('ui.prefs.get', {}) as { smartMode: boolean })
+        .toMatchObject({ smartMode: true })
+
+      const off = await management.call('ui.prefs.set', { smartMode: false }) as { smartMode: boolean }
+      expect(off.smartMode).toBe(false)
+      expect(await management.call('ui.prefs.get', {}) as { smartMode: boolean })
+        .toMatchObject({ smartMode: false })
     })
 
     it('stores the quota refresh interval, or null for never, and rejects garbage', async () => {

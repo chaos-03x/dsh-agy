@@ -571,6 +571,99 @@ export function nextHealthyIndex(accounts: readonly AccountView[], now: number):
   return null
 }
 
+/**
+ * Whether one quota group is unusable right now: a window the pool blocks on
+ * (`drainThresholdFor` — 5h or weekly) sits at exactly 0% while its reset is
+ * still ahead. The same shape the pool blocks on, narrowed to the one group: a
+ * 0% whose reset already passed is a leftover from an ended period and never
+ * counts, and an unmeasured fraction is unknown rather than spent.
+ */
+export function isGroupQuotaExhausted(group: QuotaGroup, now: number): boolean {
+  for (const window of group.windows) {
+    if (drainThresholdFor(window.window) === undefined) continue
+    if (window.remainingFraction === null || window.remainingFraction > 0) continue
+    if (resetInPast(window.resetTime, now)) continue
+    return true
+  }
+  return false
+}
+
+/**
+ * Whether the account can serve NO model right now.
+ *
+ * EVERY measured group must be exhausted — one group with a usable window
+ * still has a model to route to, so "weekly is 0%" pauses a one-group pool
+ * while "all models' 5h is 0%" is what pauses any pool. An account that was
+ * never measured reports unknown, not exhausted: pausing on missing data
+ * would freeze the board on nothing.
+ */
+export function isAccountAllQuotaExhausted(view: AccountView | undefined, now: number): boolean {
+  if (!view?.limits || view.limits.length === 0) return false
+  if (view.state === 'disabled') return true
+  return view.limits.every((group) => isGroupQuotaExhausted(group, now))
+}
+
+/**
+ * When the account is expected to have quota again, or null when no moment can
+ * be promised.
+ *
+ * The account is back the moment its FIRST group becomes usable, and a group
+ * becomes usable only when EVERY live 0% window of it has reset — a refilled
+ * five-hour window means nothing while the week is still spent. A 0% window
+ * with no usable reset moment leaves its group unpromisable; when no group
+ * promises a moment the caller keeps the regular cadence, because a pause
+ * with no end would freeze the board on stale data forever.
+ */
+export function accountRecoveryTime(view: AccountView | undefined, now: number): number | null {
+  if (!view?.limits || view.limits.length === 0) return null
+  let earliest: number | null = null
+  for (const group of view.limits) {
+    if (!isGroupQuotaExhausted(group, now)) return now
+    let groupReady = 0
+    let promised = true
+    for (const window of group.windows) {
+      if (drainThresholdFor(window.window) === undefined) continue
+      if (window.remainingFraction === null || window.remainingFraction > 0) continue
+      if (resetInPast(window.resetTime, now)) continue
+      const reset = parseFutureResetMs(window.resetTime ?? undefined, now)
+      if (reset === undefined) {
+        promised = false
+        break
+      }
+      groupReady = Math.max(groupReady, reset)
+    }
+    if (!promised) continue
+    if (earliest === null || groupReady < earliest) earliest = groupReady
+  }
+  return earliest
+}
+
+/** The one smart-mode verdict both automatic quota surfaces read. */
+export interface SmartQuotaVerdict {
+  /** The active account's index, or null for an empty pool. */
+  index: number | null
+  /** Whether the active account can serve no model right now. */
+  exhausted: boolean
+  /** Earliest promised recovery moment, or null when it cannot be promised. */
+  recoverAt: number | null
+}
+
+/**
+ * The active account's smart-mode verdict, over the listing a load already
+ * holds — pure, no RPC: the pause decision must never cost an extra probe,
+ * because the probe that OBSERVED the exhaustion is the same one that confirms
+ * it.
+ */
+export function smartQuotaVerdict(accounts: readonly AccountView[], now: number): SmartQuotaVerdict {
+  const active = accounts.find((candidate) => candidate.active) ?? accounts[0]
+  if (!active) return { index: null, exhausted: false, recoverAt: null }
+  return {
+    index: active.index,
+    exhausted: isAccountAllQuotaExhausted(active, now),
+    recoverAt: accountRecoveryTime(active, now),
+  }
+}
+
 /** Build the window rows of one group card. */
 export function windowRows(
   windows: readonly QuotaWindow[],
