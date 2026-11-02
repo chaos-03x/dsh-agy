@@ -532,6 +532,11 @@ export const AGY_STYLES_CSS = `
   height: auto;
 }
 
+.agy-ui-badge.detailed {
+  width: 215px;
+  box-sizing: border-box;
+}
+
 .agy-ui-badge:hover,
 .agy-ui-badge.pinned {
   background: ${aliasVar('bg-layer-3')};
@@ -545,6 +550,33 @@ export const AGY_STYLES_CSS = `
   box-shadow: 0 0 0 1px ${aliasVar('brand-primary')}, 0 3px 10px rgba(0, 0, 0, 0.12);
 }
 
+.agy-ui-badge-content {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.agy-ui-badge-account {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agy-ui-badge-sep {
+  flex-shrink: 0;
+  margin: 0 3px;
+  opacity: 0.65;
+}
+
+.agy-ui-badge-quota {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* The next-account rotate affordance rides INSIDE the quota capsule, at the
    reading's right: one control, not two — the capsule opens the board, the
    arrow rotates accounts. It inherits the capsule's colors, so it needs only
@@ -553,12 +585,13 @@ export const AGY_STYLES_CSS = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-left: 2px;
+  margin-left: auto;
   padding: 1px;
   border-radius: 4px;
   color: inherit;
   cursor: pointer;
   user-select: none;
+  flex-shrink: 0;
   transition: color 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -1068,6 +1101,10 @@ export const AGY_STYLES_CSS = `
     padding: 2px 7px;
     font: var(--dsw-font-xxxs-11);
     gap: 4px;
+  }
+  .agy-ui-badge.detailed {
+    width: auto;
+    max-width: 170px;
   }
   .agy-ui-modal-body {
     padding: 12px 14px;

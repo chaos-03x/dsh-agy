@@ -589,6 +589,8 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   let shownToken = '5h'
   let shownFraction: number | null = null
   let badgeReadingStr: string
+  let accountName: string | null = null
+  let quotaText = ''
 
   if (!badgeDetailedMode) {
     // Non-detailed mode: the simple pill, kept in step with the last commit not
@@ -640,7 +642,8 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     const shownWindowLabel = shownToken === 'weekly' ? t('badgeWindowWeekly') : t('badgeWindow5h')
     const shownWindowWithSpace = `${shownWindowLabel} `
     const shownPercent = toPercent(shownFraction) ?? 0
-    const accountName = activeAccount?.email ? desensitizeEmail(activeAccount.email) : null
+    accountName = activeAccount?.email ? desensitizeEmail(activeAccount.email) : null
+    quotaText = `${modelLabel} ${shownWindowWithSpace}${shownPercent}%`
     displayText = shownFraction !== null && accountName !== null
       ? t('badgeAccountQuotaFormat', {
         account: accountName,
@@ -949,7 +952,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       {
         variant: 'ghost',
         size: 'sm',
-        className: `agy-ui-badge ${isPinned ? 'pinned' : ''}${statusClass ? ` ${statusClass}` : ''}`,
+        className: `agy-ui-badge${badgeDetailedMode ? ' detailed' : ''}${isPinned ? ' pinned' : ''}${statusClass ? ` ${statusClass}` : ''}`,
         title: badgeTooltip,
         'aria-label': t('badgeAria'),
         onClick: handleBadgeClick,
@@ -969,7 +972,15 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
           : `agy-ui-dot ${dotState}${isUpdating ? ' updating' : ''}`,
       }),
       badgeDetailedMode
-        ? h('span', { key: shownToken, className: 'agy-ui-badge-text' }, displayText)
+        ? (accountName !== null && shownFraction !== null
+          ? h(
+            'span',
+            { className: 'agy-ui-badge-content' },
+            h('span', { className: 'agy-ui-badge-account', title: activeAccount?.email ?? undefined }, accountName),
+            h('span', { className: 'agy-ui-badge-sep' }, '·'),
+            h('span', { key: shownToken, className: 'agy-ui-badge-quota agy-ui-badge-text' }, quotaText),
+          )
+          : h('span', { key: shownToken, className: 'agy-ui-badge-text' }, displayText))
         : h('span', null, displayText),
       badgeDetailedMode
         ? h(
