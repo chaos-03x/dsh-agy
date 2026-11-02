@@ -315,9 +315,12 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
         ? targetIndex
         : (isManual ? (viewIndexRef.current ?? activeIndex) : activeIndex)
 
-      const probedAccounts = resolvedTarget !== null
-        ? listed.accounts.filter((account) => account.index === resolvedTarget)
-        : listed.accounts
+      // Quota badge only ever probes a single target account (the current viewed
+      // account for manual refreshes, or the active account for automatic loads).
+      // It must NEVER fall back to a full-pool refresh.
+      if (resolvedTarget === null) return
+
+      const probedAccounts = listed.accounts.filter((account) => account.index === resolvedTarget)
       const staleBeyondInterval = !isManual && !forceProbe && refreshMinutes !== null
         && limitsOlderThanInterval(
           probedAccounts
@@ -336,8 +339,10 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       // automatic load for the next ten minutes.
       const decision: 'force' | 'auto' | 'off' = base === 'auto' && staleBeyondInterval ? 'force' : base
       if (decision !== 'off') {
-        const payload: { force?: boolean, index?: number } = decision === 'force' ? { force: true } : {}
-        if (resolvedTarget !== null) payload.index = resolvedTarget
+        const payload: { force?: boolean, index: number } = {
+          index: resolvedTarget,
+          ...(decision === 'force' ? { force: true } : {}),
+        }
         const limits = await rpc.call('account.limits', payload)
         const byIndex = new Map(limits.limits.map((entry) => [entry.index, entry]))
         setAccounts((current) => current.map((account) => {
@@ -347,9 +352,6 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
             : { ...account, limits: entry.groups, limitsUpdatedAt: entry.updatedAt }
         }))
         failedAtRef.current = limits.measured === 0 && limits.failed > 0 ? Date.now() : null
-        if (isManual && limits.measured === 0 && limits.failed > 0) {
-          setError(t('limitsRefreshFailed', { failed: limits.failed }))
-        }
 
         // Smart pause, judged from the data THIS probe just brought back: the
         // observation and its confirmation are the same call, so pausing costs
@@ -567,18 +569,19 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     setIsPinned(false)
   }
 
-  const handleRefreshClick = async (e: { stopPropagation: () => void }) => {
-    e.stopPropagation()
-    if (loading) return
-    const currentTarget = viewAccount?.index ?? activeIndex
-    await load(true, false, currentTarget)
-  }
-
   const activeAccount = accounts.find((a) => a.active) ?? accounts[0]
   const accountCount = accounts.length
   const rawDot = dotStateFor(accounts)
   const dotState = rawDot === 'done' ? 'active' : rawDot === 'warning' ? 'cooling' : 'disabled'
   const viewAccount = accounts.find((candidate) => candidate.index === viewIndex) ?? activeAccount
+
+  const handleRefreshClick = async (e: { stopPropagation: () => void }) => {
+    e.stopPropagation()
+    if (loading) return
+    const currentTarget = viewAccount?.index ?? activeIndex
+    if (currentTarget === undefined || currentTarget === null) return
+    await load(true, false, currentTarget)
+  }
 
   let displayText: string
   let effectiveDotState: StateDotState = 'idle'
