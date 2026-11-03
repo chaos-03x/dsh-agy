@@ -103,6 +103,8 @@ export interface UsageRecord {
   account?: string
   /** Provider model id. */
   model?: string
+  /** Actual model version reported by upstream response (e.g. gemini-3.8-flash-n). */
+  actualModel?: string
   source: UsageSource
   /** Token usage; absent for calls that failed before producing usage. */
   usage?: TokenBuckets
@@ -147,6 +149,7 @@ export interface RecentActivity {
   at: number
   account: string | null
   model: string | null
+  actualModel?: string | null
   kind: 'chat' | 'cli' | 'verify' | 'test' | 'rotation'
   ok: boolean
   rateLimited: boolean
@@ -637,6 +640,7 @@ export class UsageStats {
       at: this.now(),
       account: record.account ?? null,
       model: record.model ?? null,
+      ...(record.actualModel !== undefined ? { actualModel: record.actualModel } : {}),
       kind: record.poolEvent === true ? 'rotation' : record.source,
       ok: record.ok === true,
       rateLimited: record.rateLimited === true,

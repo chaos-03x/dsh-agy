@@ -71,6 +71,11 @@ export function parseRecentActivity(raw: unknown): RecentActivity | null {
     at: r.at,
     account: nullableString(r.account),
     model: nullableString(r.model),
+    // The routed model version rides the same privacy surface (model ids only)
+    // and must survive the round trip: the quota popover derives each account's
+    // "actual route" from this ring, and dropping it here would blank that line
+    // after every restart even though the ledger still holds it.
+    actualModel: nullableString(r.actualModel),
     kind: r.kind as RecentActivity['kind'],
     ok: r.ok,
     rateLimited: r.rateLimited === true,

@@ -23,6 +23,7 @@ function entry(over: Partial<RecentActivity> = {}): RecentActivity {
     ttftMs: 50,
     output: 10,
     reason: null,
+    actualModel: null,
     ...over,
   }
 }
@@ -98,6 +99,16 @@ describe('parseRecentActivity', () => {
   it('accepts a well-formed record and drops junk fields', () => {
     const parsed = parseRecentActivity({ ...entry(), extra: 'ignored' })
     expect(parsed).toEqual(entry())
+  })
+
+  it('carries the routed model version through the round trip', () => {
+    // The quota popover derives each account's "actual route" from this ring;
+    // dropping the field on read would blank that line after every restart.
+    const withRoute = parseRecentActivity(entry({ actualModel: 'gemini-3.8-flash-n' }))
+    expect(withRoute?.actualModel).toBe('gemini-3.8-flash-n')
+    // Absent stays absent (not an empty string), so the UI can keep hiding it.
+    expect(parseRecentActivity(entry())?.actualModel).toBeNull()
+    expect(parseRecentActivity(entry({ actualModel: '' }))?.actualModel).toBeNull()
   })
 
   it('returns null for shapes it cannot trust', () => {
