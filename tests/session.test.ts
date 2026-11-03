@@ -79,6 +79,23 @@ describe('AgySessionManager', () => {
     expect(session!.impersonation['X-Goog-Api-Client']).toBe('fixed-client')
   })
 
+  it('migrates legacy 1.x CLI fingerprints to the Hub line on session get', async () => {
+    stubTokenEndpoint()
+    const legacyFp = {
+      deviceId: 'd1', sessionToken: 's1', userAgent: 'antigravity/1.2.9 darwin/arm64',
+      apiClient: 'google-cloud-sdk vscode/1.96.0', clientMetadata: { ideType: 'ANTIGRAVITY', ideVersion: '1.2.9', platform: 'DARWIN_ARM64' },
+      createdAt: 0,
+    }
+    const store = new InMemoryAccountStore(storage([{ ...account(), fingerprint: legacyFp }]))
+    const sessions = new AgySessionManager({ store })
+    const session = await sessions.getSession()
+    expect(session!.impersonation['User-Agent']).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+ \(aidev_client; os_type=darwin; arch=arm64; cl=\d+\)$/)
+    const stored = (await store.load()).accounts[0]!
+    expect(stored.fingerprint!.userAgent).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+/)
+    expect(stored.fingerprintHistory).toHaveLength(1)
+    expect(stored.fingerprintHistory![0]!.reason).toBe('updated')
+  })
+
   it('rotates the active index on rate-limit and creates a fingerprint', async () => {
     stubTokenEndpoint()
     const a = account('a@x')

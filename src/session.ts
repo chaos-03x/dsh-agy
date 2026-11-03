@@ -208,6 +208,11 @@ export function isModelSupportedByAccount(account: ManagedAccount, model?: strin
   return false
 }
 
+/** Check whether a User-Agent is from the retired 1.x CLI line. */
+export function isLegacyCliUserAgent(userAgent?: string): boolean {
+  return typeof userAgent === 'string' && /^antigravity\/1\./.test(userAgent)
+}
+
 export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSession['impersonation'] {
   const fingerprint = account.fingerprint
   if (fingerprint) {
@@ -1039,6 +1044,19 @@ export class AgySessionManager {
         })
         picked.account.fingerprint = fingerprint
         picked.account.fingerprintHistory = history
+      } else if (isLegacyCliUserAgent(picked.account.fingerprint.userAgent)) {
+        const version = currentAgyVersion()
+        if (updateFingerprintVersion(picked.account.fingerprint, version)) {
+          const history = recordFingerprintVersion(picked.account.fingerprintHistory, picked.account.fingerprint, 'updated')
+          picked.account.fingerprintHistory = history
+          await this.store.mutate((s) => {
+            const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+            if (account?.fingerprint && isLegacyCliUserAgent(account.fingerprint.userAgent)) {
+              updateFingerprintVersion(account.fingerprint, version)
+              account.fingerprintHistory = history
+            }
+          })
+        }
       }
 
       // A pinned (test) call must not touch the affinity pin: probing an account

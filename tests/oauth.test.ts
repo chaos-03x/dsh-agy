@@ -459,6 +459,7 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
     expect(AGY_ENDPOINT_SKIP_STATUSES.has(503)).toBe(true)
     expect(AGY_ENDPOINT_SKIP_STATUSES.has(429)).toBe(true)
     expect(AGY_ENDPOINT_SKIP_STATUSES.has(403)).toBe(true)
+    expect(AGY_ENDPOINT_SKIP_STATUSES.has(404)).toBe(true)
     expect(AGY_ENDPOINT_SKIP_STATUSES.has(500)).toBe(false)
 
     const calls: string[] = []
@@ -466,7 +467,7 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
     const fetchImpl = (async (input: RequestInfo | URL) => {
       const url = String(input)
       calls.push(url)
-      if (url.startsWith(AGY_ENDPOINT_PROD)) {
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) {
         return new Response(
           JSON.stringify({ error: { code: 503, message: 'No capacity available', status: 'UNAVAILABLE' } }),
           { status: 503 },
@@ -478,8 +479,29 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
     const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
     expect(response.status).toBe(200)
     expect(calls).toHaveLength(2)
-    expect(calls[0]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
-    expect(calls[1]!.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
+    expect(calls[0]!.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
+    expect(calls[1]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
+  })
+
+  it('treats 404 as a skip status so a missing model or entity falls through', async () => {
+    const calls: string[] = []
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) {
+        return new Response(
+          JSON.stringify({ error: { code: 404, message: 'Requested entity was not found.', status: 'NOT_FOUND' } }),
+          { status: 404 },
+        )
+      }
+      return new Response('ok', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    expect(response.status).toBe(200)
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
+    expect(calls[1]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
   })
 
   it('returns the last skipped 503 when every endpoint rejects on capacity', async () => {
@@ -492,8 +514,8 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
   it('preserves daily 503 or 429 instead of letting autopush 403 overwrite it', async () => {
     const fetchImpl = (async (input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.startsWith(AGY_ENDPOINT_PROD)) return new Response('prod overloaded', { status: 503 })
       if (url.startsWith(AGY_ENDPOINT_DAILY)) return new Response('daily overloaded', { status: 503 })
+      if (url.startsWith(AGY_ENDPOINT_PROD)) return new Response('prod overloaded', { status: 503 })
       if (url.startsWith(AGY_ENDPOINT_DAILY_SANDBOX)) return new Response('sandbox overloaded', { status: 503 })
       return new Response('<!DOCTYPE html><html>403 Forbidden</html>', { status: 403 })
     }) as unknown as typeof fetch
@@ -508,7 +530,7 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
     const fetchImpl = (async (input: RequestInfo | URL) => {
       const url = String(input)
       calls.push(url)
-      if (url.startsWith(AGY_ENDPOINT_PROD)) {
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) {
         const error = new TypeError('fetch failed')
         ;(error as { cause?: unknown }).cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
         throw error
@@ -519,8 +541,8 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
     const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
     expect(response.status).toBe(200)
     expect(calls).toHaveLength(2)
-    expect(calls[0]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
-    expect(calls[1]!.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
+    expect(calls[0]!.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
+    expect(calls[1]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
   })
 
   it('surfaces the last endpoint failure instead of a generic message', async () => {

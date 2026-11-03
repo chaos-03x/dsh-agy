@@ -55,18 +55,20 @@ export const OAUTH_USERINFO_URL = 'https://www.googleapis.com/oauth2/v1/userinfo
 export const AGY_DEFAULT_REDIRECT_URI = 'http://localhost:51121/oauth-callback'
 
 /**
- * Antigravity API endpoints. The production endpoint (cloudcode-pa.googleapis.com)
- * is the primary endpoint, followed by daily and sandbox fallbacks.
+ * Antigravity API endpoints. The daily runtime host (no .sandbox suffix) is the
+ * live endpoint for consumer OAuth accounts — cloudcode-pa.googleapis.com
+ * answers RESOURCE_EXHAUSTED for them (verified by live probe), while the
+ * daily host answers 200. Order matters: first reachable non-429/403/404/503 wins.
  */
-export const AGY_ENDPOINT_PROD = 'https://cloudcode-pa.googleapis.com'
 export const AGY_ENDPOINT_DAILY = 'https://daily-cloudcode-pa.googleapis.com'
+export const AGY_ENDPOINT_PROD = 'https://cloudcode-pa.googleapis.com'
 export const AGY_ENDPOINT_DAILY_SANDBOX = 'https://daily-cloudcode-pa.sandbox.googleapis.com'
 export const AGY_ENDPOINT_AUTOPUSH = 'https://autopush-cloudcode-pa.sandbox.googleapis.com'
 
-/** Runtime/bootstrap endpoint fallback order (production first). */
+/** Runtime/bootstrap endpoint fallback order (daily first, mirroring OmniRoute). */
 export const AGY_ENDPOINT_FALLBACKS: readonly string[] = [
-  AGY_ENDPOINT_PROD,
   AGY_ENDPOINT_DAILY,
+  AGY_ENDPOINT_PROD,
   AGY_ENDPOINT_DAILY_SANDBOX,
   AGY_ENDPOINT_AUTOPUSH,
 ]
@@ -74,11 +76,12 @@ export const AGY_ENDPOINT_FALLBACKS: readonly string[] = [
 /**
  * Statuses that mean "this endpoint is not usable for this attempt"; skip to the
  * next one in the chain. 429/403 = rate/quota/entitlement wall, 503 = capacity
- * rejection (e.g. "No capacity available for model ..."). A 503 skipped here
- * still reaches the caller when every endpoint fails, where the classifier marks
- * it transient and the adapter surfaces it as a retryable SERVER error.
+ * rejection (e.g. "No capacity available for model ..."), 404 = model or route
+ * not found on this endpoint. A skipped response still reaches the caller when
+ * every endpoint fails, where the classifier marks it and the adapter surfaces
+ * a meaningful error.
  */
-export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403, 503])
+export const AGY_ENDPOINT_SKIP_STATUSES = new Set([429, 403, 404, 503])
 
 /** Routing of the requests being tried (see {@link AccountRouting}). */
 export type AgyFallbackOptions = Pick<AccountRouting, 'proxyUrl'>
@@ -107,7 +110,7 @@ export async function fetchAgyFirstOk(
       // Prefer keeping a 429 or 503 response from earlier production endpoints
       // rather than letting the internal autopush sandbox 403 (which always fails for
       // consumer accounts with "no license") overwrite the real rate-limit/capacity signal.
-      if (!lastSkipped || (baseEndpoint !== AGY_ENDPOINT_AUTOPUSH && (response.status === 429 || response.status === 503))) {
+      if (!lastSkipped || (baseEndpoint !== AGY_ENDPOINT_AUTOPUSH && (response.status === 429 || response.status === 503 || response.status === 404))) {
         lastSkipped = response
       }
     } catch (error) {

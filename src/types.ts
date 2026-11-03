@@ -36,7 +36,7 @@ export interface Fingerprint {
 export interface FingerprintVersion {
   fingerprint: Fingerprint
   timestamp: number
-  reason: 'initial' | 'regenerated' | 'restored'
+  reason: 'initial' | 'regenerated' | 'restored' | 'updated'
 }
 
 export type CooldownReason =
