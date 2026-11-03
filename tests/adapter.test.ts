@@ -1007,6 +1007,46 @@ describe('translate', () => {
     expect(new Set(names).size).toBe(names.length)
   })
 
+  it('records toolNameMap and restores original tool name in parseAgySse', async () => {
+    const toolNameMap = new Map<string, string>()
+    const body = toAgyRequestBody(
+      generateOptions({
+        tools: [
+          { name: 'mcp__ghidra-mcp__get_program_info', description: 'd', parameters: { type: 'object', properties: {} } },
+        ],
+      }),
+      { toolNameMap },
+    )
+    expect(body.request.tools![0].functionDeclarations[0].name).toBe('mcp__ghidra_mcp__get_program_info')
+    expect(toolNameMap.get('mcp__ghidra_mcp__get_program_info')).toBe('mcp__ghidra-mcp__get_program_info')
+
+    const ssePayload = 'data: ' + JSON.stringify([{
+      candidates: [{
+        content: {
+          role: 'model',
+          parts: [{
+            functionCall: {
+              id: 'call_123',
+              name: 'mcp__ghidra_mcp__get_program_info',
+              args: {},
+            },
+          }],
+        },
+        finishReason: 'STOP',
+      }],
+    }]) + '\n\n'
+    const stream = sseStream([ssePayload, 'data: [DONE]'])
+    const chunks = []
+    for await (const chunk of parseAgySse(stream, {
+      resolveToolName: (name) => toolNameMap.get(name) ?? name,
+    })) {
+      chunks.push(chunk)
+    }
+    const toolCallDelta = chunks.find((c) => c.type === 'tool-call-delta')
+    expect(toolCallDelta).toBeDefined()
+    expect((toolCallDelta as any).name).toBe('mcp__ghidra-mcp__get_program_info')
+  })
+
   it('excludes builtin Gemini tool names from functionDeclarations', () => {
     const body = toAgyRequestBody(
       generateOptions({
@@ -1733,6 +1773,46 @@ describe('models', () => {
     expect(ids).not.toContain('gemini-4-argon-medium')
     expect(ids).not.toContain('gemini-4-argon-low')
     expect(merged.find((m) => m.id === 'gemini-4-argon')?.context?.contextWindow).toBe(1048576)
+  })
+
+  it('keeps discrete models when DSH_AGY_KEEP_DISCRETE_MODELS=1', () => {
+    const orig = process.env.DSH_AGY_KEEP_DISCRETE_MODELS
+    try {
+      process.env.DSH_AGY_KEEP_DISCRETE_MODELS = '1'
+      const merged = mergeModelCatalog({
+        models: {
+          'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash' },
+          'gemini-3.8-flash-high': { displayName: 'Gemini 3.8 Flash (High)' },
+          'gemini-3.8-flash-medium': { displayName: 'Gemini 3.8 Flash (Medium)' },
+          'gemini-3.8-flash-low': { displayName: 'Gemini 3.8 Flash (Low)' },
+          'gemini-4-argon-high': { displayName: 'Gemini 4 Argon (High)' },
+          'gemini-4-argon-medium': { displayName: 'Gemini 4 Argon (Medium)' },
+          'gemini-4-argon-low': { displayName: 'Gemini 4 Argon (Low)' },
+          'claude-opus-5-5-high': { displayName: 'Claude Opus 5.5 (High)' },
+          'claude-opus-5-5-medium': { displayName: 'Claude Opus 5.5 (Medium)' },
+          'claude-opus-5-5-low': { displayName: 'Claude Opus 5.5 (Low)' },
+          'claude-sonnet-5-5-high': { displayName: 'Claude Sonnet 5.5 (High)' },
+          'claude-sonnet-5-5-medium': { displayName: 'Claude Sonnet 5.5 (Medium)' },
+          'claude-sonnet-5-5-low': { displayName: 'Claude Sonnet 5.5 (Low)' },
+        },
+      })
+      const ids = merged.map((m) => m.id)
+      expect(ids).toContain('gemini-3.8-flash-high')
+      expect(ids).toContain('gemini-3.8-flash-medium')
+      expect(ids).toContain('gemini-3.8-flash-low')
+      expect(ids).toContain('gemini-4-argon-high')
+      expect(ids).toContain('gemini-4-argon-medium')
+      expect(ids).toContain('gemini-4-argon-low')
+      expect(ids).toContain('claude-opus-5-5-high')
+      expect(ids).toContain('claude-opus-5-5-medium')
+      expect(ids).toContain('claude-opus-5-5-low')
+      expect(ids).toContain('claude-sonnet-5-5-high')
+      expect(ids).toContain('claude-sonnet-5-5-medium')
+      expect(ids).toContain('claude-sonnet-5-5-low')
+    } finally {
+      if (orig === undefined) delete process.env.DSH_AGY_KEEP_DISCRETE_MODELS
+      else process.env.DSH_AGY_KEEP_DISCRETE_MODELS = orig
+    }
   })
 
   it('hides ids upstream assigns to a non-chat role, including ids without a tab_ prefix', () => {

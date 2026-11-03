@@ -201,16 +201,19 @@ function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
       registerDiscoveredUnifiedThinkingFamily(base)
     }
   }
-  for (const id of Object.keys(models)) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
-    if (m && m[1]) {
-      const base = m[1]
-      if (
-        Object.hasOwn(models, `${base}-tiered`) ||
-        (Object.hasOwn(models, base) && isLevelThinkingModel(base)) ||
-        isUnifiedThinkingFamily(base)
-      ) {
-        hidden.add(id)
+  const keepDiscrete = process.env.DSH_AGY_KEEP_DISCRETE_MODELS === '1' || process.env.DSH_AGY_ALL_MODELS === '1'
+  if (!keepDiscrete) {
+    for (const id of Object.keys(models)) {
+      const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
+      if (m && m[1]) {
+        const base = m[1]
+        if (
+          Object.hasOwn(models, `${base}-tiered`) ||
+          (Object.hasOwn(models, base) && isLevelThinkingModel(base)) ||
+          isUnifiedThinkingFamily(base)
+        ) {
+          hidden.add(id)
+        }
       }
     }
   }

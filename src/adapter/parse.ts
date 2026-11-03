@@ -265,6 +265,8 @@ export interface ParseAgySseOptions {
    */
   onModelVersion?: (modelVersion: string) => void
   disambiguateToolCallIds?: boolean
+  /** Reverse map a sanitized upstream tool name back to its harness tool name. */
+  resolveToolName?: (sanitizedName: string) => string
 }
 
 export async function* parseAgySse(
@@ -431,9 +433,13 @@ export async function* parseAgySse(
             const end = closeBlock()
             if (end) out.push(end)
           }
+          const rawName = part.functionCall.name
+          const resolvedName = (rawName && options.resolveToolName)
+            ? options.resolveToolName(rawName)
+            : rawName
           const start = ensureBlock('tool-call', {
             id: upstreamId,
-            name: part.functionCall.name,
+            name: resolvedName,
           })
           out.push(...start)
           if (part.thoughtSignature) {

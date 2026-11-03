@@ -464,6 +464,7 @@ export class AgyAdapter extends LlmAdapter {
     // silently generated from the host's real IP), and the streaming
     // dispatcher drops the per-gap body timeout a reasoning pause would trip.
     const routing = { proxyUrl: session.account.proxy, streaming: true }
+    const toolNameMap = new Map<string, string>()
 
     /**
      * Send one request, resending at most once when the upstream reports the
@@ -492,6 +493,7 @@ export class AgyAdapter extends LlmAdapter {
           sessionId:
             deriveAntigravitySessionId(session.account.email, conversationKey, generation) ?? undefined,
           requestId,
+          toolNameMap,
           ...(this.options.thinkingBudgetFor === undefined
             ? {}
             : { thinkingBudgetFor: this.options.thinkingBudgetFor }),
@@ -700,6 +702,7 @@ export class AgyAdapter extends LlmAdapter {
         for await (const chunk of parseAgySse(response.body, {
           signal: options.signal,
           disambiguateToolCallIds: true,
+          resolveToolName: (sanitized) => toolNameMap.get(sanitized) ?? sanitized,
           onToolSignature: (toolCallId, signature) => {
             pendingSignatures.push([toolCallId, signature])
           },

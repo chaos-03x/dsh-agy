@@ -307,7 +307,8 @@ function toolResultPart(
   content: readonly AgyBlockView[],
   toolNames: ToolNameIndex,
 ): AgyPart {
-  const name = resolveToolName(toolNames, toolCallId) ?? toolCallId
+  const resolvedName = resolveToolName(toolNames, toolCallId)
+  const name = resolvedName ? sanitizeToolName(resolvedName) : toolCallId
   const text = content
     .filter((block): block is Extract<AgyBlockView, { type: 'text' }> => block.type === 'text')
     .map((block) => block.text)
@@ -388,7 +389,7 @@ function blockToParts(
       const signature = getThoughtSignature(block.id) ?? THOUGHT_SIGNATURE_SENTINEL
       return [{
         thoughtSignature: signature,
-        functionCall: { id: block.id, name: block.name, args },
+        functionCall: { id: block.id, name: sanitizeToolName(block.name), args },
       }]
     }
     case 'tool-result':
@@ -558,7 +559,7 @@ export const AGY_CLAUDE_MAX_OUTPUT_TOKENS = 64_000
 const AGY_TOOL_NAME_MAX_LENGTH = 64
 
 /** Sanitize a tool name to the upstream charset/length; dedupe via a short hash. */
-function sanitizeToolName(name: string, seen: Set<string>): string {
+export function sanitizeToolName(name: string, seen: Set<string> = new Set()): string {
   let candidate = name.replace(/[^a-zA-Z0-9_]/g, '_') || 'tool'
   if (candidate.length > AGY_TOOL_NAME_MAX_LENGTH || seen.has(candidate)) {
     const hash = createHash('sha256').update(candidate).digest('hex').slice(0, 8)
@@ -571,14 +572,21 @@ function sanitizeToolName(name: string, seen: Set<string>): string {
   return candidate
 }
 
-function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['request']['tools'] {
+export function toolsToDeclarations(
+  tools: ToolSchema[] | undefined,
+  nameMap?: Map<string, string>,
+): AgyRequestBody['request']['tools'] {
   if (!tools || tools.length === 0) return undefined
   const seenNames = new Set<string>()
   const declarations = []
   for (const tool of tools) {
     if (AGY_BUILTIN_TOOL_NAMES.has(tool.name)) continue
+    const sanitized = sanitizeToolName(tool.name, seenNames)
+    if (nameMap) {
+      nameMap.set(sanitized, tool.name)
+    }
     declarations.push({
-      name: sanitizeToolName(tool.name, seenNames),
+      name: sanitized,
       description: tool.description,
       parameters: sanitizeToolSchema(tool.parameters),
     })
@@ -645,6 +653,7 @@ export function toAgyRequestBody(
      * `thinkingLevel` — the tiered model's adaptive entry, given an explicit cap.
      */
     tieredBudgetFor?: () => number | undefined
+    toolNameMap?: Map<string, string>
   },
 ): AgyRequestBody {
   const messages = normalizeMessages(options.messages)
@@ -670,7 +679,7 @@ export function toAgyRequestBody(
     .filter((text): text is string => typeof text === 'string' && text !== '')
     .join('\n\n')
 
-  const tools = toolsToDeclarations(options.tools)
+  const tools = toolsToDeclarations(options.tools, context.toolNameMap)
   const generationConfig: NonNullable<AgyRequestBody['request']['generationConfig']> = {}
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature
   if (options.maxTokens !== undefined) {

@@ -55,20 +55,18 @@ export const OAUTH_USERINFO_URL = 'https://www.googleapis.com/oauth2/v1/userinfo
 export const AGY_DEFAULT_REDIRECT_URI = 'http://localhost:51121/oauth-callback'
 
 /**
- * Antigravity API endpoints. The daily runtime host (no .sandbox suffix) is the
- * live endpoint for consumer OAuth accounts — cloudcode-pa.googleapis.com
- * answers RESOURCE_EXHAUSTED for them (verified by live probe), while the
- * daily host answers 200. Order matters: first reachable non-429/403/503 wins.
+ * Antigravity API endpoints. The production endpoint (cloudcode-pa.googleapis.com)
+ * is the primary endpoint, followed by daily and sandbox fallbacks.
  */
-export const AGY_ENDPOINT_DAILY = 'https://daily-cloudcode-pa.googleapis.com'
 export const AGY_ENDPOINT_PROD = 'https://cloudcode-pa.googleapis.com'
+export const AGY_ENDPOINT_DAILY = 'https://daily-cloudcode-pa.googleapis.com'
 export const AGY_ENDPOINT_DAILY_SANDBOX = 'https://daily-cloudcode-pa.sandbox.googleapis.com'
 export const AGY_ENDPOINT_AUTOPUSH = 'https://autopush-cloudcode-pa.sandbox.googleapis.com'
 
-/** Runtime/bootstrap endpoint fallback order (daily first, mirroring OmniRoute). */
+/** Runtime/bootstrap endpoint fallback order (production first). */
 export const AGY_ENDPOINT_FALLBACKS: readonly string[] = [
-  AGY_ENDPOINT_DAILY,
   AGY_ENDPOINT_PROD,
+  AGY_ENDPOINT_DAILY,
   AGY_ENDPOINT_DAILY_SANDBOX,
   AGY_ENDPOINT_AUTOPUSH,
 ]
