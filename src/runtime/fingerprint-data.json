@@ -1,6 +1,6 @@
 {
   "comment": "Hot-updatable fingerprint data. Version pools and client strings track the Antigravity Hub product line required by Cloud Code PA for current models.",
-  "versionPool": ["2.25.0", "2.22.0"],
+  "versionPool": ["2.28.2", "2.25.0"],
   "platforms": ["darwin/arm64"],
   "sdkClients": [
     "google-cloud-sdk vscode_cloudshelleditor/0.1",
