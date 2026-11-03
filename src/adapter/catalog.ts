@@ -23,6 +23,9 @@ export interface CatalogModel {
 }
 
 export const AGY_PUBLIC_MODELS: readonly CatalogModel[] = [
+  { id: 'gemini-4-argon', name: 'Gemini 4 Argon', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
+  { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextLength: 200000, maxOutputTokens: 64000, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
+  { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', contextLength: 200000, maxOutputTokens: 64000, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level' },
   { id: 'gemini-3.8-flash-tiered', name: 'Gemini 3.8 Flash', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level', thinkingLevels: ['low', 'medium', 'high'] as const },
   { id: 'gemini-3.7-flash-tiered', name: 'Gemini 3.7 Flash', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level', thinkingLevels: ['low', 'medium', 'high'] as const },
   { id: 'gemini-3.6-flash-tiered', name: 'Gemini 3.6 Flash (Tiered)', contextLength: 1048576, maxOutputTokens: 65536, supportsReasoning: true, supportsVision: true, toolCalling: true, thinking: 'level', thinkingLevels: ['low', 'medium', 'high'] as const },
@@ -80,7 +83,7 @@ export function formatTieredModelName(modelId: string): string {
  * the catalog-only fallback and the role-based hiding in agreement.
  */
 export function isChatCallableModelId(modelId: string): boolean {
-  return !modelId.startsWith('tab_') && !/^chat_\d+$/.test(modelId)
+  return !modelId.startsWith('tab_') && !/^chat_\d+$/.test(modelId) && !modelId.endsWith('-disabled')
 }
 
 export function catalogModel(modelId: string): CatalogModel | undefined {
@@ -141,21 +144,43 @@ export function registerDiscoveredTieredModels(tiered?: Record<string, string[]>
   }
 }
 
+const DISCOVERED_UNIFIED_THINKING_FAMILIES = new Set<string>()
+
+/** Register dynamically discovered unified thinking families (e.g. models with discrete -low/-medium/-high variants). */
+export function registerDiscoveredUnifiedThinkingFamily(baseId: string): void {
+  DISCOVERED_UNIFIED_THINKING_FAMILIES.add(baseId)
+}
+
+/** Check whether a model ID is a unified thinking family (known static or dynamically discovered). */
+export function isUnifiedThinkingFamily(modelId: string): boolean {
+  return (
+    modelId === 'gemini-4-argon' ||
+    modelId === 'claude-opus-5-5' ||
+    modelId === 'claude-sonnet-5-5' ||
+    DISCOVERED_UNIFIED_THINKING_FAMILIES.has(modelId)
+  )
+}
+
 /** Reset discovered tiered models (used by test suites). */
 export function resetDiscoveredTieredModels(): void {
   DISCOVERED_TIERED_FAMILIES.clear()
+  DISCOVERED_UNIFIED_THINKING_FAMILIES.clear()
 }
 
 /**
  * Level-thinking models: a single id with selectable tiers via `thinkingLevel`.
  *
  * Consults dynamically discovered `tieredModelIds` first, falling back to the catalog's
- * explicit `thinking: 'level'` metadata and the legacy `-tiered` naming suffix for offline use.
+ * explicit `thinking: 'level'` metadata, unified thinking families, and legacy `-tiered` suffix.
  */
 export function isLevelThinkingModel(modelId: string): boolean {
   if (catalogModel(modelId)?.thinking === 'level') return true
   if (DISCOVERED_TIERED_FAMILIES.has(modelId)) return true
-  return typeof modelId === 'string' && modelId.endsWith('-tiered')
+  if (typeof modelId === 'string') {
+    if (modelId.endsWith('-tiered')) return true
+    if (isUnifiedThinkingFamily(modelId)) return true
+  }
+  return false
 }
 
 /**
