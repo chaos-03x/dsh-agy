@@ -143,7 +143,7 @@ export async function fetchAgyFirstOk(
  * numerically is meaningless and mixing them advertises a version that does not
  * exist for the product we name.
  */
-export const AGY_VERSION_FALLBACK = '2.25.0'
+export const AGY_VERSION_FALLBACK = '2.28.2'
 export const AGY_HUB_CHANGELIST = '1003475615'
 
 /**

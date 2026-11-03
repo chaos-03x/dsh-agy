@@ -1144,6 +1144,37 @@ describe('parseAgySse', () => {
     expect(chunks.some((c) => (c as { type: string }).type === 'usage')).toBe(true)
   })
 
+  it('surfaces the routed modelVersion via onModelVersion', async () => {
+    // The observability seam the adapter consumes: every SSE event may carry a
+    // `modelVersion`, and the parser forwards it so the adapter can store it in
+    // the ledger. It must NOT disturb the block stream (issuing nothing).
+    const versions: string[] = []
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: {"response":{"modelVersion":"gemini-3.8-flash-n","candidates":[{"content":{"parts":[{"text":"hi"}]}}]}}',
+      'data: {"response":{"modelVersion":"gemini-3.8-flash-n","candidates":[{"content":{"parts":[{"text":"!"}]}}]}}',
+      'data: [DONE]',
+    ]), { onModelVersion: (v) => versions.push(v) }))
+    expect(versions).toEqual(['gemini-3.8-flash-n', 'gemini-3.8-flash-n'])
+    expect(chunks.filter((c) => (c as { type: string }).type === 'text-delta').map((c) => (c as { text: string }).text).join('')).toBe('hi!')
+  })
+
+  it('extracts modelVersion from envelope, array, and payload positions', () => {
+    // parseSseDataLine resolves the version from the wrapped `response`, the
+    // top-level array element, or the payload itself — whichever the daily
+    // endpoint happens to place it on.
+    const wrapped = parseSseDataLine('data: {"response":{"modelVersion":"v1","candidates":[]}}')
+    expect(wrapped?.modelVersion).toBe('v1')
+    const arrayed = parseSseDataLine('data: [{"modelVersion":"v2","candidates":[]}]')
+    expect(arrayed?.modelVersion).toBe('v2')
+    const bare = parseSseDataLine('data: {"candidates":[],"modelVersion":"v3"}')
+    expect(bare?.modelVersion).toBe('v3')
+    // An empty string is not a routed version: parseAgySse only forwards a
+    // non-empty value through onModelVersion, so the parser treats it as absent.
+    const empty = parseSseDataLine('data: {"modelVersion":"","candidates":[]}')
+    expect(empty?.modelVersion).toBe('')
+    expect(empty?.modelVersion?.length).toBe(0)
+  })
+
   it('keeps one continuous text block across events (usage does not split)', async () => {
     // Antigravity sends usageMetadata on EVERY SSE event; per-event block
     // closing used to split one sentence into a block per chunk.
@@ -3550,6 +3581,27 @@ describe('AgyAdapter', () => {
     expect(sample.account).toBe('a@b.c')
     // Buckets stay disjoint: input is uncached only (120 total minus 20 cached).
     expect(sample.usage).toMatchObject({ input: 100, output: 7, cacheRead: 20 })
+  })
+
+  it('records the upstream-routed model version with a generation', async () => {
+    // The observability seam: parseAgySse forwards each event's `modelVersion`
+    // via onModelVersion, the adapter stores it into the ledger record as
+    // `actualModel` (distinct from the REQUESTED `model`), and the persisted
+    // recent ring later carries it (paths round-trip test).
+    const recorded: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: {"response":{"modelVersion":"gemini-3.8-flash-n","candidates":[{"content":{"parts":[{"text":"pong"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}}',
+      'data: [DONE]',
+    ]), { status: 200 })))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      recordUsage: (sample) => { recorded.push(sample as Record<string, unknown>) },
+    })
+    for await (const _ of adapter.stream(generateOptions())) void _
+
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0]?.actualModel).toBe('gemini-3.8-flash-n')
   })
 
   it('records a failed attempt without token usage', async () => {
