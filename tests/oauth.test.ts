@@ -475,7 +475,7 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
       return new Response('ok', { status: 200 })
     }) as unknown as typeof fetch
 
-    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    const { response } = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
     expect(response.status).toBe(200)
     expect(calls).toHaveLength(2)
     expect(calls[0]!.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
@@ -484,7 +484,7 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
 
   it('returns the last skipped 503 when every endpoint rejects on capacity', async () => {
     const fetchImpl = (async () => new Response('no capacity', { status: 503 })) as unknown as typeof fetch
-    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    const { response } = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
     // Intended: the caller's classifier sees the 503 and Fix A surfaces SERVER.
     expect(response.status).toBe(503)
   })
@@ -497,8 +497,43 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
       if (url.startsWith(AGY_ENDPOINT_DAILY_SANDBOX)) return new Response('sandbox overloaded', { status: 503 })
       return new Response('<!DOCTYPE html><html>403 Forbidden</html>', { status: 403 })
     }) as unknown as typeof fetch
-    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    const { response } = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
     expect(response.status).toBe(503)
+  })
+
+  it('never lets a tail endpoint answer for the account', async () => {
+    // MEASURED 2026-10-25: prod answers 429 RESOURCE_EXHAUSTED on EVERY request
+    // and autopush answers 403 HTML "no license" on EVERY request, while daily
+    // serves the same account fine. When daily is momentarily busy, the chain
+    // must keep daily's verdict and tag the result as authoritative.
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith(AGY_ENDPOINT_DAILY)) return new Response('busy', { status: 429 })
+      if (url.startsWith(AGY_ENDPOINT_PROD)) {
+        return new Response(JSON.stringify({
+          error: { status: 'RESOURCE_EXHAUSTED', message: 'Resource has been exhausted (e.g. check quota).' },
+        }), { status: 429 })
+      }
+      return new Response('<!DOCTYPE html><html>no license</html>', { status: 403 })
+    }) as unknown as typeof fetch
+
+    const result = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    expect(result.endpoint.startsWith(AGY_ENDPOINT_DAILY)).toBe(true)
+    expect(result.authoritative).toBe(true)
+    expect(result.response.status).toBe(429)
+  })
+
+  it('tags a tail-endpoint answer as non-authoritative', async () => {
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith(AGY_ENDPOINT_PROD)) return new Response('no license', { status: 403 })
+      const error = new TypeError('fetch failed')
+      ;(error as { cause?: unknown }).cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+      throw error
+    }) as unknown as typeof fetch
+    const result = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    expect(result.endpoint.startsWith(AGY_ENDPOINT_PROD)).toBe(true)
+    expect(result.authoritative).toBe(false)
   })
 
   // Issue #29 (2): with no explicit proxy, a transient socket failure on one
@@ -516,7 +551,7 @@ describe('endpoint fallback (fetchAgyFirstOk)', () => {
       return new Response('ok', { status: 200 })
     }) as unknown as typeof fetch
 
-    const response = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
+    const { response } = await fetchAgyFirstOk('/v1internal:streamGenerateContent?alt=sse', {}, fetchImpl)
     expect(response.status).toBe(200)
     expect(calls).toHaveLength(2)
     expect(calls[1]!.startsWith(AGY_ENDPOINT_PROD)).toBe(true)

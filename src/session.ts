@@ -1289,7 +1289,7 @@ export class AgySessionManager {
         'X-Goog-Api-Client': session.impersonation['X-Goog-Api-Client'],
       }
       const routing = { proxyUrl: session.account.proxy, streaming: true }
-      const response = await fetchAgyFirstOk(
+      const { response } = await fetchAgyFirstOk(
         '/v1internal:streamGenerateContent?alt=sse',
         {
           method: 'POST',

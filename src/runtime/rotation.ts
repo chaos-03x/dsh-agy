@@ -137,6 +137,17 @@ export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000
  */
 export const VERIFICATION_COOLDOWN_MS = 15 * 60 * 1000
 
+/**
+ * Minimum park for a project-scoped GRANT wall (issue #114).
+ *
+ * The plain exponential backoff (5s) would re-probe an entitlement the project
+ * does not have, once per retry, on every turn — the wall is measured per
+ * model/project, so it does not clear in seconds and hammering it is what makes
+ * the account look broken. The account is NOT disabled: entitlement can appear
+ * later, and this is a project verdict, never a credential one.
+ */
+export const PROJECT_ERROR_COOLDOWN_MS = 10 * 60 * 1000
+
 /** Absolute server-reported reset in ms when it lies in the future, else undefined. */
 export function parseFutureResetMs(resetTime: string | undefined, now = Date.now()): number | undefined {
   if (!resetTime) return undefined
@@ -229,10 +240,11 @@ export function decideRotation(
       return { action: 'rotate', backoffMs }
     }
     case 'project-error': {
-      account.coolingDownUntil = now + backoffMs
+      const cooldownMs = Math.max(backoffMs, PROJECT_ERROR_COOLDOWN_MS)
+      account.coolingDownUntil = now + cooldownMs
       account.cooldownReason = 'project-error'
       account.cooldownSetAt = now
-      return { action: 'cool', backoffMs }
+      return { action: 'cool', backoffMs: cooldownMs }
     }
     case 'request-error': {
       // Request-construction error (e.g. generic 400): permanent, retrying
