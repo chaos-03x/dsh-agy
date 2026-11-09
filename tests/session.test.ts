@@ -61,7 +61,10 @@ describe('AgySessionManager', () => {
     const session = await sessions.getSession()
     expect(session).toBeDefined()
     expect(session!.auth.access).toBe('at')
-    expect(session!.impersonation['User-Agent']).toMatch(/^antigravity\/(?:hub\/)?\d+\.\d+\.\d+/)
+    // The DEFAULT profile is the Electron/Hub app (measured 2026-11-09: a hub
+    // string carrying a `1.x` version is served the retirement notice AND loses
+    // the Gemini quota group, so the shape and its line must agree).
+    expect(session!.impersonation['User-Agent']).toMatch(/^antigravity\/hub\/2\.\d+\.\d+ \(aidev_client; /)
     expect(session!.impersonation.clientMetadata.ideType).toContain('ANTIGRAVITY')
   })
 
@@ -75,8 +78,37 @@ describe('AgySessionManager', () => {
     const store = new InMemoryAccountStore(storage([{ ...account(), fingerprint: fp }]))
     const sessions = new AgySessionManager({ store })
     const session = await sessions.getSession()
-    expect(session!.impersonation['User-Agent']).toBe('antigravity/9.9.9 darwin/arm64')
+    // A stored LEGACY-shaped identity is migrated onto the ACTIVE profile on use;
+    // leaving it alone would keep the account gated for its lifetime. The stored
+    // `9.9.9` belongs to neither line, so the profile's own version is used.
+    expect(session!.impersonation['User-Agent']).toMatch(/^antigravity\/hub\/2\.\d+\.\d+ \(aidev_client; /)
     expect(session!.impersonation['X-Goog-Api-Client']).toBe('fixed-client')
+  })
+
+  it('persists the upgraded identity, and does not rewrite a healthy one', async () => {
+    // The upgrade must reach the FILE, not just the in-memory clone: the account
+    // is reused for its whole life, so a clone-only fix would re-gate on the next
+    // process. And once correct, repeated requests must stop touching the store —
+    // a mutation per request would take the file lock on every turn.
+    stubTokenEndpoint()
+    const store = new InMemoryAccountStore(storage([{
+      ...account(),
+      fingerprint: {
+        deviceId: 'd1', sessionToken: 's1', userAgent: 'antigravity/9.9.9 darwin/arm64',
+        apiClient: 'c', clientMetadata: { ideType: 'ANTIGRAVITY' }, createdAt: 0,
+      },
+    }]))
+    const sessions = new AgySessionManager({ store })
+    await sessions.getSession()
+
+    const stored = (await store.load()).accounts[0]!.fingerprint!
+    expect(stored.userAgent).toMatch(/^antigravity\/hub\/2\.\d+\.\d+ \(aidev_client; /)
+
+    let writes = 0
+    const mutate = store.mutate.bind(store)
+    store.mutate = ((fn: Parameters<typeof mutate>[0]) => { writes++; return mutate(fn) }) as typeof store.mutate
+    await sessions.getSession()
+    expect(writes).toBe(0)
   })
 
   it('rotates the active index on rate-limit and creates a fingerprint', async () => {
@@ -739,7 +771,7 @@ describe('usage-driven selection', () => {
       const first = impersonationHeadersFor(account('a@x'))
       const second = impersonationHeadersFor(account('a@x'))
       expect(first).toEqual(second)
-      expect(first['User-Agent']).toMatch(/^antigravity\/(?:hub\/)?\d+\.\d+\.\d+/)
+      expect(first['User-Agent']).toMatch(/^antigravity\/hub\/2\.\d+\.\d+ \(aidev_client; /)
       expect(first.clientMetadata.ideType).toContain('ANTIGRAVITY')
       vi.unstubAllEnvs()
     }
@@ -1286,7 +1318,8 @@ describe('impersonationHeadersFor', () => {
     const base = account()
     const first = impersonationHeadersFor(base)
     const second = impersonationHeadersFor(base)
-    expect(first['User-Agent']).toMatch(/^antigravity\//)
+    // The active profile decides the shape; the default is the Electron app.
+    expect(first['User-Agent']).toMatch(/^antigravity\/hub\/2\.\d+\.\d+ \(aidev_client; /)
     // No fingerprint yet: one FIXED identity, identical on every call. This used
     // to randomize per request, which is the anomaly the stable posture removes —
     // a device that presents a different platform/SDK-client on each call is not
@@ -1633,7 +1666,11 @@ describe('fingerprint version freshness', () => {
 
       const fp = (await store.load()).accounts[0]!.fingerprint!
       expect(fp.userAgent).not.toContain('1.22.2')
-      expect(fp.userAgent).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+ \(aidev_client; os_type=darwin; arch=arm64; cl=\d+\)$/)
+      // The default profile is the Electron/Hub app. Its version comes from the
+      // hub line, and a frozen literal from the OTHER line would be the defect
+      // this whole module exists to prevent.
+      expect(fp.userAgent).toMatch(/^antigravity\/hub\/2\.\d+\.\d+ \(aidev_client; /)
+      expect(fp.userAgent).not.toContain('1.22.2')
     } finally {
       _setFingerprintDataForTest(undefined)
       vi.unstubAllGlobals()

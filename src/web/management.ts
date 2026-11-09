@@ -40,6 +40,7 @@ import type {
   RangeBreakdown,
   StatsView,
   ThinkingBudgets,
+  UaProfileViewResult,
 } from '../rpc-contract.ts'
 
 /** One pending OAuth authorization, keyed by its raw state. */
@@ -88,6 +89,20 @@ export interface AgyManagementOptions {
   multimodal: {
     get: () => MultimodalView
     set: (value: number | undefined) => MultimodalView
+  }
+  /**
+   * The active User-Agent profile (see `ua-profile.ts`).
+   *
+   * A duck-typed accessor set like `multimodal` above and REQUIRED for the same
+   * reason: the settings card must read the runtime's store, not a second
+   * instance's default. `view()` renders the effective string, so the card can
+   * show what would actually be sent rather than only the selected id.
+   */
+  uaProfile: {
+    view: () => UaProfileViewResult
+    setActive: (id: string) => UaProfileViewResult
+    setCustom: (input: { id: string, label?: string, template: string, versionLine?: string }) => UaProfileViewResult
+    deleteCustom: (id: string) => UaProfileViewResult
   }
   /**
    * The adapter's *unfiltered* model catalog.
@@ -166,6 +181,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
   const { store, sessions, stats, recentRequests, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
   const thinkingBudget = options.thinkingBudget
   const multimodal = options.multimodal
+  const uaProfile = options.uaProfile
   const uiPrefs = options.uiPrefs ?? new UiPrefsStore()
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
@@ -651,6 +667,53 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       } catch (error) {
         // Surface the interval violation verbatim, like `thinking.set*`: the
         // message names the accepted range, so the caller can correct it.
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    },
+
+    'ua.get': async () => uaProfile.view(),
+
+    'ua.setActive': async (payload) => {
+      const body = payload as { id?: unknown } | undefined
+      if (typeof body?.id !== 'string' || body.id === '') fail('id is required')
+      try {
+        return uaProfile.setActive(body.id)
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    },
+
+    'ua.setCustom': async (payload) => {
+      const body = payload as {
+        id?: unknown
+        label?: unknown
+        template?: unknown
+        versionLine?: unknown
+      } | undefined
+      if (typeof body?.id !== 'string' || body.id === '') fail('id is required')
+      if (typeof body.template !== 'string') fail('template is required')
+      if (body.label !== undefined && typeof body.label !== 'string') fail('label must be a string')
+      if (body.versionLine !== undefined && typeof body.versionLine !== 'string') fail('versionLine must be a string')
+      try {
+        return uaProfile.setCustom({
+          id: body.id,
+          template: body.template,
+          ...(body.label === undefined ? {} : { label: body.label }),
+          ...(body.versionLine === undefined ? {} : { versionLine: body.versionLine }),
+        })
+      } catch (error) {
+        // Surface the template rule verbatim: the message names the accepted
+        // shape, so the caller can correct it instead of guessing.
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    },
+
+    'ua.deleteCustom': async (payload) => {
+      const body = payload as { id?: unknown } | undefined
+      if (typeof body?.id !== 'string' || body.id === '') fail('id is required')
+      try {
+        return uaProfile.deleteCustom(body.id)
+      } catch (error) {
         fail(error instanceof Error ? error.message : String(error))
       }
     },

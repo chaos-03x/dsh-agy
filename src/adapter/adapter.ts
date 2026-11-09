@@ -41,7 +41,7 @@ import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { toAgyRequestBody } from './translate.ts'
 import type { AgyResolvedImage } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
-import { AgyStreamIdleTimeoutError, parseAgySse, UnmappedFinishReasonError } from './parse.ts'
+import { AgyClientRetiredError, AgyStreamIdleTimeoutError, parseAgySse, UnmappedFinishReasonError } from './parse.ts'
 import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
 
 export type { AgyAccountSession }
@@ -752,6 +752,20 @@ export class AgyAdapter extends LlmAdapter {
           this.recordUsage(session, options.model, { ok: false, reason: 'aborted', usage }, attemptStartedAt)
           await response.body?.cancel().catch(() => {})
           throw new LlmError('agy stream aborted', 'ABORTED', { cause: error })
+        }
+
+        // The upstream answered HTTP 200 with its "no longer supported" notice
+        // instead of a generation. This is the IDENTITY it was shown, not account
+        // health and not a stream fault: rotating accounts would present the same
+        // gated identity from the next one, and `network-error` would cool a
+        // healthy account. Reported as `request-error` (a no-op at account level)
+        // and surfaced verbatim, because the notice contains the only actionable
+        // instruction the user will get.
+        if (error instanceof AgyClientRetiredError) {
+          await this.options.reportFailure('request-error', session)
+          this.recordUsage(session, options.model, { ok: false, reason: 'request-error', usage }, attemptStartedAt)
+          await response.body?.cancel().catch(() => {})
+          throw new LlmError(error.message, UPSTREAM_ERROR_CODE, { cause: error })
         }
 
         // Idle watchdog (parse.ts): the streaming dispatcher runs with

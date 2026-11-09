@@ -18,9 +18,11 @@ import type { MultimodalSource, MultimodalView } from './multimodal-types.ts'
 import type { ThinkingBudgets } from './thinking-types.ts'
 import type { QuotaGroup } from './types.ts'
 import type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
+import type { UaProfileViewResult } from './ua-profile-types.ts'
 import type { UsageCounters, UsageSource } from './usage-types.ts'
 
 export type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
+export type { UaCustomProfile, UaProfileKind, UaProfileView, UaProfileViewResult } from './ua-profile-types.ts'
 export type { QuotaGroup, QuotaWindow } from './types.ts'
 export type { ThinkingBudgets, ThinkingLevel } from './thinking-types.ts'
 export type { MultimodalSource, MultimodalView } from './multimodal-types.ts'
@@ -403,6 +405,38 @@ export interface AgyRpcMethods {
   }
   'ui.prefs.get': { payload: Record<string, never>; result: UiPrefsView }
   'ui.prefs.set': { payload: SetUiPrefsPayload; result: UiPrefsView }
+  /**
+   * Which client identity this install presents (see `ua-profile.ts`).
+   *
+   * `effective` is the string that would go on the wire right now, and
+   * `versionSource` says whether its version came from a live feed read or the
+   * shipped floor — the two facts a reader needs to tell "the profile is wrong"
+   * from "the feed did not answer".
+   */
+  'ua.get': { payload: Record<string, never>; result: UaProfileViewResult }
+  /**
+   * Switch the active UA profile.
+   *
+   * A built-in id (`hub` / `cli`) or a previously created custom one.
+   * Existing accounts are migrated to the new shape on their next request
+   * (`migrateStoredFingerprintUa`), so a switch does not require re-login.
+   */
+  'ua.setActive': { payload: { id: string }; result: UaProfileViewResult }
+  /**
+   * Create or replace a CUSTOM profile.
+   *
+   * `template` must contain `{version}` (a frozen constant would silently stop
+   * tracking releases and would drift from `clientMetadata.ideVersion`), and
+   * may contain `{platform}`. This is the escape hatch for a future UA the
+   * backend starts accepting: the entry is data, so adding one needs no code
+   * change here.
+   */
+  'ua.setCustom': {
+    payload: { id: string; label?: string; template: string; versionLine?: string }
+    result: UaProfileViewResult
+  }
+  /** Delete a custom profile; an active one falls back to `hub`. */
+  'ua.deleteCustom': { payload: { id: string }; result: UaProfileViewResult }
 }
 
 /** Every method name, for the host's dispatch guard and the client's typing. */

@@ -21,9 +21,10 @@
       "The official client's identity is parameterized per AUTH PROVIDER, not global:",
       "`codeassistclient.(*<X>AuthProvider).GetUserAgentName`, `.SetHTTPHeaders` and",
       "`.GetAuthMethod` exist for X in {CLI, Standalone, IDE, Host, AntigravityHub,",
-      "Stubby, GeminiAPIKey}. So 'which product do we claim' is answered by which",
-      "credential source we use, and our credentials are the CLI's (see oauth.clientId).",
-      "`AGY_CLIENT_ID` appears verbatim in this binary."
+      "Stubby, GeminiAPIKey}. 'Which credential source do we use' is therefore the CLI,",
+      "and `AGY_CLIENT_ID` appears verbatim in the CLI binary.",
+      "NOTE: this record is about CREDENTIALS. The identity PRESENTED on the wire is a",
+      "separate, switchable axis recorded under `userAgentProfiles` — see there."
     ],
     "siblingProviders": [
       "CLIAuthProvider",
@@ -52,14 +53,20 @@
   "version": {
     "claimedLine": "cli",
     "installed": {
-      "value": "1.2.5",
+      "value": "1.5.3",
       "source": "cli",
-      "detectedVia": "`agy --version`"
+      "detectedVia": "`agy --version` (at `~/.local/bin/agy`)",
+      "electronApp": {
+        "value": "2.29.1",
+        "source": "cli",
+        "detectedVia": "`CFBundleShortVersionString` in /Applications/Antigravity.app/Contents/Info.plist",
+        "note": "The desktop app installed on the reference machine. It is AHEAD of the hub feed by one patch (feed: 2.29.0), which is exactly why the SHIPPED floors track the FEED and not this value: a floor reaches every user, so it must name a build upstream actually publishes."
+      }
     },
     "feed": {
-      "latest": "1.2.10",
+      "latest": "1.5.3",
       "url": "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest",
-      "shape": "{ tag_name: \"1.2.10\" } — no leading `v`",
+      "shape": "{ tag_name: \"1.5.3\" } — no leading `v`",
       "source": "feed",
       "note": "The binary also embeds this repository path (raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md) for its `changelog` subcommand."
     },
@@ -67,17 +74,41 @@
       "confidence": "confirmed",
       "cli": "1.2.x",
       "ide": "2.x (antigravity-auto-updater-974169037036.us-central1.run.app/releases)",
-      "hub": "2.15.1 (antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml)",
+      "hub": "2.2x (antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml)",
       "consequence": "Taking the numeric max across the IDE and CLI feeds compares unrelated numbers. The resolver must read the claimed line only; the other lines are for the freshness gate's cross-check."
     },
     "unresolved": [
       "Whether the backend model-gates on this version is UNPROVEN. It is the one cosmetic",
       "variable with a plausible mechanism (capability gating rather than detection), which",
       "is why it stays in the 'keep' tier while the rest of the cosmetic axis is hygiene."
-    ]
+    ],
+    "streamUserAgentGate": {
+      "confidence": "confirmed",
+      "evidence": "MEASURED 2026-11-08 against live `v1internal:streamGenerateContent` (daily AND prod), alternating the UA SHAPE on one account at one version so only the shape varied: `antigravity/cli/1.5.2 (aidev_client; os_type=macos; arch=arm64; auth_method=consumer)` -> 200 with real generated text; `antigravity/1.5.2 darwin/arm64` -> 200 with 'This version of Antigravity is no longer supported. Please download and install the latest version at https://antigravity.google/download ...' as ordinary text and NO finishReason. Reproduced on all three accounts and with randomized ordering.",
+      "whatIsValidated": "The SHAPE (`antigravity/cli/<version>` prefix). `os_type=` and `arch=` are not validated - `antigravity/cli/<version>` alone is served, as are `os_type=linux`/`os_type=macos`.",
+      "whatIsNotValidated": "The version VALUE within that shape is not compared against any feed by the probe: `9.9.9` and `2.15.1` were ALSO past the gate on some endpoints. The gate rejects the short shape, not a stale number.",
+      "symptom": "Because the notice carries no finishReason, the #85 completeness guard reported it as 'agy stream terminated prematurely without [DONE] or finishReason' - a stream-fault message for what is a version gate.",
+      "note": "The CLI-shaped UA is not transcribed from a UA builder (the CLI has none); this measurement is its only evidence.",
+      "supersededForShape": "The 2026-11-09 hub sweep shows the SHAPE axis is wider than CLI-vs-short: the hub product string is also served. What actually retires a request is a version that does not belong to the shape's line (see hubProfile)."
+    },
+    "hubProfile": {
+      "confidence": "measured",
+      "evidence": "MEASURED 2026-11-09 on one account, one model, one prompt, one session id per probe, each version repeated three times, alternating only the UA string: the Chromium product string `Mozilla/5.0 (...) AppleWebKit/537.36 ... Antigravity/<v> Chrome/<c> Electron/<e> Safari/537.36` AND the shipped hub shape `antigravity/hub/<v> (aidev_client; os_type=darwin; arch=arm64; cl=<changelist>)` is SERVED for 2.0.0, 2.3.0 and 2.6.0-3.0.0, and RETIRED for 2.1.0, 2.2.0, 2.4.0 and 2.5.0. Every retired version reproduced 3/3, so the gate is per-version and not monotonic.",
+      "whatIsValidated": "The shape's VERSION LINE (Electron `2.x`) and, for the hub shape, the version itself. The `Chrome/`/`Electron/` tokens of the Chromium form are NOT validated (Chrome 120/Electron 28 and Chrome 130/Electron 33 answered identically), and neither is the OS clause (`Windows NT 10.0` answered the same as the macOS one). The shipped shape is the hub one because it is upstream's own: read from the app's spawn arguments and its binary's diagnostic format.",
+      "quotaGroupGate": {
+        "finding": "`v1internal:retrieveUserQuotaSummary` answers 200 for every shape but returns a DIFFERENT GROUP SET depending on the identity's version LINE: a hub-shaped string carrying a `2.x` version returns `Gemini Models` + `Claude and GPT models`, while the same Electron shape carrying a `1.x` version returns ONLY `Claude and GPT models`. A CLI-shaped string returns both groups at any version tried.",
+        "consequence": "The shape and its version must come from ONE product line. A mismatched pair is silent (200, valid JSON, one fewer group), which is why the missing Gemini quota read as a UI defect. This is the measured basis for `src/ua-profile.ts`."
+      },
+      "shippedShape": {
+        "value": "antigravity/hub/<version> (aidev_client; os_type=<os>; arch=<arch>; cl=1003475615)",
+        "source": "pclntab + cli (spawn args)",
+        "verified": "200 + finishReason on streamGenerateContent, and both quota groups on retrieveUserQuotaSummary (measured 2026-11-09)"
+      }
+    },
+    "hubProfileFallback": "2.29.0"
   },
   "userAgent": {
-    "confidence": "unresolved",
+    "confidence": "confirmed",
     "finding": [
       "The CLI contains NO `Antigravity/` literal and no bare `antigravity` product token",
       "anywhere: all 10 `antigravity/` hits are paths, URLs and package names",
@@ -119,7 +150,14 @@
       "2. MITM: `HTTPS_PROXY=http://127.0.0.1:<port>` plus a trusted CA.",
       "Note the CLI writes its logs to ~/.gemini/antigravity-cli/log/cli-*.log but does NOT",
       "log request headers at the default verbosity, so the logs do not answer this."
-    ]
+    ],
+    "resolution": {
+      "finding": "The wire value is a PRODUCT STRING whose shape AND version line must agree. Two shapes are measured served on the data plane: the CLI shape `antigravity/cli/<v> (<tokens>)` (2026-11-08) and the Electron product string `Mozilla/5.0 (...) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/<v> Chrome/<c> Electron/<e> Safari/537.36` (2026-11-09).",
+      "whyNotOneString": "They are different products on disjoint version namespaces (CLI 1.5.x, hub 2.x). Because upstream reads the LINE as well as the shape (see version.hubProfile.quotaGroupGate), a client must pick one and keep the pair consistent. That is what `src/ua-profile.ts` persists.",
+      "default": "hub",
+      "defaultRationale": "The installed artifact on the reference machine IS the Antigravity Hub app (`com.google.antigravity`, 2.29.1, `--subclient_type hub`), and the product decision is to present as it rather than as the CLI. The CLI profile stays available because its OAuth credentials are what the login flow uses.",
+      "customProfiles": "A custom template (`{version}` required, `{platform}` optional) lets a future shape be added as DATA, without a code change, when upstream changes what it accepts."
+    }
   },
   "clientMetadata": {
     "confidence": "confirmed",
@@ -407,5 +445,12 @@
     "Whether the backend model-gates on the advertised version.",
     "The sentinel's exact placement across sibling functionCalls.",
     "Whether X-Aicode-* is sent on the generate path."
-  ]
+  ],
+  "userAgentProfiles": {
+    "confidence": "measured",
+    "default": "hub",
+    "defaultRationale": "The installed reference artifact IS the Antigravity Hub desktop app (`com.google.antigravity`, 2.29.1, `--subclient_type hub`), and the product decision is to present as it rather than as the CLI. The CLI profile stays available because its credentials are what the OAuth flow uses.",
+    "switchable": "`src/ua-profile.ts` persists the choice in `$DSH_HOME/agy/agy-ua-profile.json`. Built-ins: `hub`, `cli`. A custom template (`{version}` required, `{platform}` optional) lets a future shape be added as DATA, without a code change, when upstream changes what it accepts.",
+    "whyItIsFunctional": "Upstream reads the version LINE, not only the shape: a mismatched pair is served 200 with the retirement notice on generation and returns one fewer quota group. The pair is therefore decided in ONE place and every builder reads it."
+  }
 }

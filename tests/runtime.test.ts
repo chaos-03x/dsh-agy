@@ -23,6 +23,7 @@ import {
   getRandomizedHeaders,
   getStableHeaders,
   MAX_FINGERPRINT_HISTORY,
+  migrateStoredFingerprintUa,
   recordFingerprintVersion,
   updateFingerprintVersion,
 } from '../src/runtime/fingerprint.ts'
@@ -33,8 +34,21 @@ import {
   deriveAntigravitySessionId,
   generateAntigravityRequestId,
 } from '../src/runtime/identity.ts'
-import { _clearVersionCacheForTest, resolveAntigravityVersion } from '../src/runtime/version.ts'
+import {
+  _clearVersionCacheForTest,
+  resolveAntigravityVersion,
+  resolveObservedAgyVersion,
+} from '../src/runtime/version.ts'
+import {
+  AGY_VERSION_FALLBACK,
+  currentHubVersion,
+  setResolvedHubVersion,
+} from '../src/oauth/constants.ts'
 import { parseQuotaSummary } from '../src/adapter/quota-summary.ts'
+import { UaProfileStore, _setUaProfileStoreForTest } from '../src/ua-profile.ts'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   FAMILY_UNKNOWN,
   familiesForBucketId,
@@ -419,7 +433,47 @@ describe('rotation state machine', () => {
   })
 })
 
+/**
+ * Point the process-wide profile at a fresh temp store, or at a named profile.
+ *
+ * The store is a process singleton on purpose (see `ua-profile.ts`), so every
+ * test that asserts on a UA shape must own it for its duration — otherwise the
+ * assertion depends on whatever the previous test left behind.
+ */
+function freshProfileStore(): UaProfileStore {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-ua-test-'))
+  const store = new UaProfileStore({ file: join(dir, 'agy-ua-profile.json'), revalidateIntervalMs: 0 })
+  _setUaProfileStoreForTest(store)
+  return store
+}
+
+function useElectronProfile(): UaProfileStore {
+  const store = freshProfileStore()
+  store.setActive('hub')
+  return store
+}
+
+function useCliProfile(): UaProfileStore {
+  const store = freshProfileStore()
+  store.setActive('cli')
+  return store
+}
+
+/**
+ * The exact Electron/Hub string for a version, so a test pins the WHOLE shape.
+ *
+ * `antigravity/hub/<ver> (aidev_client; os_type=…; arch=…; cl=…)` is upstream's
+ * own shape, read out of the installed app's spawn arguments and its binary's
+ * diagnostic format — not a Chromium product string invented here.
+ */
+function hubUa(version: string): string {
+  return `antigravity/hub/${version} (aidev_client; os_type=macos; arch=arm64; cl=1003475615)`
+}
+
 describe('fingerprint', () => {
+  beforeEach(() => { freshProfileStore() })
+  afterEach(() => { _setUaProfileStoreForTest(undefined) })
+
   it('generates valid fingerprints from the external data', () => {
     const fp = generateFingerprint()
     expect(fp.deviceId).toMatch(/^[0-9a-f-]{36}$/)
@@ -429,12 +483,22 @@ describe('fingerprint', () => {
     // LINUX_AMD64 | LINUX_ARM64 | WINDOWS_AMD64`, so these Go-style tokens ARE the
     // official vocabulary for the enum — while the UA's own `darwin/arm64` token is
     // a separate, still-uncaptured thing (docs/official-identity.json).
-    expect(fp.userAgent).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+ \(aidev_client; os_type=darwin; arch=arm64; cl=\d+\)$/)
+    //
+    // The UA comes from the ACTIVE PROFILE, and the default profile is the
+    // Electron/Hub app (measured 2026-11-09: the short `antigravity/<v> <plat>`
+    // form and any version below the floor answer the "no longer supported"
+    // notice, and a hub string carrying a `1.x` version silently loses the
+    // Gemini quota group). The shape and its line must therefore come from ONE
+    // place, which is why this asserts the exact whole string.
+    expect(fp.userAgent).toBe(hubUa(fp.clientMetadata.ideVersion))
     expect(fp.clientMetadata.ideType).toBe('ANTIGRAVITY')
     // The metadata is the official `ClientMetadata` message: only fields whose
     // vocabulary is captured, so `pluginVersion`/`ideName`/... stay absent rather
     // than guessed.
-    expect(fp.clientMetadata.ideVersion).toBe(fp.userAgent.match(/antigravity\/hub\/([\d.]+)/)?.[1])
+    expect(fp.clientMetadata.ideVersion).toMatch(/^\d+\.\d+\.\d+$/)
+    // The UA and the metadata state the same version: letting them drift is how
+    // one account comes to look like two clients.
+    expect(fp.userAgent).toBe(hubUa(fp.clientMetadata.ideVersion))
     expect([
       'PLATFORM_UNSPECIFIED', 'DARWIN_AMD64', 'DARWIN_ARM64',
       'LINUX_AMD64', 'LINUX_ARM64', 'WINDOWS_AMD64',
@@ -455,13 +519,90 @@ describe('fingerprint', () => {
     expect(seen.size).toBeGreaterThan(1)
   })
 
-  it('updates the version inside a fingerprint UA', () => {
+  it('updates the version inside a fingerprint UA, keeping the ACTIVE profile shape', () => {
+    // The DEFAULT profile is the Electron desktop app, so a version bump keeps
+    // the Electron shape: the two lines are different products, and swapping a
+    // number into whatever prefix happened to be there is how a `1.x` value ends
+    // up inside an `Antigravity/2.x` string (which the data plane retires).
+    useElectronProfile()
     const fp = generateFingerprint()
-    const before = fp.userAgent
+    expect(updateFingerprintVersion(fp, '2.30.0')).toBe(true)
+    expect(fp.userAgent).toBe(hubUa('2.30.0'))
+    expect(updateFingerprintVersion(fp, '2.30.0')).toBe(false)
+    expect(updateFingerprintVersion(fp, '2.31.0')).toBe(true)
+    expect(fp.userAgent).toBe(hubUa('2.31.0'))
+  })
+
+  it('keeps the CLI shape when the CLI profile is active', () => {
+    useCliProfile()
+    const fp = generateFingerprint()
     expect(updateFingerprintVersion(fp, '9.9.9')).toBe(true)
-    expect(fp.userAgent).toContain('antigravity/hub/9.9.9')
+    expect(fp.userAgent).toBe('antigravity/cli/9.9.9 (aidev_client; os_type=macos; arch=arm64; auth_method=consumer)')
     expect(updateFingerprintVersion(fp, '9.9.9')).toBe(false)
-    expect(fp.userAgent).toBe(before.replace(/antigravity\/hub\/[\d.]+/, 'antigravity/hub/9.9.9'))
+    expect(updateFingerprintVersion(fp, '1.2.3')).toBe(true)
+    expect(fp.userAgent).toContain('antigravity/cli/1.2.3 ')
+  })
+
+  it('migrates a stored identity onto the active profile, re-resolving an off-line version', () => {
+    // An identity created before profiles existed is persisted and reused for the
+    // account's whole life, so without this every existing install keeps the
+    // retired identity. The stored version is RE-RESOLVED when it belongs to the
+    // other line: an Electron string does not accept `1.2.14`.
+    useElectronProfile()
+    const legacy = {
+      deviceId: 'd', sessionToken: 's', userAgent: 'antigravity/1.2.14 darwin/arm64',
+      apiClient: 'c', clientMetadata: { ideType: 'ANTIGRAVITY', ideVersion: '1.2.14' }, createdAt: 0,
+    }
+    expect(migrateStoredFingerprintUa(legacy)).toBe(true)
+    expect(legacy.userAgent).toMatch(/^antigravity\/hub\/2\.\d+\.\d+ \(aidev_client; /)
+    // Idempotent: an already-migrated identity is left alone.
+    expect(migrateStoredFingerprintUa(legacy)).toBe(false)
+  })
+
+  it('moves the metadata version with the UA when migrating an identity', () => {
+    // The metadata message states the same fact as the UA. A migration that
+    // rewrote only the UA left the account presenting two versions at once —
+    // the exact drift `updateFingerprintVersion` exists to prevent.
+    useElectronProfile()
+    const legacy = {
+      deviceId: 'd', sessionToken: 's', userAgent: 'antigravity/1.2.14 darwin/arm64',
+      apiClient: 'c', clientMetadata: { ideType: 'ANTIGRAVITY', ideVersion: '1.2.14' }, createdAt: 0,
+    }
+    expect(migrateStoredFingerprintUa(legacy)).toBe(true)
+    const uaVersion = /antigravity\/hub\/([\d.]+)/.exec(legacy.userAgent)?.[1]
+    expect(uaVersion).toBeDefined()
+    expect(legacy.clientMetadata.ideVersion).toBe(uaVersion)
+  })
+
+  it('never publishes a CLI-line version into the hub slot', async () => {
+    // Regression, found end-to-end: when the hub manifest did not answer, the
+    // resolver fell back to the CLI feed and published `1.x` into the HUB slot,
+    // so the Electron profile emitted `antigravity/hub/1.5.3` — the retired pair
+    // that also loses the Gemini quota group. A cross-line fallback is not a
+    // fallback; "unobserved" must stay distinguishable from "observed".
+    _clearVersionCacheForTest()
+    setResolvedHubVersion(undefined)
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('antigravity-hub-auto-updater')) throw new TypeError('fetch failed')
+      return new Response(JSON.stringify({ tag_name: '1.5.3' }), { status: 200 })
+    }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+    const observed = await resolveObservedAgyVersion(fetchImpl)
+    expect(observed).toBeUndefined()
+    // The hub slot keeps its OWN floor rather than borrowing the CLI line's.
+    expect(currentHubVersion()).toBe(AGY_VERSION_FALLBACK)
+    expect(currentHubVersion().split('.')[0]).toBe('2')
+  })
+
+  it('rewrites a legacy UA through updateFingerprintVersion rather than swapping into the old shape', () => {
+    useCliProfile()
+    const legacy = {
+      deviceId: 'd', sessionToken: 's', userAgent: 'antigravity/1.0.0 windows/amd64',
+      apiClient: 'c', clientMetadata: { ideType: 'ANTIGRAVITY' }, createdAt: 0,
+    }
+    expect(updateFingerprintVersion(legacy, '9.9.9')).toBe(true)
+    expect(legacy.userAgent).toBe('antigravity/cli/9.9.9 (aidev_client; os_type=windows; arch=amd64; auth_method=consumer)')
   })
 
   it('bounds the fingerprint history to the most recent entries', () => {
@@ -613,24 +754,28 @@ describe('version resolver', () => {
   // this one and the assertion below would never reach the stub.
   beforeEach(() => _clearVersionCacheForTest())
 
-  it('takes the version from the claimed product line, not the highest number', async () => {
-    // The resolver used to return the numeric max across BOTH feeds. The three
-    // Antigravity lines are separate namespaces (IDE 2.x, hub 2.15.x, CLI 1.2.x),
-    // so "max" compares unrelated numbers: the IDE feed's 1.20.1 wins here and this
-    // client would advertise a version that does not exist for the CLI it claims to
-    // be (docs/official-identity.json). Red-capable: the old logic returns 1.20.1.
+  it('takes the version from the HUB feed only, never the IDE or CLI line', async () => {
+    // The resolver used to return the numeric max across feeds. The three
+    // Antigravity lines are separate namespaces (IDE 2.x, hub 2.2x, CLI 1.5.x), so
+    // "max" compares unrelated numbers and advertised whichever line counted
+    // higher. It now reads the hub manifest ONLY, and a cross-line fallback was
+    // removed for the same reason: a `1.x` value published into the hub slot made
+    // the Electron profile emit `antigravity/hub/1.5.3`, the retired pair.
+    _clearVersionCacheForTest()
+    setResolvedHubVersion(undefined)
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.includes('antigravity-hub-auto-updater')) {
+        return new Response('version: 2.9.0\nfiles: []\n', { status: 200 })
+      }
       if (url.includes('antigravity-auto-updater')) {
         return new Response(JSON.stringify([{ version: '1.15.0' }, { version: '1.20.1' }]), { status: 200 })
       }
-      // No leading `v`: that is the shape the real feed returns (`tag: "1.2.9"`),
-      // and a `v`-prefixed tag is not what this parser accepts.
       return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
-    const version = await resolveAntigravityVersion(fetchImpl)
-    expect(version).toBe('1.19.0')
+    // 2.9.0 is the hub answer; neither 1.20.1 (IDE) nor 1.19.0 (CLI) may win.
+    expect(await resolveAntigravityVersion(fetchImpl)).toBe('2.9.0')
   })
 
   it('falls back to the pinned version when sources fail', async () => {

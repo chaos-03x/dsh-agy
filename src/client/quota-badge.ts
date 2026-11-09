@@ -9,6 +9,9 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+// `react-dom` is shared into the shell's frozen module table
+// (`PLATFORM_MODULES`), so importing it here does NOT inline a second copy.
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import {
   Button,
@@ -507,17 +510,42 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     ),
   )
 
-  const popoverNode = isOpen
-    ? (isMobile
-        ? h(
-            'div',
-            {
-              className: 'agy-ui-popover-container mobile',
-              onClick: handleClose,
-            },
-            popoverContent,
-          )
-        : popoverContent)
+  /**
+   * The popover is PORTALED to `document.body`, for both layouts.
+   *
+   * WHY. The badge lives in `conversation.session.header.actions`, whose owning
+   * cluster (`.titleCluster` in the host's ConversationRoot CSS) is
+   * `overflow: clip` with a trailing `mask-image` fade — a clipping context
+   * that exists so overflowing header buttons cannot steal clicks. An inline
+   * popover is therefore clipped to the header's height and fades out near its
+   * right edge, which is exactly "clicked the badge, nothing appeared" (or a
+   * panel with its right side missing). A fixed-position box inside that
+   * ancestor is still clipped: `overflow` clips descendants regardless of
+   * `position: fixed` on a masked ancestor.
+   *
+   * Portaling also makes the mobile sheet honest: it was already
+   * `position: fixed; inset: 0`, but rendering it inside the header meant its
+   * backdrop covered only the header band.
+   *
+   * `useAnchoredPosition` measures the ANCHOR's viewport rect and positions the
+   * panel with `position: fixed`, so it is portal-safe by construction — it was
+   * always written for a portaled panel (its own docstring says so), and this is
+   * what finally honours that.
+   */
+  const popoverNode = isOpen && typeof document !== 'undefined'
+    ? createPortal(
+        isMobile
+          ? h(
+              'div',
+              {
+                className: 'agy-ui-popover-container mobile',
+                onClick: handleClose,
+              },
+              popoverContent,
+            )
+          : popoverContent,
+        document.body,
+      )
     : null
 
   return h(

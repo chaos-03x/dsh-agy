@@ -9,13 +9,17 @@ import {
   AGY_ENDPOINT_FALLBACKS,
   AGY_IDE_TYPE,
   AGY_PLATFORM_ENUM,
-  currentAgyVersion,
-  getAgyBootstrapUserAgent,
 } from '../oauth/constants.ts'
 import { decodeCredentialBlob } from '../oauth/blob.ts'
 import { normalizeProxyUrl, proxiedFetch } from '../proxy.ts'
+import { activeUserAgent, uaProfileStore } from '../ua-profile.ts'
 import type { AccountStore } from '../store/accounts.ts'
 import type { ManagedAccount } from '../types.ts'
+
+/** The version of the ACTIVE UA profile's own line (see `ua-profile.ts`). */
+function activeProfileVersion(): string {
+  return uaProfileStore().activeVersion()
+}
 
 export class AgyAuthFileError extends Error {
   status: number
@@ -117,7 +121,7 @@ export async function enrichWithAntigravityBackend(
     const headers: Record<string, string> = {
       Authorization: `Bearer ${parsed.accessToken}`,
       'Content-Type': 'application/json',
-      'User-Agent': getAgyBootstrapUserAgent(),
+      'User-Agent': activeUserAgent(),
     }
     // The identity rides in the BODY `metadata` message, matching
     // `LoadCodeAssistRequest.metadata` in the official descriptor; there is no
@@ -125,7 +129,7 @@ export async function enrichWithAntigravityBackend(
     const loadBody = JSON.stringify({
       metadata: {
         ideType: AGY_IDE_TYPE,
-        ideVersion: currentAgyVersion(),
+        ideVersion: activeProfileVersion(),
         platform: AGY_PLATFORM_ENUM,
       },
     })

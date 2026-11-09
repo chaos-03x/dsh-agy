@@ -9,16 +9,18 @@
 import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { AgyAdapter } from './adapter/adapter.ts'
+import { fingerprintUaNeedsMigration, migrateStoredFingerprintUa } from './runtime/fingerprint.ts'
 import type { AgyAttachmentStore } from './adapter/adapter.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { ModelVisibility } from './model-visibility.ts'
 import { MultimodalConfigStore } from './multimodal-config.ts'
 import { ThinkingBudgetStore } from './thinking-budget.ts'
+import { UaProfileStore, uaProfileStore } from './ua-profile.ts'
 import { UsageStats } from './stats.ts'
 import { RecentActivityStore } from './recent-store.ts'
 import { probeFetch, proxiedFetch } from './proxy.ts'
 import { pickProbeProxyUrl } from './runtime/rotation.ts'
-import { resolveAntigravityVersion } from './runtime/version.ts'
+import { resolveAntigravityCliVersion, resolveAntigravityVersion } from './runtime/version.ts'
 import type { FetchLike } from './runtime/version.ts'
 import { AgySessionManager } from './session.ts'
 import { JsonAccountStore } from './store/accounts.ts'
@@ -86,7 +88,61 @@ async function warmVersionCache(store: AccountStore): Promise<void> {
   } catch {
     // Fall through to the env/direct route.
   }
-  await resolveAntigravityVersion(fetchImpl).catch(() => {})
+  // Both lines are warmed: the ACTIVE UA profile decides which one the wire
+  // uses, and a profile switched after boot must not advertise a cold-start
+  // floor. `resolveAntigravityVersion` already warms the hub manifest; the CLI
+  // feed has its own slot and needs its own read.
+  await Promise.all([
+    resolveAntigravityVersion(fetchImpl).catch(() => {}),
+    resolveAntigravityCliVersion(fetchImpl).catch(() => {}),
+  ])
+}
+
+/**
+ * Move EVERY stored account identity onto the active UA profile, once at boot.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM `getSession`'s migration. That one is on the
+ * request hot path and only ever sees the account it happens to PICK, so an
+ * account the pool never selects keeps its old identity indefinitely — and when
+ * rotation finally lands on it the first turn fails with
+ * `AgyClientRetiredError` before the migration runs, i.e. the user pays one
+ * failed turn per stale account to discover a shape the boot could have fixed.
+ * On this channel the stale identity is also functional, not cosmetic: a `1.x`
+ * number inside the hub shape makes `retrieveUserQuotaSummary` return only the
+ * `Claude and GPT models` group (measured 2026-11-09), so an un-migrated account
+ * silently loses its Gemini quota card.
+ *
+ * Runs under the store's own file lock through `mutate`, so a concurrent writer
+ * (Desktop / web server / CLI) cannot lose its update, and writes ONLY the two
+ * fields the migration owns.
+ *
+ * Soft-fail by design: a store that cannot be read or written must not stop the
+ * plugin from booting — the hot-path migration still covers whichever account is
+ * actually used, so the degraded state is "migrated lazily" rather than "broken".
+ *
+ * @returns how many identities were rewritten (0 on the steady state, so the
+ *   caller only logs when something actually changed).
+ */
+async function migratePoolIdentities(store: AccountStore): Promise<number> {
+  try {
+    const storage = await store.load()
+    // Cheap pre-check: a healthy pool pays no write at all, which matters
+    // because this runs on every boot of every surface.
+    const pending = storage.accounts.some(
+      (account) => account.fingerprint !== undefined && fingerprintUaNeedsMigration(account.fingerprint),
+    )
+    if (!pending) return 0
+    return await store.mutate((current) => {
+      let migrated = 0
+      for (const account of current.accounts) {
+        if (account.fingerprint === undefined) continue
+        if (migrateStoredFingerprintUa(account.fingerprint)) migrated++
+      }
+      return migrated
+    })
+  } catch {
+    return 0
+  }
 }
 
 /** The runtime one plugin entry uses: store, sessions, adapter, and the caches. */
@@ -99,6 +155,7 @@ export interface AgyRuntime {
   modelVisibility: ModelVisibility
   thinkingBudget: ThinkingBudgetStore
   multimodalConfig: MultimodalConfigStore
+  uaProfile: UaProfileStore
 }
 
 /**
@@ -149,6 +206,17 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     )
   }
   const store = new JsonAccountStore({ file: accountsMigrated.file, codec })
+  // Migrate the WHOLE pool's client identity before any request can be served,
+  // so no account is left on a retired shape waiting for rotation to discover it.
+  // Awaited (not fired-and-forgotten): the first `getSession` must not race it,
+  // and it is one locked read plus at most one write.
+  const identitiesMigrated = await migratePoolIdentities(store)
+  if (identitiesMigrated > 0) {
+    ctx.logger.info(
+      `[dsh-agy] migrated ${identitiesMigrated} stored account identity(ies) to the active `
+      + `UA profile (${uaProfileStore().activeId()}) — their previous shape was retired upstream`,
+    )
+  }
   void warmVersionCache(store)
   // The persisted recent-activity ring, built FIRST so it seeds from disk
   // before any record can arrive and `pool.recent` shows the other processes'
@@ -179,6 +247,11 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   const modelVisibility = new ModelVisibility()
   const thinkingBudget = new ThinkingBudgetStore()
   const multimodalConfig = new MultimodalConfigStore()
+  // The active client identity. Built before the session manager so the first
+  // request already presents the profile, and NOT rebuilt when the profile
+  // changes: the store re-reads its file on the hot path (content compare), so
+  // a switch in the web entry reaches the main plugin without new wiring.
+  const uaProfile = new UaProfileStore()
   // The adapter's model-list cache is keyed to no account (see
   // `AgyAdapter.invalidateModelCache`), so every event that can switch the
   // account discovery rides must drop it. The adapter does not exist yet when
@@ -226,7 +299,7 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     stats.flushSync()
     recentStore.flushSync()
   })
-  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig }
+  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig, uaProfile }
 }
 
 export { AGY_PROVIDER }

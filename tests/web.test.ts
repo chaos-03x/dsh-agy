@@ -5,6 +5,9 @@ import { afterEach, describe, it, expect, vi } from 'vitest'
 import { _resetAgyRuntimeForTest, createAgyRuntime } from '../src/plugin-common.ts'
 import { renderCallbackHtml } from '../src/web/page.ts'
 import { I18N_DICT } from '../src/web/i18n.ts'
+import { JsonAccountStore } from '../src/store/accounts.ts'
+import { resolveMasterKeyCodec } from '../src/store/keyring.ts'
+import { UaProfileStore, _setUaProfileStoreForTest } from '../src/ua-profile.ts'
 
 /**
  * The dashboard page is gone: the account/statistics UI is now the Settings
@@ -33,6 +36,73 @@ describe('agy runtime sharing', () => {
     expect(web.sessions).toBe(main.sessions)
     expect(web.adapter).toBe(main.adapter)
     expect(web.store).toBe(main.store)
+  })
+})
+
+describe('boot-time pool identity migration', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.DSH_HOME
+    _resetAgyRuntimeForTest()
+    _setUaProfileStoreForTest(undefined)
+  })
+
+  it('migrates EVERY stored identity at boot, not just the one a request picks', async () => {
+    // `getSession` only sees the account it happens to choose, so an account the
+    // pool never selects keeps a retired shape until rotation lands on it — and
+    // the user pays one failed turn (AgyClientRetiredError) per stale account to
+    // discover what boot could have fixed. A `1.x` value in the hub shape also
+    // makes retrieveUserQuotaSummary return only the Claude/GPT group.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const home = mkdtempSync(join(tmpdir(), 'agy-boot-migrate-'))
+    process.env.DSH_HOME = home
+
+    // A profile store on this $DSH_HOME, so the boot migration and the test agree.
+    _setUaProfileStoreForTest(new UaProfileStore({
+      file: join(home, 'agy', 'agy-ua-profile.json'),
+      revalidateIntervalMs: 0,
+    }))
+
+    // Seed a pool whose accounts carry the RETIRED short shape, one of them
+    // never used by any request in this test.
+    //
+    // The codec MUST be the runtime's own master key: `resolveMasterKeyCodec`
+    // creates and persists one on first boot, and a store sealed with any other
+    // key throws on decrypt — which `migratePoolIdentities` swallows by design
+    // (soft-fail), so an invented key makes this test pass while proving nothing.
+    const { codec } = resolveMasterKeyCodec(home)
+    const file = join(home, 'agy', 'agy-accounts.json')
+    const legacy = (email: string) => ({
+      id: email, email, refresh: '1//r', enabled: true, projectId: 'p',
+      fingerprint: {
+        deviceId: `d-${email}`, sessionToken: 's',
+        userAgent: 'antigravity/1.2.14 darwin/arm64',
+        apiClient: 'c',
+        clientMetadata: { ideType: 'ANTIGRAVITY', ideVersion: '1.2.14' },
+        createdAt: 1,
+      },
+    })
+    // AWAITED: `save` takes the file lock, and an un-awaited call races the boot
+    // read below — the runtime then sees an empty pool and the assertion is vacuous.
+    await new JsonAccountStore({ file, codec }).save({ version: 4, activeIndex: 0, accounts: [
+      legacy('a@x'), legacy('b@x'), legacy('c@x'),
+    ] } as never)
+
+    _resetAgyRuntimeForTest()
+    const runtime = await createAgyRuntime({ get: () => undefined, logger: { warn() {}, info() {} } } as never)
+    expect(runtime).toBeDefined()
+
+    // ALL three, without a single request having been made. The length check is
+    // load-bearing: an empty store would make the loop below vacuous and the test
+    // would pass while asserting nothing (it did exactly that before).
+    const after = await new JsonAccountStore({ file, codec }).load()
+    expect(after.accounts).toHaveLength(3)
+    for (const account of after.accounts) {
+      expect(account.fingerprint?.userAgent).toBe(
+        'antigravity/hub/2.29.0 (aidev_client; os_type=macos; arch=arm64; cl=1003475615)',
+      )
+      expect(account.fingerprint?.clientMetadata.ideVersion).toBe('2.29.0')
+    }
   })
 })
 
