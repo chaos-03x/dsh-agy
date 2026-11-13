@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, resolveWireModel, toAgyRequestBody } from '../src/adapter/translate.ts'
 import {
+  AgyClientRetiredError,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   parseAgySse,
   parseSseDataLine,
@@ -1366,6 +1367,39 @@ describe('parseAgySse', () => {
     expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
 
+  it('names the version-gate notice instead of reporting a truncated stream', async () => {
+    // MEASURED 2026-11-08: a gated identity gets HTTP 200 and this one-line
+    // plain-text body, as an ordinary `data:` chunk carrying NO finishReason —
+    // so it lands on the completeness guard and used to surface as the generic
+    // "terminated prematurely", sending the reader after the network when the
+    // cause was the identity. The notice is SPLIT across two parts here so the
+    // accumulated-prefix match is what is being pinned, not a single part.
+    await expect(async () => {
+      for await (const _ of parseAgySse(sseStream([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"This version of Antigravity is no longer supp"}]}}]}}',
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"orted. Please download and install the latest version at https://antigravity.google/download to continue using the agent."}]}}]}}',
+      ]))) void _
+    }).rejects.toBeInstanceOf(AgyClientRetiredError)
+  })
+
+  it('carries the upstream notice and an actionable message on the gate error', async () => {
+    await expect(async () => {
+      for await (const _ of parseAgySse(sseStream([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"This version of Antigravity is no longer supported. Please update."}]}}]}}',
+      ]))) void _
+    }).rejects.toThrow(/no longer supported — update dsh-agy/)
+  })
+
+  it('does not mistake a normal reply MENTIONING the notice for the gate', async () => {
+    // Only a body that STARTS with the notice is the gate; a real answer that
+    // quotes it later still ends with a finishReason and must complete normally.
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"Users see: This version of Antigravity is no longer supported."}]}}]}}',
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":" Done."}]},"finishReason":"STOP"}]}}',
+    ])))
+    expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
   it('completes the measured live shape: finishReason terminates, no [DONE]', async () => {
     // MEASURED on daily-cloudcode-pa (2026-10-03, probe, 3/3): real streams
     // send NO `data: [DONE]` — the final data chunk carries the candidate
@@ -2400,6 +2434,25 @@ describe('AgyAdapter', () => {
     await expect(async () => {
       for await (const _ of adapter.stream(generateOptions())) void _
     }).rejects.toMatchObject({ code: 'UPSTREAM' })
+    expect(failures).toEqual(['request-error'])
+  })
+
+  it('does not cool the account for the version-gate notice', async () => {
+    // The gate is a verdict on the IDENTITY the request presented, not account
+    // health: `network-error` would cool and rotate a healthy account, and the
+    // next one would present the same gated identity. request-error is the
+    // no-op, and the notice rides the message so the cause is visible.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"This version of Antigravity is no longer supported. Please update."}]}}]}}',
+    ]), { status: 200 })))
+    const failures: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toThrow(/no longer supported — update dsh-agy/)
     expect(failures).toEqual(['request-error'])
   })
 

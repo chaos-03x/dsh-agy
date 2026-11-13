@@ -542,14 +542,26 @@ export const AGY_STYLES_CSS = `
   font: var(--dsw-font-xs-13);
 }
 
+/* The effective UA string: a header value, so it needs to wrap rather than
+   force the card wider than the Settings panel (a hub UA is ~90 chars). */
+.agy-limits-effective {
+  overflow-wrap: anywhere;
+  font: var(--dsw-font-xxs-12);
+  color: ${aliasVar('label-secondary')};
+}
+
 .agy-ui-popover-container.desktop {
   position: static;
 }
 
+/* Matches the host's own popover/menu layer: its Menu, Tooltip[data-portal],
+   ModelSelect and Toast all sit at 1100. The old 1000 was the same value as the
+   host MODAL layer, so a portaled badge panel tied with any open dialog and lost
+   on document order — the "it shows but something covers it" symptom. */
 .agy-ui-popover-container.mobile {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: 1100;
   background: rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
@@ -570,7 +582,7 @@ export const AGY_STYLES_CSS = `
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  z-index: 1000;
+  z-index: 1100;
 }
 
 .agy-ui-popover.desktop {

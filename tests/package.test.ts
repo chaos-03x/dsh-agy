@@ -24,6 +24,19 @@ describe('dsh-agy client package contract', () => {
     })
   })
 
+  it('never inlines a second ReactDOM', () => {
+    // The quota popover is portaled to `document.body`, which needs
+    // `createPortal`. `react-dom` is in the shell's frozen module table
+    // (`PLATFORM_MODULES`), so the bundle must REQUEST it: inlining a second
+    // ReactDOM ships another reconciler with its own internal state, which was
+    // exactly what happened (1.1MB bundle, 186KB after the fix).
+    const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+    expect(source).toContain('require("react-dom")')
+    // A vendored copy would show up as the package's own CJS filename.
+    expect(source).not.toContain('react-dom.development.js')
+    expect(source).not.toContain('react-dom.production.min.js')
+  })
+
   it('emits the client artifact after build', () => {
     expect(existsSync(new URL('../lib/client.js', import.meta.url))).toBe(true)
     expect(existsSync(new URL('../lib/client.d.ts', import.meta.url))).toBe(true)

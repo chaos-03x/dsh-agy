@@ -5,7 +5,8 @@
  */
 
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
-import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
+import { AGY_ENDPOINT_FALLBACKS } from '../oauth/constants.ts'
+import { activeUserAgent } from '../ua-profile.ts'
 import { proxiedFetch } from '../proxy.ts'
 import {
   AGY_PUBLIC_MODELS,
@@ -232,7 +233,7 @@ export async function fetchAvailableModels(
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
-          'User-Agent': getAgyBootstrapUserAgent(),
+          'User-Agent': activeUserAgent(),
         },
         body: JSON.stringify(body),
       })

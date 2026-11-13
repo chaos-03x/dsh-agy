@@ -31,10 +31,30 @@ import { aliasVar, installAgyStyles } from './styles.ts'
 import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
-import { agoText, formatQuotaReset, quotaColor, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
-import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
+import {
+  agoText,
+  formatQuotaReset,
+  quotaColor,
+  stateLabel,
+  untilText,
+  windowLabel,
+  MINUTE_MS,
+  HOUR_MS,
+} from './quota-view.ts'
+import type {
+  AccountView,
+  AgyRpcClient,
+  AgyRpcResult,
+  ModelView,
+  MultimodalView,
+  StatsView,
+  ThinkingBudgets,
+  UaProfileViewResult,
+  UiPrefsView,
+} from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
+import { UA_TEMPLATE_VERSION_TOKEN } from '../ua-profile-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -1426,8 +1446,157 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
 function ConfigTab(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const { rpc, t } = props
   return h('div', { className: 'agy-root' },
+    h(UaProfileCard, { rpc, t }),
     h(ThinkingBudgetCard, { rpc, t }),
     h(MultimodalCard, { rpc, t }))
+}
+
+/**
+ * Which client identity this install presents (see `ua-profile.ts`).
+ *
+ * Deliberately a plain card with the EFFECTIVE string shown: a selector alone
+ * would leave the reader unable to tell what actually goes on the wire, and on
+ * this channel that string is functional — the version LINE decides whether the
+ * quota endpoint returns the Gemini group at all, and a version below the floor
+ * makes every generation turn answer the retirement notice.
+ *
+ * The custom-profile form lives here rather than behind a "developer mode": the
+ * whole point is that a future UA can be added as DATA, without a code change,
+ * the moment upstream starts accepting one. Nothing about it is dangerous — the
+ * host validates the template and refuses to shadow a built-in.
+ */
+function UaProfileCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+  const { rpc, t } = props
+  const [view, setView] = useState<UaProfileViewResult | null>(null)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [draft, setDraft] = useState({ id: '', label: '', template: '' })
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+
+  const load = useCallback((): void => {
+    void (async () => {
+      try {
+        const result = await rpc.call('ua.get', {})
+        if (!alive.current) return
+        setView(result)
+        setError(undefined)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        if (alive.current) setLoaded(true)
+      }
+    })()
+  }, [rpc])
+
+  useEffect(() => { load() }, [load])
+
+  /** One mutation, then adopt the host's returned view (which is authoritative). */
+  const mutate = (run: () => Promise<UaProfileViewResult>): void => {
+    setBusy(true)
+    void (async () => {
+      try {
+        const result = await run()
+        if (!alive.current) return
+        setView(result)
+        setError(undefined)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        if (alive.current) setBusy(false)
+      }
+    })()
+  }
+
+  const saveCustom = (): void => {
+    const id = draft.id.trim()
+    if (id === '') return
+    if (!draft.template.includes(UA_TEMPLATE_VERSION_TOKEN)) {
+      // Rejected locally: the host answers the same rule, and a round trip for a
+      // message we can already write is noise.
+      setError(t('uaCustomInvalid'))
+      return
+    }
+    mutate(() => rpc.call('ua.setCustom', {
+      id,
+      ...(draft.label.trim() === '' ? {} : { label: draft.label.trim() }),
+      template: draft.template,
+    }))
+    setDraft({ id: '', label: '', template: '' })
+  }
+
+  if (view === null) {
+    return card(t('uaTitle'), h('div', { className: 'agy-empty' }, error ?? t('loading')))
+  }
+
+  const rows = view.profiles.map((profile) => {
+    const active = profile.id === view.active
+    return h('div', { className: 'agy-rowitem', key: profile.id, 'data-selected': active },
+      h('div', { className: 'agy-rowmain' },
+        h('div', { className: 'agy-rowtitle' },
+          h('span', { className: 'agy-rowname' }, profile.label),
+          profile.kind === 'custom'
+            ? h(Tag, { tone: 'info' }, t('uaCustomTitle'))
+            : null,
+          active ? h(Tag, { tone: 'success' }, t('uaActive')) : null),
+        h('div', { className: 'agy-rowmeta agy-mono' }, profile.example),
+        h('div', { className: 'agy-rowmeta' }, t('uaVersionLine', { line: profile.versionLine }))),
+      h('div', { className: 'agy-rowactions' },
+        active
+          ? null
+          : button(t('uaUse'), () => { mutate(() => rpc.call('ua.setActive', { id: profile.id })) },
+            { size: 'sm', disabled: busy }),
+        profile.kind === 'custom'
+          ? button(t('uaCustomDelete'), () => { mutate(() => rpc.call('ua.deleteCustom', { id: profile.id })) },
+            { size: 'sm', variant: 'ghost', disabled: busy })
+          : null))
+  })
+
+  return card(t('uaTitle'), [
+    h('div', { className: 'agy-hint' }, t('uaHint')),
+    h('div', { className: 'agy-limits' },
+      h('div', { className: 'agy-limit-row' },
+        h('span', { className: 'agy-limit-k' }, t('uaEffective')),
+        h('span', { className: 'agy-mono agy-limits-effective' }, view.effective))),
+    h('div', { className: 'agy-hint' }, view.versionSource === 'live'
+      ? t('uaVersionLive')
+      : t('uaVersionFallback', { version: view.effective.replace(/^[^/]*\/([^\s(]+).*$/, '$1') })),
+    h('div', { className: 'agy-rows' }, ...rows),
+    h('div', { className: 'agy-disclosure-body' },
+      h('div', { className: 'agy-hint agy-strong' }, t('uaCustomTitle')),
+      h('div', { className: 'agy-hint' }, t('uaCustomHelp')),
+      h('div', { className: 'agy-thinking-row' },
+        h(Input, {
+          value: draft.id,
+          placeholder: t('uaCustomId'),
+          onChange: (event: { target: { value: string } }) => {
+            setDraft((current) => ({ ...current, id: event.target.value }))
+          },
+        }),
+        h(Input, {
+          value: draft.label,
+          placeholder: t('uaCustomLabel'),
+          onChange: (event: { target: { value: string } }) => {
+            setDraft((current) => ({ ...current, label: event.target.value }))
+          },
+        })),
+      h('div', { className: 'agy-thinking-row' },
+        h(Input, {
+          value: draft.template,
+          placeholder: 'acme/{version} ({platform})',
+          onChange: (event: { target: { value: string } }) => {
+            setDraft((current) => ({ ...current, template: event.target.value }))
+          },
+        }),
+        button(t('uaCustomAdd'), saveCustom, { size: 'sm', disabled: busy || !loaded })),
+      error === undefined ? null : h('div', { className: 'agy-error' }, error)),
+  ])
 }
 
 /**
