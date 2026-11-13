@@ -149,7 +149,7 @@ export async function fetchAgyFirstOk(
  * has its own slot ({@link currentAgyVersion} is the hub slot; the CLI profile
  * reads the CLI feed through `ua-profile.ts`).
  */
-export const AGY_VERSION_FALLBACK = '2.29.0'
+export const AGY_VERSION_FALLBACK = '2.31.2'
 export const AGY_HUB_CHANGELIST = '1003475615'
 
 /**
@@ -274,7 +274,7 @@ export function setResolvedCliVersion(version: string | undefined): void {
  * machine, and `pnpm run verify:version-freshness` checks it against that feed
  * on every run.
  */
-export const AGY_CLI_VERSION_FALLBACK = '1.5.3'
+export const AGY_CLI_VERSION_FALLBACK = '1.5.7'
 
 /** Version the CLI UA should advertise: the observed CLI one, else its own floor. */
 export function currentCliVersion(): string {

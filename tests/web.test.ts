@@ -99,9 +99,9 @@ describe('boot-time pool identity migration', () => {
     expect(after.accounts).toHaveLength(3)
     for (const account of after.accounts) {
       expect(account.fingerprint?.userAgent).toBe(
-        'antigravity/hub/2.29.0 (aidev_client; os_type=macos; arch=arm64; cl=1003475615)',
+        'antigravity/hub/2.31.2 (aidev_client; os_type=macos; arch=arm64; cl=1003475615)',
       )
-      expect(account.fingerprint?.clientMetadata.ideVersion).toBe('2.29.0')
+      expect(account.fingerprint?.clientMetadata.ideVersion).toBe('2.31.2')
     }
   })
 })

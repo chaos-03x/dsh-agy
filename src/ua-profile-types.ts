@@ -91,7 +91,7 @@ export const HUB_VERSION_FLOOR = '2.6.0'
  * (a machine that has not updated). A unit test pins it equal to
  * `AGY_VERSION_FALLBACK`, so the duplication cannot rot.
  */
-export const HUB_VERSION_FALLBACK = '2.29.0'
+export const HUB_VERSION_FALLBACK = '2.31.2'
 
 /** One selectable UA profile, as the settings surface renders it. */
 export interface UaProfileView {

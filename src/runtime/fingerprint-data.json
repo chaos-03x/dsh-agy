@@ -1,8 +1,8 @@
 {
   "comment": "Hot-updatable fingerprint data. Version pools and client strings must track the real Antigravity product; update this file (or ship an override) when a release ships. Kept out of code so stale versions never get compiled in. The pool is only a last-resort fallback: production passes the resolved version explicitly (see runtime/version.ts), so a stale entry here can no longer reach the wire on its own. versionPool is the ELECTRON/HUB line (the product this client presents as by default — docs/official-identity.json), which is why the numbers are 2.x: the CLI line is a separate namespace and is resolved from its own feed when that profile is selected (see ua-profile.ts).",
   "versionPool": [
-    "2.29.0",
-    "2.25.0"
+    "2.31.2",
+    "2.29.0"
   ],
   "platforms": [
     "darwin/arm64"
