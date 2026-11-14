@@ -24,22 +24,122 @@ describe('Codex review feedback regressions', () => {
   it('drops Claude budgets that lack a larger output cap or violate the floor', () => {
     mergeModelCatalog(models('claude-opus-5-5', { medium: 1048576, high: 1048576 }))
     for (const [budget, cap] of [[4096, 2048], [2048, 2048], [4096, undefined], [1000, 4096]] as const) {
-      const body = toAgyRequestBody(request('claude-opus-5-5-medium', 'high', cap), { thinkingBudgetFor: () => budget })
+      const body = toAgyRequestBody(request('claude-opus-5-5-medium', 'high', cap), { claudeBudgetFor: () => budget })
       expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
     }
-    const valid = toAgyRequestBody(request('claude-opus-5-5-medium', 'high', 4096), { thinkingBudgetFor: () => 1024 })
+    const valid = toAgyRequestBody(request('claude-opus-5-5-medium', 'high', 4096), { claudeBudgetFor: () => 1024 })
     expect(valid.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 1024, includeThoughts: true })
   })
 
   it('guards default and Claude-specific budgets without limiting Gemini', () => {
     mergeModelCatalog(models('claude-opus-5-5', { medium: 1048576, high: 1048576 }))
-    const defaultBudget = toAgyRequestBody(request('claude-opus-5-5-medium', undefined, 2048), { tieredBudgetFor: () => 4096 })
+    const defaultBudget = toAgyRequestBody(request('claude-opus-5-5-medium', undefined, 2048), { claudeBudgetFor: () => 4096 })
     expect(defaultBudget.request.generationConfig?.thinkingConfig).toBeUndefined()
     const claudeBudget = toAgyRequestBody(request('claude-opus-5-5-medium', 'high', 4096), { claudeBudgetFor: () => 1024 })
     expect(claudeBudget.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 1024, includeThoughts: true })
     mergeModelCatalog(models(hydrogen, { medium: 1048576, high: 1048576 }))
     const gemini = toAgyRequestBody(request(hydrogen, 'high', 2048), { thinkingBudgetFor: () => 4096 })
     expect(gemini.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 4096, includeThoughts: true })
+  })
+
+  it('preserves Claude special budgets for synthetic and concrete model selections', () => {
+    const base = 'claude-opus-5-5'
+    mergeModelCatalog(models(base, { medium: 1048576, high: 1048576 }))
+    for (const model of [base, `${base}-medium`]) {
+      for (const effort of [undefined, 'high']) {
+        for (const budget of [-1, 0, 1024, 63999]) {
+          const body = toAgyRequestBody(request(model, effort, 64000), { claudeBudgetFor: () => budget })
+          expect(body.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: budget, includeThoughts: true })
+        }
+      }
+    }
+  })
+
+  it('does not apply Gemini budget settings to Claude, whether or not Claude has a budget', () => {
+    const base = 'claude-opus-5-5'
+    mergeModelCatalog(models(base, { medium: 1048576, high: 1048576 }))
+    for (const model of [base, `${base}-medium`]) {
+      for (const effort of [undefined, 'high']) {
+        const unrelated = { tieredBudgetFor: () => 4096, thinkingBudgetFor: () => 8192 }
+        const configured = toAgyRequestBody(request(model, effort, 64000), { ...unrelated, claudeBudgetFor: () => 0 })
+        expect(configured.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0, includeThoughts: true })
+        const unset = toAgyRequestBody(request(model, effort, 64000), unrelated)
+        expect(unset.request.generationConfig?.thinkingConfig).toBeUndefined()
+      }
+    }
+    mergeModelCatalog(models(hydrogen, { medium: 1048576, high: 1048576 }))
+    const geminiConfig = { tieredBudgetFor: () => 4096, thinkingBudgetFor: () => 8192, claudeBudgetFor: () => 0 }
+    expect(toAgyRequestBody(request(hydrogen, undefined, 64000), geminiConfig).request.generationConfig?.thinkingConfig)
+      .toEqual({ thinkingBudget: 4096, includeThoughts: true })
+    expect(toAgyRequestBody(request(hydrogen, 'high', 64000), geminiConfig).request.generationConfig?.thinkingConfig)
+      .toEqual({ thinkingBudget: 8192, includeThoughts: true })
+  })
+
+  it('passes Claude budgets through the adapter without borrowing Gemini settings', async () => {
+    const base = 'claude-opus-5-5'
+    mergeModelCatalog(models(base, { medium: 1048576, high: 1048576 }))
+    const selections: Array<{ model?: string; exact?: boolean }> = []
+    const adapter = new AgyAdapter({
+      getSession: async (model, _conversation, exact) => {
+        selections.push({ model, exact })
+        return {
+          auth: { access: 'synthetic-token', refresh: 'synthetic-refresh', expires: Date.now() + 60_000 },
+          account: { refresh: 'synthetic-refresh', projectId: 'synthetic-project', addedAt: 0, lastUsed: 0 }, index: 0,
+          impersonation: { 'User-Agent': 'test', 'X-Goog-Api-Client': 'test', clientMetadata: {} },
+        }
+      },
+      reportFailure: async () => {},
+      claudeBudgetFor: () => 0,
+      tieredBudgetFor: () => 4096,
+      thinkingBudgetFor: () => 8192,
+    })
+    let body: { model: string; request: { generationConfig?: { thinkingConfig?: unknown } } } | undefined
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body))
+      return new Response('data: [DONE]\n\n', { status: 200 })
+    }))
+    for await (const _chunk of adapter.stream(request(`${base}-medium`, 'high', 64000))) void _chunk
+    expect(selections).toEqual([{ model: `${base}-high`, exact: true }])
+    expect(body?.model).toBe(`${base}-high`)
+    expect(body?.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0, includeThoughts: true })
+  })
+
+  it('uses the same validator for existing id-bound Claude models', () => {
+    for (const budget of [-1, 0, 1024, 63999]) {
+      const body = toAgyRequestBody(request('claude-opus-4-6-thinking', undefined, 64000), { claudeBudgetFor: () => budget })
+      expect(body.request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: budget, includeThoughts: true })
+    }
+    for (const budget of [-2, 1, 512, 1023, 1024.5, 64000]) {
+      const body = toAgyRequestBody(request('claude-opus-4-6-thinking', undefined, 64000), { claudeBudgetFor: () => budget })
+      expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
+    }
+  })
+
+  it('rejects invalid Claude values and special budgets without a sufficient output cap', () => {
+    const base = 'claude-opus-5-5'
+    mergeModelCatalog(models(base, { medium: 1048576, high: 1048576 }))
+    for (const budget of [-2, 1, 512, 1023, 1024.5, 64000, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const body = toAgyRequestBody(request(base, undefined, 64000), { claudeBudgetFor: () => budget })
+      expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
+    }
+    for (const budget of [-1, 0, 1024]) {
+      const body = toAgyRequestBody(request(base, undefined, undefined), { claudeBudgetFor: () => budget })
+      expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
+    }
+    const equal = toAgyRequestBody(request(base, undefined, 1024), { claudeBudgetFor: () => 1024 })
+    expect(equal.request.generationConfig?.thinkingConfig).toBeUndefined()
+    expect(equal.request.generationConfig?.maxOutputTokens).toBe(1024)
+  })
+
+  it('keeps explicit off and session-title paths independent of saved Claude budgets', () => {
+    const base = 'claude-opus-5-5'
+    mergeModelCatalog(models(base, { medium: 1048576, high: 1048576 }))
+    const context = { claudeBudgetFor: () => -1, tieredBudgetFor: () => 4096, thinkingBudgetFor: () => 8192 }
+    for (const effort of ['none', 'off']) {
+      expect(toAgyRequestBody(request(base, effort, 64000), context).request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
+    }
+    const title = { ...request(base, 'high', 64000), purpose: 'session-title' } as GenerateOptions
+    expect(toAgyRequestBody(title, context).request.generationConfig?.thinkingConfig).toEqual({ thinkingBudget: 0 })
   })
 
   it('retains the same account’s last successful discovery when fetching fails', async () => {

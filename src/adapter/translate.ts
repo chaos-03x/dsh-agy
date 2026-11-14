@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
+import { isValidClaudeBudget } from '../thinking-types.ts'
 import { catalogModel, discoveredUnifiedThinkingFamilyFor, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 import {
@@ -720,30 +721,29 @@ export function toAgyRequestBody(
     ? Boolean(discoveredUnifiedThinkingFamilyFor(options.model)) || isUnifiedThinkingFamily(options.model)
     : context.wireModel !== options.model)
   const exposeGeminiThoughts = discrete && !claude && options.model.toLowerCase().startsWith('gemini-')
-  // Claude rejects a budget below 1024, a missing output cap, or a cap that
-  // does not leave room for the answer. Discrete routes need the same guard.
+  // Claude accepts -1 and 0 as special values; other budgets start at 1024.
+  // Every configured Claude budget still requires a strictly greater output cap.
   const budgetFits = (budget: number): boolean => !claude || (
-    Number.isSafeInteger(budget) && budget >= 1024 && generationConfig.maxOutputTokens !== undefined
+    isValidClaudeBudget(budget) && generationConfig.maxOutputTokens !== undefined
     && generationConfig.maxOutputTokens > budget
   )
   if (discrete || isLevelThinkingModel(options.model)) {
     if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
       generationConfig.thinkingConfig = { thinkingBudget: 0 }
     } else if (effort === undefined) {
-      // The selector's "Default" effort: no level was chosen. A configured tiered
-      // budget turns this into Max by sending a bare `thinkingBudget` (no
-      // `thinkingLevel`, so the number alone decides). Unset sends nothing at all,
-      // which leaves upstream's own adaptive allocation in charge.
-      const tiered = context.tieredBudgetFor?.() ?? (claude ? context.claudeBudgetFor?.() : undefined)
-      if (tiered !== undefined && budgetFits(tiered)) {
-        generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
+      // The selector's "Default" effort carries no level. Gemini uses its
+      // tiered budget; Claude uses only its own independently configured budget.
+      // With no family-specific budget, upstream keeps its default behaviour.
+      const budget = claude ? context.claudeBudgetFor?.() : context.tieredBudgetFor?.()
+      if (budget !== undefined && budgetFits(budget)) {
+        generationConfig.thinkingConfig = { thinkingBudget: budget, includeThoughts: true }
       } else if (exposeGeminiThoughts) {
         generationConfig.thinkingConfig = { includeThoughts: true }
       }
     } else if (discrete || (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any))) {
-      // A configured number for this level takes the place of the level token:
-      // both together would let the level win (see `thinkingBudgetFor`).
-      const configured = context.thinkingBudgetFor?.(effort) ?? (claude ? context.claudeBudgetFor?.() : undefined)
+      // Gemini's configured number takes the place of its level token. Claude
+      // has an independent budget, regardless of the selected wire variant.
+      const configured = claude ? context.claudeBudgetFor?.() : context.thinkingBudgetFor?.(effort)
       if (discrete) {
         if (configured !== undefined && budgetFits(configured)) {
           generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
@@ -763,15 +763,15 @@ export function toAgyRequestBody(
     //   - `max_tokens` must be STRICTLY greater than the budget. `budget=1024`
     //     with `max_tokens=1024` is rejected, and so is a budget sent with no
     //     `maxOutputTokens` at all.
-    //   - the floor is 1024 (not `-1`); the store validates that on save.
+    //   - the floor is 1024, with measured -1/0 special values; the store
+    //     validates this on save, and the request uses the same validator.
     // So a budget that does not leave room is DROPPED rather than forced through
     // by raising `maxTokens`: silently enlarging the caller's output cap would
     // change the request's cost and truncation behaviour, while omitting the
     // budget merely means this turn thinks with upstream's default. A 400 would
     // be worse than either.
     const claudeBudget = context.claudeBudgetFor?.()
-    const outputCap = generationConfig.maxOutputTokens
-    if (claudeBudget !== undefined && outputCap !== undefined && outputCap > claudeBudget) {
+    if (claudeBudget !== undefined && budgetFits(claudeBudget)) {
       generationConfig.thinkingConfig = { thinkingBudget: claudeBudget, includeThoughts: true }
     }
   }
