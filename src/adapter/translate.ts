@@ -600,9 +600,14 @@ export function resolveWireModel(model: string, effort?: string, hidden: Readonl
   const requested = effort?.toLowerCase()
   const explicit = requested === 'none' || requested === 'off' ? undefined : requested
   if (family) {
-    // Preserve an existing concrete model selection when no effort was chosen.
-    if (family.base !== model && explicit === undefined) return model
     const variants = family.variants
+    // Preserve a concrete selection only while it is still advertised. Without
+    // an explicit surviving effort, never dispatch a removed wire ID or silently
+    // downgrade the user's selected tier.
+    if (family.base !== model && explicit === undefined) {
+      if (variants.some((variant) => variant.wireId === model)) return model
+      throw new Error(`Antigravity model ${model} is no longer advertised`)
+    }
     const visible = variants.filter((variant) => !hidden.has(variant.wireId))
     // The blacklist is presentation-only: an explicitly selected legacy tier
     // remains callable; Default picks a visible tier when one exists.

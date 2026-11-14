@@ -182,7 +182,7 @@ export function discoveredUnifiedThinkingVariants(baseId: string): readonly Disc
   return DISCOVERED_UNIFIED_THINKING_FAMILIES.get(baseId)
 }
 
-/** Resolve either a synthetic family ID or one of its exact advertised wire IDs. */
+/** Resolve a synthetic family or a legacy concrete selection against current variants. */
 export function discoveredUnifiedThinkingFamilyFor(id: string): { base: string; variants: readonly DiscreteThinkingVariant[] } | undefined {
   const direct = discoveredUnifiedThinkingVariants(id)
   if (direct) return { base: id, variants: direct }
@@ -190,7 +190,9 @@ export function discoveredUnifiedThinkingFamilyFor(id: string): { base: string; 
   const base = match?.[1]
   if (!base) return undefined
   const variants = discoveredUnifiedThinkingVariants(base)
-  return variants?.some((variant) => variant.wireId === id) ? { base, variants } : undefined
+  // The selection may be from an earlier session whose tier is no longer in
+  // the current discovery. Recognize the family, not the missing wire ID.
+  return variants ? { base, variants } : undefined
 }
 
 /** Preserve both the family toggle and legacy per-variant blacklist choices. */
