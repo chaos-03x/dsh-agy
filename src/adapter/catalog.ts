@@ -155,6 +155,9 @@ export interface DiscreteThinkingVariant {
 }
 
 const DISCOVERED_UNIFIED_THINKING_FAMILIES = new Map<string, readonly DiscreteThinkingVariant[]>()
+// Identity only: unlike the active map, this never contains another account's
+// wire variants. It lets a known family survive an authoritative single tier.
+const KNOWN_UNIFIED_THINKING_FAMILIES = new Set<string>()
 
 /** Replace the previous discovery generation when the active account changes. */
 export function clearDiscoveredUnifiedThinkingFamilies(): void {
@@ -163,9 +166,15 @@ export function clearDiscoveredUnifiedThinkingFamilies(): void {
 
 /** Register a family with exactly the chat-callable variants that upstream returned. */
 export function registerDiscoveredUnifiedThinkingFamily(baseId: string, variants: readonly DiscreteThinkingVariant[]): void {
+  KNOWN_UNIFIED_THINKING_FAMILIES.add(baseId)
   DISCOVERED_UNIFIED_THINKING_FAMILIES.set(baseId, [...variants].sort(
     (a, b) => DISCRETE_THINKING_LEVELS.indexOf(a.effort) - DISCRETE_THINKING_LEVELS.indexOf(b.effort),
   ))
+}
+
+/** Family identity without assuming that any particular tier is still available. */
+export function isKnownUnifiedThinkingFamily(baseId: string): boolean {
+  return KNOWN_UNIFIED_THINKING_FAMILIES.has(baseId) || isUnifiedThinkingFamily(baseId)
 }
 
 /** Exact per-account wire variants for a synthetic family, if discovered. */
@@ -205,6 +214,7 @@ export function isUnifiedThinkingFamily(modelId: string): boolean {
 export function resetDiscoveredTieredModels(): void {
   DISCOVERED_TIERED_FAMILIES.clear()
   DISCOVERED_UNIFIED_THINKING_FAMILIES.clear()
+  KNOWN_UNIFIED_THINKING_FAMILIES.clear()
 }
 
 /**

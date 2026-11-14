@@ -196,6 +196,9 @@ interface QuotaRefreshResult {
 export function isModelSupportedByAccount(account: ManagedAccount, model?: string, requireExactModel = false): boolean {
   if (!model || !account.cachedModels || account.cachedModels.length === 0) return true
   if (account.cachedModels.includes(model)) return true
+  // A known-expired probe cannot rule out a model that has since appeared,
+  // especially when a single-account pool skips background quota refreshes.
+  if (account.cachedQuotaUpdatedAt && isQuotaStale(account)) return true
   if (requireExactModel) return false
   const tieredMatch = /^(.*)-tiered$/.exec(model)
   if (tieredMatch) {

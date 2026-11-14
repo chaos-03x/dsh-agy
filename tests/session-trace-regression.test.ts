@@ -43,7 +43,7 @@ describe('real session trace regressions', () => {
     } })
     expect(list.find((model) => model.id === family)?.context?.contextWindow).toBe(80000)
     expect(resolveAgyModel('agy', family).context?.contextWindow).toBe(80000)
-    expect(resolveAgyModel('agy', `${family}-high`).context?.contextWindow).toBe(160000)
+    expect(resolveAgyModel('agy', `${family}-high`).context?.contextWindow).toBe(80000)
   })
 
   it('does not invent a context window when an unknown family does not report one', () => {
@@ -53,7 +53,7 @@ describe('real session trace regressions', () => {
     } })
     expect(resolveAgyModel('agy', family).context).toBeUndefined()
     expect(resolveAgyModel('agy', `${family}-high`).context).toBeUndefined()
-    expect(resolveAgyModel('agy', `${family}-low`).context?.contextWindow).toBe(80000)
+    expect(resolveAgyModel('agy', `${family}-low`).context).toBeUndefined()
   })
 
   it('passes the old model route and context through DSH prepareCall', async () => {

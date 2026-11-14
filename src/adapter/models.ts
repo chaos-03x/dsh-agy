@@ -4,6 +4,7 @@
  * capability metadata, and catalog fallback when the endpoint is unreachable.
  */
 
+import { createHash } from 'node:crypto'
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
@@ -15,6 +16,7 @@ import {
   discoveredUnifiedThinkingVariants,
   formatTieredModelName,
   isChatCallableModelId,
+  isKnownUnifiedThinkingFamily,
   isLevelThinkingModel,
   isUnifiedThinkingFamily,
   levelThinkingEffortsFor,
@@ -102,15 +104,20 @@ export interface DiscoveredModels {
 let discoveredContextWindows = new Map<string, number>()
 
 function discoveredContextWindow(modelId: string): number | undefined {
-  const direct = discoveredContextWindows.get(modelId)
-  if (direct !== undefined) return direct
-  const variants = discoveredUnifiedThinkingVariants(modelId)
-  if (!variants) return undefined
-  const sizes = variants.map((variant) => discoveredContextWindows.get(variant.wireId))
-  // The picker represents all tiers with one row. Avoid overstating its capacity
-  // if an advertised tier has no size or a smaller window than its siblings.
+  // A concrete legacy ID can select sibling efforts too, so its budget must
+  // account for every destination, not just its original concrete window.
+  const family = discoveredUnifiedThinkingFamilyFor(modelId)
+  if (!family) return discoveredContextWindows.get(modelId)
+  const sizes = family.variants.map((variant) => discoveredContextWindows.get(variant.wireId))
   if (sizes.some((size) => size === undefined)) return undefined
   return Math.min(...sizes as number[])
+}
+
+function contextWindowFor(modelId: string, catalogWindow?: number): number | undefined {
+  const discovered = discoveredContextWindow(modelId)
+  return catalogWindow !== undefined && discovered !== undefined
+    ? Math.min(catalogWindow, discovered)
+    : catalogWindow ?? discovered
 }
 
 /** Role keys whose members are not agent chat models. */
@@ -120,6 +127,61 @@ const NON_CHAT_ROLE_KEYS = ['tabModelIds', 'imageGenerationModelIds', 'audioTran
 function stringsFrom(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+}
+
+/** Keep only public model capabilities; no quota, credential, or account fields. */
+function discoverySnapshot(dynamic: DiscoveredModels): DiscoveredModels {
+  const models: Record<string, DiscoveredModelEntry> = Object.create(null)
+  for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
+    if (!entry || typeof entry !== 'object') continue
+    models[id] = {
+      ...(typeof entry.displayName === 'string' ? { displayName: entry.displayName } : {}),
+      ...(typeof entry.modelName === 'string' ? { modelName: entry.modelName } : {}),
+      ...(typeof entry.maxTokens === 'number' ? { maxTokens: entry.maxTokens } : {}),
+      ...(typeof entry.maxOutputTokens === 'number' ? { maxOutputTokens: entry.maxOutputTokens } : {}),
+    }
+  }
+  const deprecatedModelIds: Record<string, DeprecatedModelInfo> = Object.create(null)
+  for (const [id, info] of Object.entries(dynamic.deprecatedModelIds ?? {})) {
+    if (info && typeof info.newModelId === 'string') deprecatedModelIds[id] = { newModelId: info.newModelId }
+  }
+  const tieredModelIds: Record<string, string[]> = Object.create(null)
+  for (const [family, ids] of Object.entries(dynamic.tieredModelIds ?? {})) tieredModelIds[family] = stringsFrom(ids)
+  return {
+    models,
+    tabModelIds: stringsFrom(dynamic.tabModelIds),
+    imageGenerationModelIds: stringsFrom(dynamic.imageGenerationModelIds),
+    audioTranscriptionModelIds: stringsFrom(dynamic.audioTranscriptionModelIds),
+    deprecatedModelIds,
+    ...(typeof dynamic.defaultAgentModelId === 'string' ? { defaultAgentModelId: dynamic.defaultAgentModelId } : {}),
+    agentModelSorts: Array.isArray(dynamic.agentModelSorts) ? dynamic.agentModelSorts.map((sort) => ({
+      ...(typeof sort?.displayName === 'string' ? { displayName: sort.displayName } : {}),
+      groups: Array.isArray(sort?.groups) ? sort.groups.map((group) => ({ modelIds: stringsFrom(group?.modelIds) })) : [],
+    })) : [],
+    tieredModelIds,
+  }
+}
+
+/** Last-known capabilities, isolated by opaque account scope and bounded in memory. */
+export class ModelDiscoveryCache {
+  private readonly snapshots = new Map<string, DiscoveredModels>()
+
+  get(scope: string): DiscoveredModels | undefined { return this.snapshots.get(scope) }
+
+  remember(scope: string, dynamic: DiscoveredModels): void {
+    this.snapshots.delete(scope)
+    this.snapshots.set(scope, discoverySnapshot(dynamic))
+    if (this.snapshots.size > 32) this.snapshots.delete(this.snapshots.keys().next().value!)
+  }
+
+  forget(scope: string): void { this.snapshots.delete(scope) }
+}
+
+const defaultDiscoveryCache = new ModelDiscoveryCache()
+
+/** An invalidated in-flight response must never replace the current account's catalog. */
+export class StaleModelDiscoveryError extends Error {
+  constructor() { super('model discovery was invalidated before completion') }
 }
 
 /**
@@ -223,7 +285,7 @@ function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
     // If upstream explicitly marks the base as non-chat, grouping must not
     // resurrect it under a synthetic name.
     if (hidden.has(base)) continue
-    if (variants.length < 2 && !isUnifiedThinkingFamily(base)) continue
+    if (variants.length < 2 && !isKnownUnifiedThinkingFamily(base)) continue
     registerDiscoveredUnifiedThinkingFamily(base, variants)
     for (const variant of variants) hidden.add(variant.wireId)
   }
@@ -431,7 +493,7 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
         !entries.some((e) => e.id === `${base}-tiered`)
       ) {
         const meta = catalogModel(base)
-        const contextWindow = meta?.contextLength ?? discoveredContextWindow(base)
+        const contextWindow = contextWindowFor(base, meta?.contextLength)
         entries.push({
           provider: AGY_PROVIDER,
           id: base,
@@ -466,13 +528,34 @@ export async function listAgyModels(
   accessToken: string | undefined,
   projectId: string | undefined,
   fetchImpl: typeof fetch = proxiedFetch,
+  options: { cache?: ModelDiscoveryCache; scope?: string; isCurrent?: () => boolean } = {},
 ): Promise<readonly LlmModelInfo[]> {
+  const ensureCurrent = () => { if (options.isCurrent?.() === false) throw new StaleModelDiscoveryError() }
+  ensureCurrent()
   if (!accessToken) return catalogModelList()
+  const cache = options.cache ?? defaultDiscoveryCache
+  // Standalone callers have no account identity; a one-way token/project key
+  // provides safe isolation without retaining the credential itself.
+  const scope = options.scope ?? createHash('sha256').update(JSON.stringify([accessToken, projectId ?? null])).digest('hex')
   try {
     const dynamic = await fetchAvailableModels(accessToken, projectId, fetchImpl)
+    ensureCurrent()
     const merged = mergeModelCatalog(dynamic)
-    return merged.length > 0 ? merged : catalogModelList()
-  } catch {
+    if (merged.length > 0) {
+      cache.remember(scope, dynamic)
+      return merged
+    }
+    // A successful empty response is authoritative, not a network failure.
+    cache.forget(scope)
+    return catalogModelList()
+  } catch (error) {
+    if (error instanceof StaleModelDiscoveryError) throw error
+    ensureCurrent()
+    const previous = cache.get(scope)
+    if (previous) {
+      const merged = mergeModelCatalog(previous)
+      if (merged.length > 0) return merged
+    }
     return catalogModelList()
   }
 }
@@ -481,7 +564,7 @@ export async function listAgyModels(
 export function resolveAgyModel(provider: string, model: string): LlmResolvedModelInfo {
   const family = discoveredUnifiedThinkingFamilyFor(model)
   const meta = catalogModel(model) ?? (family ? catalogModel(family.base) : undefined)
-  const contextWindow = meta?.contextLength ?? discoveredContextWindow(model)
+  const contextWindow = contextWindowFor(model, meta?.contextLength)
   if (family || isLevelThinkingModel(model)) {
     const efforts = family ? family.variants.map((variant) => variant.effort) : levelThinkingEffortsFor(model)
     const reasoningInfo: LlmModelReasoningInfo = {

@@ -5,6 +5,7 @@
  * live in translate.ts / parse.ts / models.ts.
  */
 
+import { createHash } from 'node:crypto'
 import {
   LlmAdapter,
   LlmError,
@@ -43,7 +44,7 @@ import { discoveredUnifiedThinkingFamilyFor, isModelHidden, isUnifiedThinkingFam
 import type { AgyResolvedImage } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
 import { AgyStreamIdleTimeoutError, parseAgySse, UnmappedFinishReasonError } from './parse.ts'
-import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
+import { AGY_PROVIDER, catalogModelList, listAgyModels, ModelDiscoveryCache, resolveAgyModel, StaleModelDiscoveryError } from './models.ts'
 
 export type { AgyAccountSession }
 
@@ -242,6 +243,8 @@ export const MODEL_LIST_CACHE_TTL_MS = 10 * 60 * 1000
 
 export class AgyAdapter extends LlmAdapter {
   private readonly options: AgyAdapterOptions
+  private readonly discoveryCache = new ModelDiscoveryCache()
+  private discoveryGeneration = 0
   private cachedModels: { models: readonly LlmModelInfo[]; at: number } | null = null
   private inFlightModels: Promise<readonly LlmModelInfo[]> | null = null
 
@@ -287,23 +290,34 @@ export class AgyAdapter extends LlmAdapter {
     }
     if (this.inFlightModels) return this.inFlightModels
 
-    const task = (async () => {
+    const generation = this.discoveryGeneration
+    let task!: Promise<readonly LlmModelInfo[]>
+    task = (async () => {
       try {
         const session = await this.options.getSession()
+        if (generation !== this.discoveryGeneration) return this.listAllModels()
         // Model discovery is account-scoped: route it through the account's proxy
         // (control-plane class, so the standard timeouts apply).
         const routing = { proxyUrl: session?.account.proxy }
-        const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
+        // An opaque key keeps fallback discovery tied to this exact account,
+        // project and egress, even if access tokens refresh or the pool rotates.
+        const scope = session && createHash('sha256').update(JSON.stringify([
+          session.account.id ?? null, session.account.refresh, session.account.projectId ?? null, session.account.proxy ?? null,
+        ])).digest('hex')
+        const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing), {
+          cache: this.discoveryCache, scope, isCurrent: () => generation === this.discoveryGeneration,
+        })
         this.cachedModels = { models, at: Date.now() }
         return models
       } catch (error) {
+        if (error instanceof StaleModelDiscoveryError || generation !== this.discoveryGeneration) return this.listAllModels()
         if (error instanceof AgyPoolBlockedError || error instanceof AgyAuthError) {
           return catalogModelList()
         }
         if (this.cachedModels) return this.cachedModels.models
         throw error
       } finally {
-        this.inFlightModels = null
+        if (this.inFlightModels === task) this.inFlightModels = null
       }
     })()
 
@@ -322,7 +336,9 @@ export class AgyAdapter extends LlmAdapter {
    * discovery rides (activation, rotation) therefore drops the cache instead.
    */
   invalidateModelCache(): void {
+    this.discoveryGeneration++
     this.cachedModels = null
+    this.inFlightModels = null
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {

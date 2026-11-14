@@ -720,6 +720,12 @@ export function toAgyRequestBody(
     ? Boolean(discoveredUnifiedThinkingFamilyFor(options.model)) || isUnifiedThinkingFamily(options.model)
     : context.wireModel !== options.model)
   const exposeGeminiThoughts = discrete && !claude && options.model.toLowerCase().startsWith('gemini-')
+  // Claude rejects a budget below 1024, a missing output cap, or a cap that
+  // does not leave room for the answer. Discrete routes need the same guard.
+  const budgetFits = (budget: number): boolean => !claude || (
+    Number.isSafeInteger(budget) && budget >= 1024 && generationConfig.maxOutputTokens !== undefined
+    && generationConfig.maxOutputTokens > budget
+  )
   if (discrete || isLevelThinkingModel(options.model)) {
     if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
       generationConfig.thinkingConfig = { thinkingBudget: 0 }
@@ -728,8 +734,8 @@ export function toAgyRequestBody(
       // budget turns this into Max by sending a bare `thinkingBudget` (no
       // `thinkingLevel`, so the number alone decides). Unset sends nothing at all,
       // which leaves upstream's own adaptive allocation in charge.
-      const tiered = context.tieredBudgetFor?.()
-      if (tiered !== undefined) {
+      const tiered = context.tieredBudgetFor?.() ?? (claude ? context.claudeBudgetFor?.() : undefined)
+      if (tiered !== undefined && budgetFits(tiered)) {
         generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
       } else if (exposeGeminiThoughts) {
         generationConfig.thinkingConfig = { includeThoughts: true }
@@ -737,17 +743,17 @@ export function toAgyRequestBody(
     } else if (discrete || (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any))) {
       // A configured number for this level takes the place of the level token:
       // both together would let the level win (see `thinkingBudgetFor`).
-      const configured = context.thinkingBudgetFor?.(effort)
+      const configured = context.thinkingBudgetFor?.(effort) ?? (claude ? context.claudeBudgetFor?.() : undefined)
       if (discrete) {
-        if (configured !== undefined) {
+        if (configured !== undefined && budgetFits(configured)) {
           generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
         } else if (exposeGeminiThoughts) {
           generationConfig.thinkingConfig = { includeThoughts: true }
         }
-      } else {
-        generationConfig.thinkingConfig = configured === undefined
-          ? { thinkingLevel: effort, includeThoughts: true }
-          : { thinkingBudget: configured, includeThoughts: true }
+      } else if (configured === undefined) {
+        generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+      } else if (budgetFits(configured)) {
+        generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
       }
     }
   } else if (claude && options.purpose !== 'session-title') {
