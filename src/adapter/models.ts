@@ -11,6 +11,7 @@ import {
   AGY_PUBLIC_MODELS,
   catalogModel,
   clearDiscoveredUnifiedThinkingFamilies,
+  discoveredUnifiedThinkingFamilyFor,
   discoveredUnifiedThinkingVariants,
   formatTieredModelName,
   isChatCallableModelId,
@@ -94,6 +95,22 @@ export interface DiscoveredModels {
   agentModelSorts?: { displayName?: string; groups?: { modelIds?: string[] }[] }[]
   /** Selectable-thinking families, e.g. `{flash: ['gemini-3.8-flash-tiered']}`. */
   tieredModelIds?: Record<string, string[]>
+}
+
+// Keep only public capability metadata from the latest account's discovery, not
+// quota or account information. Replaced as a unit on every catalog refresh.
+let discoveredContextWindows = new Map<string, number>()
+
+function discoveredContextWindow(modelId: string): number | undefined {
+  const direct = discoveredContextWindows.get(modelId)
+  if (direct !== undefined) return direct
+  const variants = discoveredUnifiedThinkingVariants(modelId)
+  if (!variants) return undefined
+  const sizes = variants.map((variant) => discoveredContextWindows.get(variant.wireId))
+  // The picker represents all tiers with one row. Avoid overstating its capacity
+  // if an advertised tier has no size or a smaller window than its siblings.
+  if (sizes.some((size) => size === undefined)) return undefined
+  return Math.min(...sizes as number[])
 }
 
 /** Role keys whose members are not agent chat models. */
@@ -370,6 +387,13 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   }
   const entries: LlmModelInfo[] = []
   const hidden = hiddenDiscoveredIds(dynamic)
+  const contexts = new Map<string, number>()
+  for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
+    if (!isChatCallableModelId(id) || (hidden.has(id) && !discoveredUnifiedThinkingFamilyFor(id))) continue
+    const size = entry?.maxTokens
+    if (typeof size === 'number' && Number.isSafeInteger(size) && size > 0) contexts.set(id, size)
+  }
+  discoveredContextWindows = contexts
   for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
     if (!isChatCallableModelId(id) || hidden.has(id)) continue
     const meta = catalogModel(id)
@@ -407,12 +431,13 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
         !entries.some((e) => e.id === `${base}-tiered`)
       ) {
         const meta = catalogModel(base)
+        const contextWindow = meta?.contextLength ?? discoveredContextWindow(base)
         entries.push({
           provider: AGY_PROVIDER,
           id: base,
           name: meta?.name ?? formatTieredModelName(base),
           inputModalities: inputModalitiesFor(meta),
-          ...(meta?.contextLength !== undefined ? { context: { contextWindow: meta.contextLength } } : {}),
+          ...(contextWindow !== undefined ? { context: { contextWindow } } : {}),
         })
       }
     }
@@ -424,6 +449,7 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
 /** Catalog-only model list used when the endpoint is unreachable. */
 export function catalogModelList(): LlmModelInfo[] {
   clearDiscoveredUnifiedThinkingFamilies()
+  discoveredContextWindows = new Map()
   const list = AGY_PUBLIC_MODELS.map((model) => ({
     provider: AGY_PROVIDER,
     id: model.id,
@@ -453,18 +479,23 @@ export async function listAgyModels(
 
 /** Resolve one exact model's metadata (catalog-backed; dynamic ids pass through). */
 export function resolveAgyModel(provider: string, model: string): LlmResolvedModelInfo {
-  const meta = catalogModel(model)
-  if (isLevelThinkingModel(model)) {
-    const efforts = levelThinkingEffortsFor(model)
+  const family = discoveredUnifiedThinkingFamilyFor(model)
+  const meta = catalogModel(model) ?? (family ? catalogModel(family.base) : undefined)
+  const contextWindow = meta?.contextLength ?? discoveredContextWindow(model)
+  if (family || isLevelThinkingModel(model)) {
+    const efforts = family ? family.variants.map((variant) => variant.effort) : levelThinkingEffortsFor(model)
     const reasoningInfo: LlmModelReasoningInfo = {
       efforts: efforts.map((effort) => ({ id: ReasoningEffortId(effort), name: EFFORT_NAMES[effort] })),
     }
+    // Native tiered IDs retain the existing fallback. For an unpinned dynamic
+    // family, do not invent a capacity that discovery did not report.
+    const resolvedContext = contextWindow ?? (family ? undefined : 1048576)
     return {
       provider,
       id: model,
       name: meta?.name ?? model,
       inputModalities: inputModalitiesFor(meta),
-      context: { contextWindow: meta?.contextLength ?? 1048576 },
+      ...(resolvedContext !== undefined ? { context: { contextWindow: resolvedContext } } : {}),
       defaultMaxTokens: meta?.maxOutputTokens ?? 65536,
       // Return a shallow copy so callers cannot mutate the frozen singleton.
       reasoning: reasoningInfo,
@@ -475,6 +506,7 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
     id: model,
     name: meta?.name ?? model,
     inputModalities: inputModalitiesFor(meta),
-    ...(meta ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: meta.maxOutputTokens } : {}),
+    ...(contextWindow !== undefined ? { context: { contextWindow } } : {}),
+    ...(meta ? { defaultMaxTokens: meta.maxOutputTokens } : {}),
   }
 }

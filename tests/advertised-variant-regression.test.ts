@@ -27,8 +27,8 @@ describe('advertised discrete model capabilities', () => {
     expect(resolveAgyModel('agy', hydrogen).reasoning?.efforts.map((level) => level.id))
       .toEqual(['low', 'medium', 'high', 'xhigh'])
     expect(toAgyRequestBody(request('xhigh'), {}).model).toBe(`${hydrogen}-xhigh`)
-    expect(toAgyRequestBody(request('xhigh'), {}).request.generationConfig?.thinkingConfig).toBeUndefined()
-    expect(toAgyRequestBody(request('high'), {}).request.generationConfig?.thinkingConfig).toBeUndefined()
+    expect(toAgyRequestBody(request('xhigh'), {}).request.generationConfig?.thinkingConfig).toEqual({ includeThoughts: true })
+    expect(toAgyRequestBody(request('high'), {}).request.generationConfig?.thinkingConfig).toEqual({ includeThoughts: true })
   })
 
   it('exposes only the tiers this account advertised and refuses a missing tier', () => {
@@ -84,7 +84,7 @@ describe('advertised discrete model capabilities', () => {
     mergeModelCatalog({ models: { [hydrogen]: {} }, tieredModelIds: { flash: [hydrogen] } })
     const body = toAgyRequestBody(request('high'), { wireModel })
     expect(body.model).toBe(`${hydrogen}-high`)
-    expect(body.request.generationConfig?.thinkingConfig).toBeUndefined()
+    expect(body.request.generationConfig?.thinkingConfig).toEqual({ includeThoughts: true })
   })
 
   it('preserves existing per-variant visibility choices after grouping', async () => {

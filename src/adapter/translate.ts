@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
-import { catalogModel, discoveredUnifiedThinkingVariants, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
+import { catalogModel, discoveredUnifiedThinkingFamilyFor, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 import {
   conversationMessages,
@@ -521,10 +521,11 @@ export function coalesceContents(contents: AgyContent[]): AgyContent[] {
 }
 
 /**
- * Builtin Gemini tools must not shadow functionDeclarations names (upstream
- * treats them as native tools; verified by OmniRoute's GEMINI_BUILTIN_TOOL_NAMES).
+ * Names reserved for Gemini native tools must not shadow functionDeclarations.
+ * DSH's `web_search` is a host tool, not a native tool: this channel accepts
+ * that exact function name and returns it for normal host-side execution.
  */
-const AGY_BUILTIN_TOOL_NAMES = new Set(['google_search', 'web_search', 'search_web', 'googleSearch'])
+const AGY_BUILTIN_TOOL_NAMES = new Set(['google_search', 'search_web', 'googleSearch'])
 
 /** Level-thinking: single id + selectable low/medium/high via thinkingLevel (catalog thinking:'level'). */
 const LEVEL_THINKING_LEVELS = new Set(['low', 'medium', 'high'])
@@ -593,11 +594,14 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
  * with level thinking, and mapped to the matching discrete wire model on request.
  */
 export function resolveWireModel(model: string, effort?: string, hidden: ReadonlySet<string> = new Set()): string {
-  if (!isUnifiedThinkingFamily(model)) return model
+  const family = discoveredUnifiedThinkingFamilyFor(model)
+  if (!family && !isUnifiedThinkingFamily(model)) return model
   const requested = effort?.toLowerCase()
   const explicit = requested === 'none' || requested === 'off' ? undefined : requested
-  const variants = discoveredUnifiedThinkingVariants(model)
-  if (variants) {
+  if (family) {
+    // Preserve an existing concrete model selection when no effort was chosen.
+    if (family.base !== model && explicit === undefined) return model
+    const variants = family.variants
     const visible = variants.filter((variant) => !hidden.has(variant.wireId))
     // The blacklist is presentation-only: an explicitly selected legacy tier
     // remains callable; Default picks a visible tier when one exists.
@@ -629,6 +633,8 @@ export function toAgyRequestBody(
     hiddenModels?: ReadonlySet<string>
     /** Freeze the selected wire variant across account selection and dispatch. */
     wireModel?: string
+    /** Freeze whether this is an ID-bound family across discovery changes. */
+    discreteModel?: boolean
     /**
      * The request id, when the caller also stamps it on the wire
      * (`x-goog-request-id`). Generating it here as well produced TWO different
@@ -702,19 +708,18 @@ export function toAgyRequestBody(
       : options.maxTokens
   }
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
-  // Level-thinking: map the DSH reasoning effort to thinkingConfig.
-  // Id-bound models (thinking !== 'level') never emit it, and a tiered model
-  // emits NOTHING when no effort is requested — there is deliberately no default
-  // level, because "no level chosen" is what lets the model allocate its own
-  // thinking (see `LEVEL_REASONING` for why declaring a default broke that).
-  // When purpose is 'session-title' or reasoning is off, thinkingBudget: 0 prevents
-  // default thinking tokens from exhausting tight output caps (e.g. maxTokens: 64).
+  // Native tiered models omit thinkingConfig when no effort is requested, so
+  // upstream keeps its adaptive budget. Discrete Gemini variants bind the level
+  // to the wire ID; includeThoughts requests actual provider thinking parts
+  // without imposing a separate level or budget. Session titles and explicit
+  // reasoning-off requests still disable thinking to protect tight output caps.
   const effort = options.reasoningEffort?.toLowerCase()
   // Account selection may invalidate/reload discovery concurrently. The
   // already-selected wire ID determines whether this request is id-bound.
-  const discrete = context.wireModel === undefined
-    ? isUnifiedThinkingFamily(options.model)
-    : context.wireModel !== options.model
+  const discrete = context.discreteModel ?? (context.wireModel === undefined
+    ? Boolean(discoveredUnifiedThinkingFamilyFor(options.model)) || isUnifiedThinkingFamily(options.model)
+    : context.wireModel !== options.model)
+  const exposeGeminiThoughts = discrete && !claude && options.model.toLowerCase().startsWith('gemini-')
   if (discrete || isLevelThinkingModel(options.model)) {
     if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
       generationConfig.thinkingConfig = { thinkingBudget: 0 }
@@ -726,6 +731,8 @@ export function toAgyRequestBody(
       const tiered = context.tieredBudgetFor?.()
       if (tiered !== undefined) {
         generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
+      } else if (exposeGeminiThoughts) {
+        generationConfig.thinkingConfig = { includeThoughts: true }
       }
     } else if (discrete || (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any))) {
       // A configured number for this level takes the place of the level token:
@@ -734,6 +741,8 @@ export function toAgyRequestBody(
       if (discrete) {
         if (configured !== undefined) {
           generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
+        } else if (exposeGeminiThoughts) {
+          generationConfig.thinkingConfig = { includeThoughts: true }
         }
       } else {
         generationConfig.thinkingConfig = configured === undefined

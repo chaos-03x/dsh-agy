@@ -39,7 +39,7 @@ import {
 } from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
 import { resolveWireModel, toAgyRequestBody } from './translate.ts'
-import { discoveredUnifiedThinkingVariants, isModelHidden } from './catalog.ts'
+import { discoveredUnifiedThinkingFamilyFor, isModelHidden, isUnifiedThinkingFamily } from './catalog.ts'
 import type { AgyResolvedImage } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
 import { AgyStreamIdleTimeoutError, parseAgySse, UnmappedFinishReasonError } from './parse.ts'
@@ -327,10 +327,10 @@ export class AgyAdapter extends LlmAdapter {
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const resolved = resolveAgyModel(provider, model)
-    const variants = discoveredUnifiedThinkingVariants(model)
+    const family = discoveredUnifiedThinkingFamilyFor(model)
     const hidden = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
-    if (!variants || !hidden || !resolved.reasoning) return resolved
-    const visible = new Set<string>(variants.filter((variant) => !hidden.has(variant.wireId)).map((variant) => variant.effort))
+    if (!family || !hidden || !resolved.reasoning) return resolved
+    const visible = new Set<string>(family.variants.filter((variant) => !hidden.has(variant.wireId)).map((variant) => variant.effort))
     const efforts = resolved.reasoning.efforts.filter((effort) => visible.has(effort.id))
     return { ...resolved, reasoning: efforts.length > 0 ? { ...resolved.reasoning, efforts } : undefined }
   }
@@ -422,13 +422,14 @@ export class AgyAdapter extends LlmAdapter {
      */
     const conversationKey = options.sessionId === undefined ? undefined : String(options.sessionId)
     const hiddenModels = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
+    const discreteModel = Boolean(discoveredUnifiedThinkingFamilyFor(options.model)) || isUnifiedThinkingFamily(options.model)
     const wireModel = resolveWireModel(options.model, options.reasoningEffort, hiddenModels)
     let session: AgyAccountSession | undefined
     try {
       // Account capability caches contain upstream IDs, not synthetic UI IDs.
-      session = wireModel === options.model
-        ? await this.options.getSession(wireModel, conversationKey)
-        : await this.options.getSession(wireModel, conversationKey, true)
+      session = discreteModel
+        ? await this.options.getSession(wireModel, conversationKey, true)
+        : await this.options.getSession(wireModel, conversationKey)
     } catch (error) {
       if (error instanceof AgyAuthError) {
         if (error.kind === 'transport') {
@@ -505,6 +506,7 @@ export class AgyAdapter extends LlmAdapter {
             deriveAntigravitySessionId(session.account.email, conversationKey, generation) ?? undefined,
           requestId,
           wireModel,
+          discreteModel,
           ...(this.options.thinkingBudgetFor === undefined
             ? {}
             : { thinkingBudgetFor: this.options.thinkingBudgetFor }),

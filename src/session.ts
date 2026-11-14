@@ -46,7 +46,7 @@ import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from '
 import { currentAgyVersion } from './oauth/constants.ts'
 import { accountFetch, isProxyUnreachableError, probeFetch, proxiedFetch } from './proxy.ts'
 import { describeFetchError } from './runtime/classify.ts'
-import { isUnifiedThinkingFamily } from './adapter/catalog.ts'
+import { discoveredUnifiedThinkingFamilyFor, isUnifiedThinkingFamily } from './adapter/catalog.ts'
 import type { Fingerprint } from './types.ts'
 
 export interface SessionManagerOptions {
@@ -1265,10 +1265,12 @@ export class AgySessionManager {
     const startedAt = Date.now()
     let session: AgyAccountSession | undefined
     let wireModel: string
+    let discreteModel: boolean
     try {
       const { resolveWireModel } = await import('./adapter/translate.ts')
+      discreteModel = Boolean(discoveredUnifiedThinkingFamilyFor(model)) || isUnifiedThinkingFamily(model)
       wireModel = resolveWireModel(model)
-      session = await this.getSession(wireModel, options.accountIndex, undefined, wireModel !== model)
+      session = await this.getSession(wireModel, options.accountIndex, undefined, discreteModel)
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -1293,6 +1295,7 @@ export class AgySessionManager {
           sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
           requestId,
           wireModel,
+          discreteModel,
         },
       )
       const headers = {

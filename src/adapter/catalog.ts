@@ -173,6 +173,17 @@ export function discoveredUnifiedThinkingVariants(baseId: string): readonly Disc
   return DISCOVERED_UNIFIED_THINKING_FAMILIES.get(baseId)
 }
 
+/** Resolve either a synthetic family ID or one of its exact advertised wire IDs. */
+export function discoveredUnifiedThinkingFamilyFor(id: string): { base: string; variants: readonly DiscreteThinkingVariant[] } | undefined {
+  const direct = discoveredUnifiedThinkingVariants(id)
+  if (direct) return { base: id, variants: direct }
+  const match = /^(.*)-(?:low|medium|high|xhigh|max)$/.exec(id)
+  const base = match?.[1]
+  if (!base) return undefined
+  const variants = discoveredUnifiedThinkingVariants(base)
+  return variants?.some((variant) => variant.wireId === id) ? { base, variants } : undefined
+}
+
 /** Preserve both the family toggle and legacy per-variant blacklist choices. */
 export function isModelHidden(modelId: string, hidden: ReadonlySet<string>): boolean {
   if (hidden.has(modelId)) return true
