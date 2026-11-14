@@ -4,7 +4,7 @@
  * in-harness plugin shell, the CLI, and the web routes.
  */
 
-import { AgyAuthError, AgyPoolBlockedError } from './types.ts'
+import { AgyAuthError, AgyPoolBlockedError, MODEL_AVAILABILITY_TTL_MS } from './types.ts'
 import type { AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails, QuotaGroup } from './types.ts'
 import { refreshAccessToken } from './oauth/refresh.ts'
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from './oauth/auth.ts'
@@ -46,12 +46,15 @@ import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from '
 import { currentAgyVersion } from './oauth/constants.ts'
 import { accountFetch, isProxyUnreachableError, probeFetch, proxiedFetch } from './proxy.ts'
 import { describeFetchError } from './runtime/classify.ts'
+import { discoveredUnifiedThinkingFamilyFor, isUnifiedThinkingFamily } from './adapter/catalog.ts'
 import type { Fingerprint } from './types.ts'
 
 export interface SessionManagerOptions {
   store: AccountStore
   /** Called after rotation changes the active index (for logging/UI). */
   onRotate?: (fromIndex: number, toIndex: number, reason: FailureKind) => void
+  /** Latest account-scoped discovery, when newer than the quota model cache. */
+  modelEvidenceFor?: (account: ManagedAccount) => readonly string[] | undefined
   /** Called after a health check finishes (batch probe results). */
   onHealthReport?: (results: AccountHealthResult[]) => void
   /**
@@ -176,6 +179,8 @@ interface TokenCacheEntry {
 interface QuotaRefreshResult {
   key: string
   quotas: Record<string, CachedQuota>
+  models: string[]
+  modelsObservedAt: number
   updatedAt: number
 }
 
@@ -192,18 +197,36 @@ interface QuotaRefreshResult {
  * still applies on this path.
  */
 /** Whether a specific account is known to support the requested model. */
-export function isModelSupportedByAccount(account: ManagedAccount, model?: string): boolean {
-  if (!model || !account.cachedModels || account.cachedModels.length === 0) return true
-  if (account.cachedModels.includes(model)) return true
+export function isModelSupportedByAccount(
+  account: ManagedAccount, model?: string, requireExactModel = false, discoveredModels?: readonly string[],
+): boolean {
+  const models = discoveredModels ?? account.cachedModels
+  if (!model || !models || models.length === 0) return true
+  if (models.includes(model)) return true
+  // Model IDs and quota windows can be refreshed separately. A stale model
+  // observation cannot rule out a model that has since appeared.
+  if (discoveredModels === undefined) {
+    if (account.cachedModelsUpdatedAt !== undefined) {
+      const age = Date.now() - account.cachedModelsUpdatedAt
+      if (!Number.isFinite(age) || age < 0 || age >= MODEL_AVAILABILITY_TTL_MS) return true
+    } else if (account.cachedQuotaUpdatedAt && isQuotaStale(account)) {
+      return true // legacy caches have no model-specific timestamp
+    }
+  }
+  if (requireExactModel) return false
   const tieredMatch = /^(.*)-tiered$/.exec(model)
   if (tieredMatch) {
     const base = tieredMatch[1]
-    if (account.cachedModels.some((m) => m === model || m.startsWith(base + '-'))) return true
+    if (models.some((m) => m === model || m.startsWith(base + '-'))) return true
   }
-  const levelMatch = /^(.*)-(?:low|medium|high)$/.exec(model)
+  const levelMatch = /^(.*)-(?:low|medium|high|xhigh|max)$/.exec(model)
   if (levelMatch) {
     const base = levelMatch[1]
-    if (account.cachedModels.some((m) => m === model || m === `${base}-tiered` || m.startsWith(base + '-'))) return true
+    if (models.some((m) => m === model || m === `${base}-tiered` || m.startsWith(base + '-'))) return true
+  }
+  if (isUnifiedThinkingFamily(model)) {
+    const prefix = `${model}-`
+    return models.some((id) => id.startsWith(prefix) && /^(?:low|medium|high|xhigh|max)$/.test(id.slice(prefix.length)))
   }
   return false
 }
@@ -223,6 +246,7 @@ export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSess
 export class AgySessionManager {
   private readonly store: AccountStore
   private readonly onRotate: SessionManagerOptions['onRotate']
+  private readonly modelEvidenceFor: SessionManagerOptions['modelEvidenceFor']
   private readonly onHealthReport: SessionManagerOptions['onHealthReport']
   private readonly recordUsageOption: SessionManagerOptions['recordUsage']
   private readonly tokenCache = new Map<string, TokenCacheEntry>()
@@ -447,6 +471,7 @@ export class AgySessionManager {
   constructor(options: SessionManagerOptions) {
     this.store = options.store
     this.onRotate = options.onRotate
+    this.modelEvidenceFor = options.modelEvidenceFor
     this.onHealthReport = options.onHealthReport
     this.recordUsageOption = options.recordUsage
   }
@@ -462,6 +487,10 @@ export class AgySessionManager {
 
   private accountKey(account: ManagedAccount): string {
     return account.id ?? account.email ?? `idx-${account.refresh}`
+  }
+
+  private supportsModel(account: ManagedAccount, model?: string, requireExactModel = false): boolean {
+    return isModelSupportedByAccount(account, model, requireExactModel, this.modelEvidenceFor?.(account))
   }
 
   /**
@@ -747,13 +776,14 @@ export class AgySessionManager {
           // round trip per account instead of two and cannot disagree about what
           // upstream said. This path still decides WHERE the result lands —
           // `cachedQuota`, the scheduling cache `refreshLimits` must never touch.
-          const [discovered, groups] = await Promise.all([
-            fetchAvailableModels(auth.access, account.projectId, bounded),
+          const [snapshot, groups] = await Promise.all([
+            fetchAvailableModels(auth.access, account.projectId, bounded)
+              .then((discovered) => ({ discovered, observedAt: Date.now() })),
             this.probeQuotaSummary(account),
           ])
-          const quotas = ingestFamilyQuotas(discovered, groups, account.cachedQuota)
-          const models = Object.keys(discovered.models ?? {})
-          return { key, quotas, models, updatedAt: Date.now() }
+          const quotas = ingestFamilyQuotas(snapshot.discovered, groups, account.cachedQuota)
+          const models = Object.keys(snapshot.discovered.models ?? {})
+          return { key, quotas, models, modelsObservedAt: snapshot.observedAt, updatedAt: Date.now() }
         } catch {
           return null
         }
@@ -766,25 +796,29 @@ export class AgySessionManager {
       }
     }))
 
-    const updates = results.filter((r): r is { key: string; quotas: Record<string, CachedQuota>; models: string[]; updatedAt: number } => Boolean(r && Object.keys(r.quotas).length > 0))
+    const updates = results.filter((r): r is QuotaRefreshResult => Boolean(r && Object.keys(r.quotas).length > 0))
     if (updates.length > 0) {
+      const apply = (target: ManagedAccount, update: QuotaRefreshResult) => {
+        // Preserve legacy model freshness before changing the unrelated quota clock.
+        if (target.cachedModelsUpdatedAt === undefined && target.cachedModels?.length && target.cachedQuotaUpdatedAt !== undefined) {
+          target.cachedModelsUpdatedAt = target.cachedQuotaUpdatedAt
+        }
+        target.cachedQuota = update.quotas
+        target.cachedQuotaUpdatedAt = update.updatedAt
+        if (update.models.length > 0 && update.modelsObservedAt >= (target.cachedModelsUpdatedAt ?? 0)) {
+          target.cachedModels = update.models
+          target.cachedModelsUpdatedAt = update.modelsObservedAt
+        }
+      }
       for (const update of updates) {
         const target = storage.accounts.find((candidate) => this.accountKey(candidate) === update.key)
-        if (target) {
-          target.cachedQuota = update.quotas
-          target.cachedQuotaUpdatedAt = update.updatedAt
-          if (update.models.length > 0) target.cachedModels = update.models
-        }
+        if (target) apply(target, update)
       }
       try {
         await this.store.mutate((s) => {
           for (const update of updates) {
             const target = s.accounts.find((candidate) => this.accountKey(candidate) === update.key)
-            if (target) {
-              target.cachedQuota = update.quotas
-              target.cachedQuotaUpdatedAt = update.updatedAt
-              if (update.models.length > 0) target.cachedModels = update.models
-            }
+            if (target) apply(target, update)
           }
         })
       } catch {
@@ -804,6 +838,7 @@ export class AgySessionManager {
     storage: AccountStorageV4,
     model?: string,
     conversationKey?: string,
+    requireExactModel = false,
   ): Promise<{ account: ManagedAccount; index: number } | undefined> {
     const now = Date.now()
     for (const account of storage.accounts) clearExpiredState(account, now)
@@ -824,7 +859,7 @@ export class AgySessionManager {
         const last = storage.accounts[lastIndex]!
         if (
           last.enabled !== false &&
-          isModelSupportedByAccount(last, model) &&
+          this.supportsModel(last, model, requireExactModel) &&
           !isCoolingDown(last, now) &&
           !isFamilyRateLimited(last, familyKey, now) &&
           !isFamilyQuotaExhausted(last, family, now)
@@ -835,7 +870,7 @@ export class AgySessionManager {
     }
     const eligible = storage.accounts
       .map((account, index) => ({ account, index }))
-      .filter(({ account }) => account.enabled !== false && isModelSupportedByAccount(account, model))
+      .filter(({ account }) => account.enabled !== false && this.supportsModel(account, model, requireExactModel))
     if (eligible.length === 0) return undefined
 
     // Prioritize the active account as long as it is enabled, supports the model,
@@ -844,7 +879,7 @@ export class AgySessionManager {
     const isActiveUsable = (acc: ManagedAccount | undefined): acc is ManagedAccount =>
       acc !== undefined
       && acc.enabled !== false
-      && isModelSupportedByAccount(acc, model)
+      && this.supportsModel(acc, model, requireExactModel)
       && !isCoolingDown(acc, now)
       && !isFamilyRateLimited(acc, familyKey, now)
       && !isFamilyQuotaExhausted(acc, family, now)
@@ -909,11 +944,14 @@ export class AgySessionManager {
    *   which scopes account affinity. Concurrent conversations therefore hold
    *   independent pins. Omitted by callers with no conversation (CLI, probes),
    *   which share one anonymous bucket.
+   * @param requireExactModel - the model is a concrete wire variant; a sibling
+   *   is not enough evidence that an account can serve it.
    */
   async getSession(
     model?: string,
     accountIndex?: number,
     conversationKey?: string,
+    requireExactModel = false,
   ): Promise<AgyAccountSession | undefined> {
     let storage = await this.store.load()
     if (accountIndex !== undefined) {
@@ -944,7 +982,7 @@ export class AgySessionManager {
         // In-memory overlay on storage already took place in refreshQuotaCache.
       }
       const picked = accountIndex === undefined
-        ? await this.pickAccount(storage, model, conversationKey)
+        ? await this.pickAccount(storage, model, conversationKey, requireExactModel)
         : (() => {
           const account = storage.accounts[accountIndex]
           if (!account) throw new Error(`account #${accountIndex} not found`)
@@ -1254,8 +1292,13 @@ export class AgySessionManager {
     // because it did touch the account's identity.
     const startedAt = Date.now()
     let session: AgyAccountSession | undefined
+    let wireModel: string
+    let discreteModel: boolean
     try {
-      session = await this.getSession(model, options.accountIndex)
+      const { resolveWireModel } = await import('./adapter/translate.ts')
+      discreteModel = Boolean(discoveredUnifiedThinkingFamilyFor(model)) || isUnifiedThinkingFamily(model)
+      wireModel = resolveWireModel(model)
+      session = await this.getSession(wireModel, options.accountIndex, undefined, discreteModel)
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -1279,6 +1322,8 @@ export class AgySessionManager {
           projectId: session.account.projectId,
           sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
           requestId,
+          wireModel,
+          discreteModel,
         },
       )
       const headers = {

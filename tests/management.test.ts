@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAgyManagement } from '../src/web/management.ts'
+import { mergeModelCatalog } from '../src/adapter/models.ts'
+import { resetDiscoveredTieredModels } from '../src/adapter/catalog.ts'
 import { UsageStats, noopStatsLock } from '../src/stats.ts'
 import { ModelVisibility } from '../src/model-visibility.ts'
 import { ThinkingBudgetStore } from '../src/thinking-budget.ts'
@@ -399,6 +401,27 @@ describe('agy management RPC', () => {
       expect(harness.visibility.isDisabled('agy', 'model-a')).toBe(true)
       await harness.management.call('model.setDisabled', { modelId: 'model-a', disabled: false })
       expect(harness.visibility.isDisabled('agy', 'model-a')).toBe(false)
+    })
+
+    it('preserves hidden tiers and restores all of them when the family is explicitly enabled', async () => {
+      const base = 'gemini-4-hydrogen'
+      const low = `${base}-low`
+      const high = `${base}-xhigh`
+      const models = mergeModelCatalog({ models: { [low]: {}, [high]: {} } })
+      const harness = makeHarness({ session: { index: 0, account: account(), auth: {} }, models })
+      try {
+        harness.visibility.setDisabled('agy', low, true)
+        harness.visibility.setDisabled('agy', high, true)
+        const initial = await harness.management.call('model.list', {}) as { models: Array<{ id: string; disabled: boolean }> }
+        expect(initial.models.find((model) => model.id === base)?.disabled).toBe(true)
+        await harness.management.call('model.setDisabled', { modelId: base, disabled: false })
+        expect(harness.visibility.isDisabled('agy', low)).toBe(false)
+        expect(harness.visibility.isDisabled('agy', high)).toBe(false)
+        const enabled = await harness.management.call('model.list', {}) as { models: Array<{ id: string; disabled: boolean }> }
+        expect(enabled.models.find((model) => model.id === base)?.disabled).toBe(false)
+      } finally {
+        resetDiscoveredTieredModels()
+      }
     })
 
     it('announces the change so an open picker refreshes without a reload', async () => {

@@ -59,6 +59,7 @@ export interface SsePayload {
     candidatesTokenCount?: number
     totalTokenCount?: number
     cachedContentTokenCount?: number
+    thoughtsTokenCount?: number
   }
   error?: SseError
   modelVersion?: string
@@ -280,8 +281,9 @@ export async function* parseAgySse(
   let finishReason: FinishReason = { kind: 'stop' }
   let sawDone = false
   let sawFinishReason = false
+  let sawToolCall = false
   let sawUsage = false
-  let lastUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number } | null = null
+  let lastUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; reasoningTokens?: number; totalTokens?: number } | null = null
 
   interface OpenBlock {
     kind: 'text' | 'reasoning' | 'tool-call'
@@ -384,12 +386,21 @@ export async function* parseAgySse(
       // Reporting the full promptTokenCount here double-counts cached
       // tokens in the stats line's cache-hit percentage (it divides by
       // uncached + cacheRead + cacheWrite).
-      const promptTokens = payload.usageMetadata.promptTokenCount ?? 0
-      const cachedTokens = payload.usageMetadata.cachedContentTokenCount ?? 0
+      const count = (value: unknown): number | undefined =>
+        typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+      const promptTokens = count(payload.usageMetadata.promptTokenCount) ?? 0
+      const cachedTokens = Math.min(promptTokens, count(payload.usageMetadata.cachedContentTokenCount) ?? 0)
+      const candidates = count(payload.usageMetadata.candidatesTokenCount) ?? 0
+      const thoughts = count(payload.usageMetadata.thoughtsTokenCount)
+      const sum = candidates + (thoughts ?? 0)
+      const outputTokens = Number.isSafeInteger(sum) ? sum : candidates
+      const total = count(payload.usageMetadata.totalTokenCount)
       lastUsage = {
-        inputTokens: Math.max(0, promptTokens - cachedTokens),
-        outputTokens: payload.usageMetadata.candidatesTokenCount ?? 0,
+        inputTokens: promptTokens - cachedTokens,
+        outputTokens,
         cacheReadTokens: cachedTokens,
+        ...(thoughts !== undefined && Number.isSafeInteger(sum) ? { reasoningTokens: thoughts } : {}),
+        ...(total !== undefined && total >= promptTokens + outputTokens ? { totalTokens: total } : {}),
       }
     }
     for (const candidate of payload.candidates ?? []) {
@@ -415,6 +426,7 @@ export async function* parseAgySse(
           open!.text += part.text
           out.push({ type: 'reasoning-delta', index: blockIndex, text: part.text })
         } else if (part.functionCall) {
+          sawToolCall = true
           // Use the upstream functionCall id when present so the signature
           // captured on this part can be replayed for the same id next turn.
           const baseId = part.functionCall.id || String(blockIndex)
@@ -533,7 +545,11 @@ export async function* parseAgySse(
     } else if (sawUsage) {
       yield { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } }
     }
-    yield { type: 'finish', reason: finishReason }
+    // Gemini can finish a function-call turn with STOP. The tool block is
+    // nevertheless actionable; report the DSH protocol's tool-calls reason.
+    // Never override max-tokens, unknown reasons or the completeness guard.
+    const finalReason: FinishReason = sawToolCall && finishReason.kind === 'stop' ? { kind: 'tool-calls' } : finishReason
+    yield { type: 'finish', reason: finalReason }
   } finally {
     reader.releaseLock()
   }

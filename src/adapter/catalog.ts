@@ -144,11 +144,62 @@ export function registerDiscoveredTieredModels(tiered?: Record<string, string[]>
   }
 }
 
-const DISCOVERED_UNIFIED_THINKING_FAMILIES = new Set<string>()
+export type DiscreteThinkingLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
-/** Register dynamically discovered unified thinking families (e.g. models with discrete -low/-medium/-high variants). */
-export function registerDiscoveredUnifiedThinkingFamily(baseId: string): void {
-  DISCOVERED_UNIFIED_THINKING_FAMILIES.add(baseId)
+/** Ordered from least to greatest; IDs remain exactly as upstream advertises them. */
+export const DISCRETE_THINKING_LEVELS: readonly DiscreteThinkingLevel[] = ['low', 'medium', 'high', 'xhigh', 'max']
+
+export interface DiscreteThinkingVariant {
+  effort: DiscreteThinkingLevel
+  wireId: string
+}
+
+const DISCOVERED_UNIFIED_THINKING_FAMILIES = new Map<string, readonly DiscreteThinkingVariant[]>()
+// Identity only: unlike the active map, this never contains another account's
+// wire variants. It lets a known family survive an authoritative single tier.
+const KNOWN_UNIFIED_THINKING_FAMILIES = new Set<string>()
+
+/** Replace the previous discovery generation when the active account changes. */
+export function clearDiscoveredUnifiedThinkingFamilies(): void {
+  DISCOVERED_UNIFIED_THINKING_FAMILIES.clear()
+}
+
+/** Register a family with exactly the chat-callable variants that upstream returned. */
+export function registerDiscoveredUnifiedThinkingFamily(baseId: string, variants: readonly DiscreteThinkingVariant[]): void {
+  KNOWN_UNIFIED_THINKING_FAMILIES.add(baseId)
+  DISCOVERED_UNIFIED_THINKING_FAMILIES.set(baseId, [...variants].sort(
+    (a, b) => DISCRETE_THINKING_LEVELS.indexOf(a.effort) - DISCRETE_THINKING_LEVELS.indexOf(b.effort),
+  ))
+}
+
+/** Family identity without assuming that any particular tier is still available. */
+export function isKnownUnifiedThinkingFamily(baseId: string): boolean {
+  return KNOWN_UNIFIED_THINKING_FAMILIES.has(baseId) || isUnifiedThinkingFamily(baseId)
+}
+
+/** Exact per-account wire variants for a synthetic family, if discovered. */
+export function discoveredUnifiedThinkingVariants(baseId: string): readonly DiscreteThinkingVariant[] | undefined {
+  return DISCOVERED_UNIFIED_THINKING_FAMILIES.get(baseId)
+}
+
+/** Resolve a synthetic family or a legacy concrete selection against current variants. */
+export function discoveredUnifiedThinkingFamilyFor(id: string): { base: string; variants: readonly DiscreteThinkingVariant[] } | undefined {
+  const direct = discoveredUnifiedThinkingVariants(id)
+  if (direct) return { base: id, variants: direct }
+  const match = /^(.*)-(?:low|medium|high|xhigh|max)$/.exec(id)
+  const base = match?.[1]
+  if (!base) return undefined
+  const variants = discoveredUnifiedThinkingVariants(base)
+  // The selection may be from an earlier session whose tier is no longer in
+  // the current discovery. Recognize the family, not the missing wire ID.
+  return variants ? { base, variants } : undefined
+}
+
+/** Preserve both the family toggle and legacy per-variant blacklist choices. */
+export function isModelHidden(modelId: string, hidden: ReadonlySet<string>): boolean {
+  if (hidden.has(modelId)) return true
+  const variants = discoveredUnifiedThinkingVariants(modelId)
+  return variants !== undefined && variants.length > 0 && variants.every((variant) => hidden.has(variant.wireId))
 }
 
 /** Check whether a model ID is a unified thinking family (known static or dynamically discovered). */
@@ -165,6 +216,7 @@ export function isUnifiedThinkingFamily(modelId: string): boolean {
 export function resetDiscoveredTieredModels(): void {
   DISCOVERED_TIERED_FAMILIES.clear()
   DISCOVERED_UNIFIED_THINKING_FAMILIES.clear()
+  KNOWN_UNIFIED_THINKING_FAMILIES.clear()
 }
 
 /**
@@ -186,10 +238,13 @@ export function isLevelThinkingModel(modelId: string): boolean {
 /**
  * The reasoning levels supported by a level-thinking model.
  *
- * Flash family exposes low/medium/high; Pro family exposes low/high only
- * (measured: Pro models reject medium thinking levels).
+ * Discovered discrete families use their advertised tiers, including Extra High
+ * or Max when present. Native Flash exposes low/medium/high; native Pro exposes
+ * low/high only (measured: Pro models reject medium thinking levels).
  */
-export function levelThinkingEffortsFor(modelId: string): readonly ('low' | 'medium' | 'high')[] {
+export function levelThinkingEffortsFor(modelId: string): readonly DiscreteThinkingLevel[] {
+  const variants = discoveredUnifiedThinkingVariants(modelId)
+  if (variants) return variants.map((variant) => variant.effort)
   const cat = catalogModel(modelId)
   if (cat?.thinkingLevels) return cat.thinkingLevels
   const family = DISCOVERED_TIERED_FAMILIES.get(modelId)

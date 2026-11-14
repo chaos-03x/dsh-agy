@@ -21,7 +21,8 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
-import { catalogModel, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
+import { isValidClaudeBudget } from '../thinking-types.ts'
+import { catalogModel, discoveredUnifiedThinkingFamilyFor, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 import {
   conversationMessages,
@@ -521,10 +522,11 @@ export function coalesceContents(contents: AgyContent[]): AgyContent[] {
 }
 
 /**
- * Builtin Gemini tools must not shadow functionDeclarations names (upstream
- * treats them as native tools; verified by OmniRoute's GEMINI_BUILTIN_TOOL_NAMES).
+ * Names reserved for Gemini native tools must not shadow functionDeclarations.
+ * DSH's `web_search` is a host tool, not a native tool: this channel accepts
+ * that exact function name and returns it for normal host-side execution.
  */
-const AGY_BUILTIN_TOOL_NAMES = new Set(['google_search', 'web_search', 'search_web', 'googleSearch'])
+const AGY_BUILTIN_TOOL_NAMES = new Set(['google_search', 'search_web', 'googleSearch'])
 
 /** Level-thinking: single id + selectable low/medium/high via thinkingLevel (catalog thinking:'level'). */
 const LEVEL_THINKING_LEVELS = new Set(['low', 'medium', 'high'])
@@ -592,12 +594,37 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
  * Discrete-variant models (Gemini 4 Argon, Claude 5.5 series) are unified in DSH
  * with level thinking, and mapped to the matching discrete wire model on request.
  */
-export function resolveWireModel(model: string, effort?: string): string {
-  if (isUnifiedThinkingFamily(model)) {
-    const target = effort === 'low' ? 'low' : effort === 'high' ? 'high' : 'medium'
-    return `${model}-${target}`
+export function resolveWireModel(model: string, effort?: string, hidden: ReadonlySet<string> = new Set()): string {
+  const family = discoveredUnifiedThinkingFamilyFor(model)
+  if (!family && !isUnifiedThinkingFamily(model)) return model
+  const requested = effort?.toLowerCase()
+  const explicit = requested === 'none' || requested === 'off' ? undefined : requested
+  if (family) {
+    const variants = family.variants
+    // Preserve a concrete selection only while it is still advertised. Without
+    // an explicit surviving effort, never dispatch a removed wire ID or silently
+    // downgrade the user's selected tier.
+    if (family.base !== model && explicit === undefined) {
+      if (variants.some((variant) => variant.wireId === model)) return model
+      throw new Error(`Antigravity model ${model} is no longer advertised`)
+    }
+    const visible = variants.filter((variant) => !hidden.has(variant.wireId))
+    // The blacklist is presentation-only: an explicitly selected legacy tier
+    // remains callable; Default picks a visible tier when one exists.
+    const defaults = visible.length > 0 ? visible : variants
+    const picked = explicit
+      ? variants.find((variant) => variant.effort === explicit)
+      : defaults.find((variant) => variant.effort === 'medium') ?? defaults[0]
+    if (!picked) throw new Error(`Antigravity model ${model} does not advertise reasoning effort ${explicit}`)
+    return picked.wireId
   }
-  return model
+  // Offline catalog fallback retains the documented static families, but never
+  // silently converts an unknown effort to Medium.
+  const target = explicit ?? 'medium'
+  if (!levelThinkingEffortsFor(model).some((level) => level === target)) {
+    throw new Error(`Antigravity model ${model} does not advertise reasoning effort ${target}`)
+  }
+  return `${model}-${target}`
 }
 
 /** Build the wrapped Antigravity request body for one call. */
@@ -608,6 +635,12 @@ export function toAgyRequestBody(
     sessionId?: string
     images?: Map<string, AgyResolvedImage>
     multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>
+    /** Legacy hidden concrete variants, used only to choose a visible Default. */
+    hiddenModels?: ReadonlySet<string>
+    /** Freeze the selected wire variant across account selection and dispatch. */
+    wireModel?: string
+    /** Freeze whether this is an ID-bound family across discovery changes. */
+    discreteModel?: boolean
     /**
      * The request id, when the caller also stamps it on the wire
      * (`x-goog-request-id`). Generating it here as well produced TWO different
@@ -681,38 +714,51 @@ export function toAgyRequestBody(
       : options.maxTokens
   }
   if (options.stop !== undefined && options.stop.length > 0) generationConfig.stopSequences = options.stop
-  // Level-thinking: map the DSH reasoning effort to thinkingConfig.
-  // Id-bound models (thinking !== 'level') never emit it, and a tiered model
-  // emits NOTHING when no effort is requested — there is deliberately no default
-  // level, because "no level chosen" is what lets the model allocate its own
-  // thinking (see `LEVEL_REASONING` for why declaring a default broke that).
-  // When purpose is 'session-title' or reasoning is off, thinkingBudget: 0 prevents
-  // default thinking tokens from exhausting tight output caps (e.g. maxTokens: 64).
+  // Native tiered models omit thinkingConfig when no effort is requested, so
+  // upstream keeps its adaptive budget. Discrete Gemini variants bind the level
+  // to the wire ID; includeThoughts requests actual provider thinking parts
+  // without imposing a separate level or budget. Session titles and explicit
+  // reasoning-off requests still disable thinking to protect tight output caps.
   const effort = options.reasoningEffort?.toLowerCase()
-  if (isLevelThinkingModel(options.model)) {
+  // Account selection may invalidate/reload discovery concurrently. The
+  // already-selected wire ID determines whether this request is id-bound.
+  const discrete = context.discreteModel ?? (context.wireModel === undefined
+    ? Boolean(discoveredUnifiedThinkingFamilyFor(options.model)) || isUnifiedThinkingFamily(options.model)
+    : context.wireModel !== options.model)
+  const exposeGeminiThoughts = discrete && !claude && options.model.toLowerCase().startsWith('gemini-')
+  // Claude accepts -1 and 0 as special values; other budgets start at 1024.
+  // Every configured Claude budget still requires a strictly greater output cap.
+  const budgetFits = (budget: number): boolean => !claude || (
+    isValidClaudeBudget(budget) && generationConfig.maxOutputTokens !== undefined
+    && generationConfig.maxOutputTokens > budget
+  )
+  if (discrete || isLevelThinkingModel(options.model)) {
     if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
       generationConfig.thinkingConfig = { thinkingBudget: 0 }
     } else if (effort === undefined) {
-      // The selector's "Default" effort: no level was chosen. A configured tiered
-      // budget turns this into Max by sending a bare `thinkingBudget` (no
-      // `thinkingLevel`, so the number alone decides). Unset sends nothing at all,
-      // which leaves upstream's own adaptive allocation in charge.
-      const tiered = context.tieredBudgetFor?.()
-      if (tiered !== undefined) {
-        generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
+      // The selector's "Default" effort carries no level. Gemini uses its
+      // tiered budget; Claude uses only its own independently configured budget.
+      // With no family-specific budget, upstream keeps its default behaviour.
+      const budget = claude ? context.claudeBudgetFor?.() : context.tieredBudgetFor?.()
+      if (budget !== undefined && budgetFits(budget)) {
+        generationConfig.thinkingConfig = { thinkingBudget: budget, includeThoughts: true }
+      } else if (exposeGeminiThoughts) {
+        generationConfig.thinkingConfig = { includeThoughts: true }
       }
-    } else if (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any)) {
-      // A configured number for this level takes the place of the level token:
-      // both together would let the level win (see `thinkingBudgetFor`).
-      const configured = context.thinkingBudgetFor?.(effort)
-      if (options.model === 'gemini-4-argon' || options.model === 'claude-opus-5-5' || options.model === 'claude-sonnet-5-5') {
-        if (configured !== undefined) {
+    } else if (discrete || (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any))) {
+      // Gemini's configured number takes the place of its level token. Claude
+      // has an independent budget, regardless of the selected wire variant.
+      const configured = claude ? context.claudeBudgetFor?.() : context.thinkingBudgetFor?.(effort)
+      if (discrete) {
+        if (configured !== undefined && budgetFits(configured)) {
           generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
+        } else if (exposeGeminiThoughts) {
+          generationConfig.thinkingConfig = { includeThoughts: true }
         }
-      } else {
-        generationConfig.thinkingConfig = configured === undefined
-          ? { thinkingLevel: effort, includeThoughts: true }
-          : { thinkingBudget: configured, includeThoughts: true }
+      } else if (configured === undefined) {
+        generationConfig.thinkingConfig = { thinkingLevel: effort, includeThoughts: true }
+      } else if (budgetFits(configured)) {
+        generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
       }
     }
   } else if (claude && options.purpose !== 'session-title') {
@@ -722,15 +768,15 @@ export function toAgyRequestBody(
     //   - `max_tokens` must be STRICTLY greater than the budget. `budget=1024`
     //     with `max_tokens=1024` is rejected, and so is a budget sent with no
     //     `maxOutputTokens` at all.
-    //   - the floor is 1024 (not `-1`); the store validates that on save.
+    //   - the floor is 1024, with measured -1/0 special values; the store
+    //     validates this on save, and the request uses the same validator.
     // So a budget that does not leave room is DROPPED rather than forced through
     // by raising `maxTokens`: silently enlarging the caller's output cap would
     // change the request's cost and truncation behaviour, while omitting the
     // budget merely means this turn thinks with upstream's default. A 400 would
     // be worse than either.
     const claudeBudget = context.claudeBudgetFor?.()
-    const outputCap = generationConfig.maxOutputTokens
-    if (claudeBudget !== undefined && outputCap !== undefined && outputCap > claudeBudget) {
+    if (claudeBudget !== undefined && budgetFits(claudeBudget)) {
       generationConfig.thinkingConfig = { thinkingBudget: claudeBudget, includeThoughts: true }
     }
   }
@@ -738,7 +784,7 @@ export function toAgyRequestBody(
   return {
     project: context.projectId || undefined,
     requestId: context.requestId ?? generateAntigravityRequestId(),
-    model: resolveWireModel(options.model, effort),
+    model: context.wireModel ?? resolveWireModel(options.model, effort, context.hiddenModels),
     userAgent: 'antigravity',
     requestType: 'agent',
     request: {

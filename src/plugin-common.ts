@@ -23,6 +23,7 @@ import type { FetchLike } from './runtime/version.ts'
 import { AgySessionManager } from './session.ts'
 import { JsonAccountStore } from './store/accounts.ts'
 import type { AccountStore } from './store/accounts.ts'
+import type { ManagedAccount } from './types.ts'
 import {
   MASTER_KEY_REF,
   createAesGcmCodec,
@@ -184,8 +185,10 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   // account discovery rides must drop it. The adapter does not exist yet when
   // the session manager is constructed, hence the late-bound reference.
   let invalidateModelCache: () => void = () => {}
+  let modelEvidenceFor: (account: ManagedAccount) => readonly string[] | undefined = () => undefined
   const sessions = new AgySessionManager({
     store,
+    modelEvidenceFor: (account) => modelEvidenceFor(account),
     recordUsage: (record) => { stats.record(record) },
     onRotate: () => { invalidateModelCache() },
   })
@@ -195,7 +198,7 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     sessions.startHealthProbe(healthIntervalMs)
   }
   const adapter = new AgyAdapter({
-    getSession: (model, conversationKey) => sessions.getSession(model, undefined, conversationKey),
+    getSession: (model, conversationKey, requireExactModel) => sessions.getSession(model, undefined, conversationKey, requireExactModel),
     reportFailure: (kind, session, info) => sessions.reportFailure(kind, session, info),
     markSuccess: (session) => sessions.markSuccess(session),
     resolveAttachments: () => ctx.get('attachments') as AgyAttachmentStore | undefined,
@@ -209,6 +212,7 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })
   invalidateModelCache = () => { adapter.invalidateModelCache() }
+  modelEvidenceFor = (account) => adapter.discoveredModelsFor(account)
   // Warm up the model list in the background so the first model/effort selection
   // in DSH has zero latency and shows no loading spinner.
   void adapter.listAllModels().catch(() => {})

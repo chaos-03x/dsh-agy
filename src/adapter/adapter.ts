@@ -5,6 +5,7 @@
  * live in translate.ts / parse.ts / models.ts.
  */
 
+import { createHash } from 'node:crypto'
 import {
   LlmAdapter,
   LlmError,
@@ -20,7 +21,7 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 
-import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
+import { AgyAuthError, AgyPoolBlockedError, MODEL_AVAILABILITY_TTL_MS } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
@@ -38,11 +39,12 @@ import {
   generateAntigravityRequestId,
 } from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
-import { toAgyRequestBody } from './translate.ts'
+import { resolveWireModel, toAgyRequestBody } from './translate.ts'
+import { discoveredUnifiedThinkingFamilyFor, isModelHidden, isUnifiedThinkingFamily } from './catalog.ts'
 import type { AgyResolvedImage } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
 import { AgyStreamIdleTimeoutError, parseAgySse, UnmappedFinishReasonError } from './parse.ts'
-import { AGY_PROVIDER, catalogModelList, listAgyModels, resolveAgyModel } from './models.ts'
+import { AGY_PROVIDER, catalogModelList, listAgyModels, ModelDiscoveryCache, resolveAgyModel, StaleModelDiscoveryError } from './models.ts'
 
 export type { AgyAccountSession }
 
@@ -77,7 +79,7 @@ export interface AgyAdapterOptions {
    * ranking). `conversationKey` scopes account affinity, so concurrent
    * conversations hold independent pins.
    */
-  getSession(model?: string, conversationKey?: string): Promise<AgyAccountSession | undefined>
+  getSession(model?: string, conversationKey?: string, requireExactModel?: boolean): Promise<AgyAccountSession | undefined>
   /** Report a classified upstream failure so the shell can cool/rotate/revoke. */
   reportFailure(
     kind: FailureKind,
@@ -237,10 +239,19 @@ export function buildRequestHeaders(session: AgyAccountSession): Record<string, 
 }
 
 /** How long discovered models stay cached before re-probing upstream (10 minutes). */
-export const MODEL_LIST_CACHE_TTL_MS = 10 * 60 * 1000
+export const MODEL_LIST_CACHE_TTL_MS = MODEL_AVAILABILITY_TTL_MS
+
+/** Keep account, project and egress isolated without retaining the raw credential. */
+function accountDiscoveryScope(account: ManagedAccount): string {
+  return createHash('sha256').update(JSON.stringify([
+    account.id ?? null, account.refresh, account.projectId ?? null, account.proxy ?? null,
+  ])).digest('hex')
+}
 
 export class AgyAdapter extends LlmAdapter {
   private readonly options: AgyAdapterOptions
+  private readonly discoveryCache = new ModelDiscoveryCache()
+  private discoveryGeneration = 0
   private cachedModels: { models: readonly LlmModelInfo[]; at: number } | null = null
   private inFlightModels: Promise<readonly LlmModelInfo[]> | null = null
 
@@ -262,7 +273,7 @@ export class AgyAdapter extends LlmAdapter {
     const all = await this.listAllModels()
     const hidden = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
     if (hidden === undefined || hidden.size === 0) return all
-    return all.filter((model) => !hidden.has(model.id))
+    return all.filter((model) => !isModelHidden(model.id, hidden))
   }
 
   /**
@@ -286,23 +297,32 @@ export class AgyAdapter extends LlmAdapter {
     }
     if (this.inFlightModels) return this.inFlightModels
 
-    const task = (async () => {
+    const generation = this.discoveryGeneration
+    let task!: Promise<readonly LlmModelInfo[]>
+    task = (async () => {
       try {
         const session = await this.options.getSession()
+        if (generation !== this.discoveryGeneration) return this.listAllModels()
         // Model discovery is account-scoped: route it through the account's proxy
         // (control-plane class, so the standard timeouts apply).
         const routing = { proxyUrl: session?.account.proxy }
-        const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
+        // An opaque key keeps fallback discovery tied to this exact account,
+        // project and egress, even if access tokens refresh or the pool rotates.
+        const scope = session && accountDiscoveryScope(session.account)
+        const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing), {
+          cache: this.discoveryCache, scope, isCurrent: () => generation === this.discoveryGeneration,
+        })
         this.cachedModels = { models, at: Date.now() }
         return models
       } catch (error) {
+        if (error instanceof StaleModelDiscoveryError || generation !== this.discoveryGeneration) return this.listAllModels()
         if (error instanceof AgyPoolBlockedError || error instanceof AgyAuthError) {
           return catalogModelList()
         }
         if (this.cachedModels) return this.cachedModels.models
         throw error
       } finally {
-        this.inFlightModels = null
+        if (this.inFlightModels === task) this.inFlightModels = null
       }
     })()
 
@@ -321,11 +341,31 @@ export class AgyAdapter extends LlmAdapter {
    * discovery rides (activation, rotation) therefore drops the cache instead.
    */
   invalidateModelCache(): void {
+    this.discoveryGeneration++
     this.cachedModels = null
+    this.inFlightModels = null
+  }
+
+  /** Fresh, exact account-scoped discovery may supersede an older quota probe. */
+  discoveredModelsFor(account: ManagedAccount): readonly string[] | undefined {
+    const scope = accountDiscoveryScope(account)
+    const observedAt = this.discoveryCache.observedAt(scope)
+    if (observedAt === undefined) return undefined
+    const age = Date.now() - observedAt
+    const modelCacheAt = account.cachedModelsUpdatedAt ?? account.cachedQuotaUpdatedAt ?? 0
+    if (age < 0 || age >= MODEL_LIST_CACHE_TTL_MS || modelCacheAt > observedAt) return undefined
+    const models = this.discoveryCache.get(scope)?.models
+    return models ? Object.keys(models) : undefined
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return resolveAgyModel(provider, model)
+    const resolved = resolveAgyModel(provider, model)
+    const family = discoveredUnifiedThinkingFamilyFor(model)
+    const hidden = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
+    if (!family || !hidden || !resolved.reasoning) return resolved
+    const visible = new Set<string>(family.variants.filter((variant) => !hidden.has(variant.wireId)).map((variant) => variant.effort))
+    const efforts = resolved.reasoning.efforts.filter((effort) => visible.has(effort.id))
+    return { ...resolved, reasoning: efforts.length > 0 ? { ...resolved.reasoning, efforts } : undefined }
   }
 
   // `prepareCall` is deliberately NOT overridden: the LlmAdapter base class
@@ -414,9 +454,18 @@ export class AgyAdapter extends LlmAdapter {
      * here and to derive the upstream `sessionId` below.
      */
     const conversationKey = options.sessionId === undefined ? undefined : String(options.sessionId)
+    const hiddenModels = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
+    const discreteModel = Boolean(discoveredUnifiedThinkingFamilyFor(options.model)) || isUnifiedThinkingFamily(options.model)
+    const wireModel = resolveWireModel(options.model, options.reasoningEffort, hiddenModels)
+    // Extra tiers can remain separate rows beside a native tiered model. They
+    // still require the exact wire ID, without changing thinking translation.
+    const requireExactModel = discreteModel || /-(?:xhigh|max)$/i.test(wireModel)
     let session: AgyAccountSession | undefined
     try {
-      session = await this.options.getSession(options.model, conversationKey)
+      // Account capability caches contain upstream IDs, not synthetic UI IDs.
+      session = requireExactModel
+        ? await this.options.getSession(wireModel, conversationKey, true)
+        : await this.options.getSession(wireModel, conversationKey)
     } catch (error) {
       if (error instanceof AgyAuthError) {
         if (error.kind === 'transport') {
@@ -492,6 +541,8 @@ export class AgyAdapter extends LlmAdapter {
           sessionId:
             deriveAntigravitySessionId(session.account.email, conversationKey, generation) ?? undefined,
           requestId,
+          wireModel,
+          discreteModel,
           ...(this.options.thinkingBudgetFor === undefined
             ? {}
             : { thinkingBudgetFor: this.options.thinkingBudgetFor }),

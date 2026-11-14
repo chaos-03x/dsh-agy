@@ -1007,7 +1007,7 @@ describe('translate', () => {
     expect(new Set(names).size).toBe(names.length)
   })
 
-  it('excludes builtin Gemini tool names from functionDeclarations', () => {
+  it('excludes native Gemini tool names but retains the host web_search function', () => {
     const body = toAgyRequestBody(
       generateOptions({
         tools: [
@@ -1019,12 +1019,12 @@ describe('translate', () => {
       {},
     )
     const names = body.request.tools![0].functionDeclarations.map((t) => t.name)
-    expect(names).toEqual(['mcp__github__issue_write'])
+    expect(names).toEqual(['web_search', 'mcp__github__issue_write'])
   })
 
   it('returns no tools block when all tools are builtin or sanitized away', () => {
     const body = toAgyRequestBody(
-      generateOptions({ tools: [{ name: 'web_search', description: 'd', parameters: { type: 'object' } }] }),
+      generateOptions({ tools: [{ name: 'google_search', description: 'd', parameters: { type: 'object' } }] }),
       {},
     )
     expect(body.request.tools).toBeUndefined()

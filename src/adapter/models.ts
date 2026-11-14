@@ -4,20 +4,26 @@
  * capability metadata, and catalog fallback when the endpoint is unreachable.
  */
 
+import { createHash } from 'node:crypto'
 import { ReasoningEffortId, type LlmModelInfo, type LlmModelReasoningInfo, type LlmResolvedModelInfo, type ModelModality } from '@deepseek-ai/dsh-llm'
 import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
 import { proxiedFetch } from '../proxy.ts'
 import {
   AGY_PUBLIC_MODELS,
   catalogModel,
+  clearDiscoveredUnifiedThinkingFamilies,
+  discoveredUnifiedThinkingFamilyFor,
+  discoveredUnifiedThinkingVariants,
   formatTieredModelName,
   isChatCallableModelId,
+  isKnownUnifiedThinkingFamily,
   isLevelThinkingModel,
   isUnifiedThinkingFamily,
   levelThinkingEffortsFor,
   registerDiscoveredTieredModels,
   registerDiscoveredUnifiedThinkingFamily,
 } from './catalog.ts'
+import type { DiscreteThinkingLevel, DiscreteThinkingVariant } from './catalog.ts'
 export { isUnifiedThinkingFamily } from './catalog.ts'
 
 export const AGY_PROVIDER = 'agy'
@@ -37,23 +43,11 @@ export const AGY_PROVIDER = 'agy'
  * sends no `reasoningEffort`, `translate.ts` omits `thinkingConfig` entirely, and
  * the upstream runs its own adaptive budget — measured on this channel as
  * `thinkingBudget: -1` + `minThinkingBudget: 32` for every `*-tiered` model.
- * The three explicit levels remain selectable alongside it.
+ * Only the explicit levels advertised for a discovered family are selectable alongside it.
  */
-const LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
-  efforts: Object.freeze([
-    { id: ReasoningEffortId('low'), name: 'Low' },
-    { id: ReasoningEffortId('medium'), name: 'Medium' },
-    { id: ReasoningEffortId('high'), name: 'High' },
-  ] as const),
-} as const)
-
-/** Reasoning levels for the Pro family (Low and High only; no Medium tier). */
-const PRO_LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
-  efforts: Object.freeze([
-    { id: ReasoningEffortId('low'), name: 'Low' },
-    { id: ReasoningEffortId('high'), name: 'High' },
-  ] as const),
-} as const)
+const EFFORT_NAMES: Readonly<Record<DiscreteThinkingLevel, string>> = {
+  low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max',
+}
 
 /**
  * Input modalities per model. Image support follows the catalog's own
@@ -105,6 +99,27 @@ export interface DiscoveredModels {
   tieredModelIds?: Record<string, string[]>
 }
 
+// Keep only public capability metadata from the latest account's discovery, not
+// quota or account information. Replaced as a unit on every catalog refresh.
+let discoveredContextWindows = new Map<string, number>()
+
+function discoveredContextWindow(modelId: string): number | undefined {
+  // A concrete legacy ID can select sibling efforts too, so its budget must
+  // account for every destination, not just its original concrete window.
+  const family = discoveredUnifiedThinkingFamilyFor(modelId)
+  if (!family) return discoveredContextWindows.get(modelId)
+  const sizes = family.variants.map((variant) => discoveredContextWindows.get(variant.wireId))
+  if (sizes.some((size) => size === undefined)) return undefined
+  return Math.min(...sizes as number[])
+}
+
+function contextWindowFor(modelId: string, catalogWindow?: number): number | undefined {
+  const discovered = discoveredContextWindow(modelId)
+  return catalogWindow !== undefined && discovered !== undefined
+    ? Math.min(catalogWindow, discovered)
+    : catalogWindow ?? discovered
+}
+
 /** Role keys whose members are not agent chat models. */
 const NON_CHAT_ROLE_KEYS = ['tabModelIds', 'imageGenerationModelIds', 'audioTranscriptionModelIds'] as const
 
@@ -112,6 +127,62 @@ const NON_CHAT_ROLE_KEYS = ['tabModelIds', 'imageGenerationModelIds', 'audioTran
 function stringsFrom(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+}
+
+/** Keep only public model capabilities; no quota, credential, or account fields. */
+function discoverySnapshot(dynamic: DiscoveredModels): DiscoveredModels {
+  const models: Record<string, DiscoveredModelEntry> = Object.create(null)
+  for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
+    if (!entry || typeof entry !== 'object') continue
+    models[id] = {
+      ...(typeof entry.displayName === 'string' ? { displayName: entry.displayName } : {}),
+      ...(typeof entry.modelName === 'string' ? { modelName: entry.modelName } : {}),
+      ...(typeof entry.maxTokens === 'number' ? { maxTokens: entry.maxTokens } : {}),
+      ...(typeof entry.maxOutputTokens === 'number' ? { maxOutputTokens: entry.maxOutputTokens } : {}),
+    }
+  }
+  const deprecatedModelIds: Record<string, DeprecatedModelInfo> = Object.create(null)
+  for (const [id, info] of Object.entries(dynamic.deprecatedModelIds ?? {})) {
+    if (info && typeof info.newModelId === 'string') deprecatedModelIds[id] = { newModelId: info.newModelId }
+  }
+  const tieredModelIds: Record<string, string[]> = Object.create(null)
+  for (const [family, ids] of Object.entries(dynamic.tieredModelIds ?? {})) tieredModelIds[family] = stringsFrom(ids)
+  return {
+    models,
+    tabModelIds: stringsFrom(dynamic.tabModelIds),
+    imageGenerationModelIds: stringsFrom(dynamic.imageGenerationModelIds),
+    audioTranscriptionModelIds: stringsFrom(dynamic.audioTranscriptionModelIds),
+    deprecatedModelIds,
+    ...(typeof dynamic.defaultAgentModelId === 'string' ? { defaultAgentModelId: dynamic.defaultAgentModelId } : {}),
+    agentModelSorts: Array.isArray(dynamic.agentModelSorts) ? dynamic.agentModelSorts.map((sort) => ({
+      ...(typeof sort?.displayName === 'string' ? { displayName: sort.displayName } : {}),
+      groups: Array.isArray(sort?.groups) ? sort.groups.map((group) => ({ modelIds: stringsFrom(group?.modelIds) })) : [],
+    })) : [],
+    tieredModelIds,
+  }
+}
+
+/** Last-known capabilities, isolated by opaque account scope and bounded in memory. */
+export class ModelDiscoveryCache {
+  private readonly snapshots = new Map<string, { data: DiscoveredModels; observedAt: number }>()
+
+  get(scope: string): DiscoveredModels | undefined { return this.snapshots.get(scope)?.data }
+  observedAt(scope: string): number | undefined { return this.snapshots.get(scope)?.observedAt }
+
+  remember(scope: string, dynamic: DiscoveredModels): void {
+    this.snapshots.delete(scope)
+    this.snapshots.set(scope, { data: discoverySnapshot(dynamic), observedAt: Date.now() })
+    if (this.snapshots.size > 32) this.snapshots.delete(this.snapshots.keys().next().value!)
+  }
+
+  forget(scope: string): void { this.snapshots.delete(scope) }
+}
+
+const defaultDiscoveryCache = new ModelDiscoveryCache()
+
+/** An invalidated in-flight response must never replace the current account's catalog. */
+export class StaleModelDiscoveryError extends Error {
+  constructor() { super('model discovery was invalidated before completion') }
 }
 
 /**
@@ -189,30 +260,35 @@ function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
       hidden.add(retiredId)
     }
   }
-  const splitCounts = new Map<string, number>()
+  // Discovery is account-scoped. Do not retain variants from the previous
+  // account, and never synthesize a chat family out of hidden image/tab IDs.
+  clearDiscoveredUnifiedThinkingFamilies()
+  const splitFamilies = new Map<string, DiscreteThinkingVariant[]>()
   for (const id of Object.keys(models)) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
-    if (m && m[1]) {
-      splitCounts.set(m[1], (splitCounts.get(m[1]) ?? 0) + 1)
-    }
+    if (!isChatCallableModelId(id) || hidden.has(id)) continue
+    const match = /^(.*)-(low|medium|high|xhigh|max)$/.exec(id)
+    if (!match?.[1] || !match[2]) continue
+    const variants = splitFamilies.get(match[1]) ?? []
+    variants.push({ effort: match[2] as DiscreteThinkingLevel, wireId: id })
+    splitFamilies.set(match[1], variants)
   }
-  for (const [base, count] of splitCounts.entries()) {
-    if ((count >= 2 || isUnifiedThinkingFamily(base)) && !Object.hasOwn(models, `${base}-tiered`)) {
-      registerDiscoveredUnifiedThinkingFamily(base)
+  for (const [base, variants] of splitFamilies) {
+    const tiered = `${base}-tiered`
+    const hasTiered = Object.hasOwn(models, tiered) && !hidden.has(tiered) && isChatCallableModelId(tiered)
+    const hasNativeBase = Object.hasOwn(models, base) && !hidden.has(base)
+      && isLevelThinkingModel(base) && !isUnifiedThinkingFamily(base)
+    if (hasTiered || hasNativeBase) {
+      const nativeEfforts = levelThinkingEffortsFor(hasTiered ? tiered : base)
+      // Do not hide extra tiers the native selector cannot represent.
+      for (const variant of variants) if (nativeEfforts.includes(variant.effort)) hidden.add(variant.wireId)
+      continue
     }
-  }
-  for (const id of Object.keys(models)) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
-    if (m && m[1]) {
-      const base = m[1]
-      if (
-        Object.hasOwn(models, `${base}-tiered`) ||
-        (Object.hasOwn(models, base) && isLevelThinkingModel(base)) ||
-        isUnifiedThinkingFamily(base)
-      ) {
-        hidden.add(id)
-      }
-    }
+    // If upstream explicitly marks the base as non-chat, grouping must not
+    // resurrect it under a synthetic name.
+    if (hidden.has(base)) continue
+    if (variants.length < 2 && !isKnownUnifiedThinkingFamily(base)) continue
+    registerDiscoveredUnifiedThinkingFamily(base, variants)
+    for (const variant of variants) hidden.add(variant.wireId)
   }
   return hidden
 }
@@ -374,6 +450,13 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   }
   const entries: LlmModelInfo[] = []
   const hidden = hiddenDiscoveredIds(dynamic)
+  const contexts = new Map<string, number>()
+  for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
+    if (!isChatCallableModelId(id) || (hidden.has(id) && !discoveredUnifiedThinkingFamilyFor(id))) continue
+    const size = entry?.maxTokens
+    if (typeof size === 'number' && Number.isSafeInteger(size) && size > 0) contexts.set(id, size)
+  }
+  discoveredContextWindows = contexts
   for (const [id, entry] of Object.entries(dynamic.models ?? {})) {
     if (!isChatCallableModelId(id) || hidden.has(id)) continue
     const meta = catalogModel(id)
@@ -402,21 +485,22 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   }
   // Ensure unified base models for split thinking families are present
   for (const splitId of Object.keys(dynamic.models ?? {})) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(splitId)
+    const m = /^(.*)-(?:low|medium|high|xhigh|max)$/.exec(splitId)
     if (m && m[1]) {
       const base = m[1]
       if (
-        isLevelThinkingModel(base) &&
+        discoveredUnifiedThinkingVariants(base) !== undefined &&
         !entries.some((e) => e.id === base) &&
         !entries.some((e) => e.id === `${base}-tiered`)
       ) {
         const meta = catalogModel(base)
+        const contextWindow = contextWindowFor(base, meta?.contextLength)
         entries.push({
           provider: AGY_PROVIDER,
           id: base,
           name: meta?.name ?? formatTieredModelName(base),
           inputModalities: inputModalitiesFor(meta),
-          ...(meta?.contextLength !== undefined ? { context: { contextWindow: meta.contextLength } } : {}),
+          ...(contextWindow !== undefined ? { context: { contextWindow } } : {}),
         })
       }
     }
@@ -427,6 +511,8 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
 
 /** Catalog-only model list used when the endpoint is unreachable. */
 export function catalogModelList(): LlmModelInfo[] {
+  clearDiscoveredUnifiedThinkingFamilies()
+  discoveredContextWindows = new Map()
   const list = AGY_PUBLIC_MODELS.map((model) => ({
     provider: AGY_PROVIDER,
     id: model.id,
@@ -443,31 +529,57 @@ export async function listAgyModels(
   accessToken: string | undefined,
   projectId: string | undefined,
   fetchImpl: typeof fetch = proxiedFetch,
+  options: { cache?: ModelDiscoveryCache; scope?: string; isCurrent?: () => boolean } = {},
 ): Promise<readonly LlmModelInfo[]> {
+  const ensureCurrent = () => { if (options.isCurrent?.() === false) throw new StaleModelDiscoveryError() }
+  ensureCurrent()
   if (!accessToken) return catalogModelList()
+  const cache = options.cache ?? defaultDiscoveryCache
+  // Standalone callers have no account identity; a one-way token/project key
+  // provides safe isolation without retaining the credential itself.
+  const scope = options.scope ?? createHash('sha256').update(JSON.stringify([accessToken, projectId ?? null])).digest('hex')
   try {
     const dynamic = await fetchAvailableModels(accessToken, projectId, fetchImpl)
+    ensureCurrent()
     const merged = mergeModelCatalog(dynamic)
-    return merged.length > 0 ? merged : catalogModelList()
-  } catch {
+    if (merged.length > 0) {
+      cache.remember(scope, dynamic)
+      return merged
+    }
+    // A successful empty response is authoritative, not a network failure.
+    cache.forget(scope)
+    return catalogModelList()
+  } catch (error) {
+    if (error instanceof StaleModelDiscoveryError) throw error
+    ensureCurrent()
+    const previous = cache.get(scope)
+    if (previous) {
+      const merged = mergeModelCatalog(previous)
+      if (merged.length > 0) return merged
+    }
     return catalogModelList()
   }
 }
 
 /** Resolve one exact model's metadata (catalog-backed; dynamic ids pass through). */
 export function resolveAgyModel(provider: string, model: string): LlmResolvedModelInfo {
-  const meta = catalogModel(model)
-  if (isLevelThinkingModel(model)) {
-    const efforts = levelThinkingEffortsFor(model)
-    const reasoningInfo: LlmModelReasoningInfo = efforts.length === 2
-      ? { ...PRO_LEVEL_REASONING, efforts: [...PRO_LEVEL_REASONING.efforts] }
-      : { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] }
+  const family = discoveredUnifiedThinkingFamilyFor(model)
+  const meta = catalogModel(model) ?? (family ? catalogModel(family.base) : undefined)
+  const contextWindow = contextWindowFor(model, meta?.contextLength)
+  if (family || isLevelThinkingModel(model)) {
+    const efforts = family ? family.variants.map((variant) => variant.effort) : levelThinkingEffortsFor(model)
+    const reasoningInfo: LlmModelReasoningInfo = {
+      efforts: efforts.map((effort) => ({ id: ReasoningEffortId(effort), name: EFFORT_NAMES[effort] })),
+    }
+    // Native tiered IDs retain the existing fallback. For an unpinned dynamic
+    // family, do not invent a capacity that discovery did not report.
+    const resolvedContext = contextWindow ?? (family ? undefined : 1048576)
     return {
       provider,
       id: model,
       name: meta?.name ?? model,
       inputModalities: inputModalitiesFor(meta),
-      context: { contextWindow: meta?.contextLength ?? 1048576 },
+      ...(resolvedContext !== undefined ? { context: { contextWindow: resolvedContext } } : {}),
       defaultMaxTokens: meta?.maxOutputTokens ?? 65536,
       // Return a shallow copy so callers cannot mutate the frozen singleton.
       reasoning: reasoningInfo,
@@ -478,6 +590,7 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
     id: model,
     name: meta?.name ?? model,
     inputModalities: inputModalitiesFor(meta),
-    ...(meta ? { context: { contextWindow: meta.contextLength }, defaultMaxTokens: meta.maxOutputTokens } : {}),
+    ...(contextWindow !== undefined ? { context: { contextWindow } } : {}),
+    ...(meta ? { defaultMaxTokens: meta.maxOutputTokens } : {}),
   }
 }

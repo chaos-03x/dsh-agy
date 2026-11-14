@@ -18,6 +18,7 @@ import { currentAgyVersion } from '../oauth/constants.ts'
 import { maskProxyUrl } from '../store/accounts.ts'
 import { accountFetch, isProxyReachable, normalizeProxyUrl, proxyUrlForLogs, withTotalTimeout } from '../proxy.ts'
 import { AGY_PROVIDER } from '../adapter/models.ts'
+import { discoveredUnifiedThinkingVariants, isModelHidden } from '../adapter/catalog.ts'
 import type { DiscoveredModelEntry } from '../adapter/models.ts'
 import { clearExpiredState } from '../runtime/rotation.ts'
 import { foldWindowBreakdown } from '../stats.ts'
@@ -566,7 +567,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       const rows: ModelView[] = models.map((model) => ({
         id: model.id,
         name: model.name,
-        disabled: hidden.has(model.id),
+        disabled: isModelHidden(model.id, hidden),
       }))
       return { account: session.account.email ?? null, models: rows }
     },
@@ -576,7 +577,13 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       const modelId = body?.modelId
       if (typeof modelId !== 'string' || modelId === '') fail('modelId is required')
       const disabled = body?.disabled === true
-      modelVisibility.setDisabled(AGY_PROVIDER, modelId, disabled)
+      const variants = discoveredUnifiedThinkingVariants(modelId)
+      modelVisibility.setDisabledMany(AGY_PROVIDER, [
+        { modelId, disabled },
+        // Re-enabling the family is an explicit request to make all its tiers
+        // selectable; clear older individual switches in the same atomic write.
+        ...(disabled ? [] : (variants ?? []).map((variant) => ({ modelId: variant.wireId, disabled: false }))),
+      ])
       // Push the change to every open client so the picker updates live.
       notifyModelsChanged()
       return { modelId, disabled }
