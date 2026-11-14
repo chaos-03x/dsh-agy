@@ -1,5 +1,8 @@
 /** Shared domain types for dsh-agy. */
 
+/** Maximum age of a model availability observation before it becomes unknown. */
+export const MODEL_AVAILABILITY_TTL_MS = 10 * 60 * 1000
+
 /**
  * Device fingerprint persisted per account (rate-limit mitigation).
  *
@@ -187,6 +190,8 @@ export interface ManagedAccount {
   cachedLimits?: CachedLimits
   /** Discovered model ids available for this specific account. */
   cachedModels?: string[]
+  /** When the model ID list was last measured, independent of quota windows. */
+  cachedModelsUpdatedAt?: number
   /** Per-account proxy URL (e.g. http://user:pass@host:8080 or socks5://host:1080). Undefined = follow env. */
   proxy?: string
 }

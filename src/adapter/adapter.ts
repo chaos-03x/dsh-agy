@@ -21,7 +21,7 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 
-import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
+import { AgyAuthError, AgyPoolBlockedError, MODEL_AVAILABILITY_TTL_MS } from '../types.ts'
 import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
@@ -239,7 +239,14 @@ export function buildRequestHeaders(session: AgyAccountSession): Record<string, 
 }
 
 /** How long discovered models stay cached before re-probing upstream (10 minutes). */
-export const MODEL_LIST_CACHE_TTL_MS = 10 * 60 * 1000
+export const MODEL_LIST_CACHE_TTL_MS = MODEL_AVAILABILITY_TTL_MS
+
+/** Keep account, project and egress isolated without retaining the raw credential. */
+function accountDiscoveryScope(account: ManagedAccount): string {
+  return createHash('sha256').update(JSON.stringify([
+    account.id ?? null, account.refresh, account.projectId ?? null, account.proxy ?? null,
+  ])).digest('hex')
+}
 
 export class AgyAdapter extends LlmAdapter {
   private readonly options: AgyAdapterOptions
@@ -301,9 +308,7 @@ export class AgyAdapter extends LlmAdapter {
         const routing = { proxyUrl: session?.account.proxy }
         // An opaque key keeps fallback discovery tied to this exact account,
         // project and egress, even if access tokens refresh or the pool rotates.
-        const scope = session && createHash('sha256').update(JSON.stringify([
-          session.account.id ?? null, session.account.refresh, session.account.projectId ?? null, session.account.proxy ?? null,
-        ])).digest('hex')
+        const scope = session && accountDiscoveryScope(session.account)
         const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing), {
           cache: this.discoveryCache, scope, isCurrent: () => generation === this.discoveryGeneration,
         })
@@ -339,6 +344,18 @@ export class AgyAdapter extends LlmAdapter {
     this.discoveryGeneration++
     this.cachedModels = null
     this.inFlightModels = null
+  }
+
+  /** Fresh, exact account-scoped discovery may supersede an older quota probe. */
+  discoveredModelsFor(account: ManagedAccount): readonly string[] | undefined {
+    const scope = accountDiscoveryScope(account)
+    const observedAt = this.discoveryCache.observedAt(scope)
+    if (observedAt === undefined) return undefined
+    const age = Date.now() - observedAt
+    const modelCacheAt = account.cachedModelsUpdatedAt ?? account.cachedQuotaUpdatedAt ?? 0
+    if (age < 0 || age >= MODEL_LIST_CACHE_TTL_MS || modelCacheAt > observedAt) return undefined
+    const models = this.discoveryCache.get(scope)?.models
+    return models ? Object.keys(models) : undefined
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -440,10 +457,13 @@ export class AgyAdapter extends LlmAdapter {
     const hiddenModels = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
     const discreteModel = Boolean(discoveredUnifiedThinkingFamilyFor(options.model)) || isUnifiedThinkingFamily(options.model)
     const wireModel = resolveWireModel(options.model, options.reasoningEffort, hiddenModels)
+    // Extra tiers can remain separate rows beside a native tiered model. They
+    // still require the exact wire ID, without changing thinking translation.
+    const requireExactModel = discreteModel || /-(?:xhigh|max)$/i.test(wireModel)
     let session: AgyAccountSession | undefined
     try {
       // Account capability caches contain upstream IDs, not synthetic UI IDs.
-      session = discreteModel
+      session = requireExactModel
         ? await this.options.getSession(wireModel, conversationKey, true)
         : await this.options.getSession(wireModel, conversationKey)
     } catch (error) {

@@ -164,13 +164,14 @@ function discoverySnapshot(dynamic: DiscoveredModels): DiscoveredModels {
 
 /** Last-known capabilities, isolated by opaque account scope and bounded in memory. */
 export class ModelDiscoveryCache {
-  private readonly snapshots = new Map<string, DiscoveredModels>()
+  private readonly snapshots = new Map<string, { data: DiscoveredModels; observedAt: number }>()
 
-  get(scope: string): DiscoveredModels | undefined { return this.snapshots.get(scope) }
+  get(scope: string): DiscoveredModels | undefined { return this.snapshots.get(scope)?.data }
+  observedAt(scope: string): number | undefined { return this.snapshots.get(scope)?.observedAt }
 
   remember(scope: string, dynamic: DiscoveredModels): void {
     this.snapshots.delete(scope)
-    this.snapshots.set(scope, discoverySnapshot(dynamic))
+    this.snapshots.set(scope, { data: discoverySnapshot(dynamic), observedAt: Date.now() })
     if (this.snapshots.size > 32) this.snapshots.delete(this.snapshots.keys().next().value!)
   }
 

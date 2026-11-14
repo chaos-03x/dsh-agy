@@ -503,6 +503,9 @@ describe('usage-driven selection', () => {
       anthropic: { remainingFraction: 0.6, modelCount: 1 },
     })
     expect(after.accounts[0]!.cachedQuotaUpdatedAt).toBeGreaterThan(0)
+    expect(after.accounts[0]!.cachedModels).toEqual(['gemini-3.5-flash', 'gemini-3.5-pro', 'claude-sonnet-4-6'])
+    expect(after.accounts[0]!.cachedModelsUpdatedAt).toBeGreaterThan(0)
+    expect(after.accounts[0]!.cachedModelsUpdatedAt!).toBeLessThanOrEqual(after.accounts[0]!.cachedQuotaUpdatedAt!)
   })
 
   it('lands the weekly window in cachedQuota from the scheduling refresh', async () => {
