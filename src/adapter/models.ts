@@ -10,6 +10,8 @@ import { proxiedFetch } from '../proxy.ts'
 import {
   AGY_PUBLIC_MODELS,
   catalogModel,
+  clearDiscoveredUnifiedThinkingFamilies,
+  discoveredUnifiedThinkingVariants,
   formatTieredModelName,
   isChatCallableModelId,
   isLevelThinkingModel,
@@ -18,6 +20,7 @@ import {
   registerDiscoveredTieredModels,
   registerDiscoveredUnifiedThinkingFamily,
 } from './catalog.ts'
+import type { DiscreteThinkingLevel, DiscreteThinkingVariant } from './catalog.ts'
 export { isUnifiedThinkingFamily } from './catalog.ts'
 
 export const AGY_PROVIDER = 'agy'
@@ -37,23 +40,11 @@ export const AGY_PROVIDER = 'agy'
  * sends no `reasoningEffort`, `translate.ts` omits `thinkingConfig` entirely, and
  * the upstream runs its own adaptive budget — measured on this channel as
  * `thinkingBudget: -1` + `minThinkingBudget: 32` for every `*-tiered` model.
- * The three explicit levels remain selectable alongside it.
+ * Only the explicit levels advertised for a discovered family are selectable alongside it.
  */
-const LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
-  efforts: Object.freeze([
-    { id: ReasoningEffortId('low'), name: 'Low' },
-    { id: ReasoningEffortId('medium'), name: 'Medium' },
-    { id: ReasoningEffortId('high'), name: 'High' },
-  ] as const),
-} as const)
-
-/** Reasoning levels for the Pro family (Low and High only; no Medium tier). */
-const PRO_LEVEL_REASONING: LlmModelReasoningInfo = Object.freeze({
-  efforts: Object.freeze([
-    { id: ReasoningEffortId('low'), name: 'Low' },
-    { id: ReasoningEffortId('high'), name: 'High' },
-  ] as const),
-} as const)
+const EFFORT_NAMES: Readonly<Record<DiscreteThinkingLevel, string>> = {
+  low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max',
+}
 
 /**
  * Input modalities per model. Image support follows the catalog's own
@@ -189,30 +180,35 @@ function hiddenDiscoveredIds(dynamic: DiscoveredModels): Set<string> {
       hidden.add(retiredId)
     }
   }
-  const splitCounts = new Map<string, number>()
+  // Discovery is account-scoped. Do not retain variants from the previous
+  // account, and never synthesize a chat family out of hidden image/tab IDs.
+  clearDiscoveredUnifiedThinkingFamilies()
+  const splitFamilies = new Map<string, DiscreteThinkingVariant[]>()
   for (const id of Object.keys(models)) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
-    if (m && m[1]) {
-      splitCounts.set(m[1], (splitCounts.get(m[1]) ?? 0) + 1)
-    }
+    if (!isChatCallableModelId(id) || hidden.has(id)) continue
+    const match = /^(.*)-(low|medium|high|xhigh|max)$/.exec(id)
+    if (!match?.[1] || !match[2]) continue
+    const variants = splitFamilies.get(match[1]) ?? []
+    variants.push({ effort: match[2] as DiscreteThinkingLevel, wireId: id })
+    splitFamilies.set(match[1], variants)
   }
-  for (const [base, count] of splitCounts.entries()) {
-    if ((count >= 2 || isUnifiedThinkingFamily(base)) && !Object.hasOwn(models, `${base}-tiered`)) {
-      registerDiscoveredUnifiedThinkingFamily(base)
+  for (const [base, variants] of splitFamilies) {
+    const tiered = `${base}-tiered`
+    const hasTiered = Object.hasOwn(models, tiered) && !hidden.has(tiered) && isChatCallableModelId(tiered)
+    const hasNativeBase = Object.hasOwn(models, base) && !hidden.has(base)
+      && isLevelThinkingModel(base) && !isUnifiedThinkingFamily(base)
+    if (hasTiered || hasNativeBase) {
+      const nativeEfforts = levelThinkingEffortsFor(hasTiered ? tiered : base)
+      // Do not hide extra tiers the native selector cannot represent.
+      for (const variant of variants) if (nativeEfforts.includes(variant.effort)) hidden.add(variant.wireId)
+      continue
     }
-  }
-  for (const id of Object.keys(models)) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(id)
-    if (m && m[1]) {
-      const base = m[1]
-      if (
-        Object.hasOwn(models, `${base}-tiered`) ||
-        (Object.hasOwn(models, base) && isLevelThinkingModel(base)) ||
-        isUnifiedThinkingFamily(base)
-      ) {
-        hidden.add(id)
-      }
-    }
+    // If upstream explicitly marks the base as non-chat, grouping must not
+    // resurrect it under a synthetic name.
+    if (hidden.has(base)) continue
+    if (variants.length < 2 && !isUnifiedThinkingFamily(base)) continue
+    registerDiscoveredUnifiedThinkingFamily(base, variants)
+    for (const variant of variants) hidden.add(variant.wireId)
   }
   return hidden
 }
@@ -402,11 +398,11 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
   }
   // Ensure unified base models for split thinking families are present
   for (const splitId of Object.keys(dynamic.models ?? {})) {
-    const m = /^(.*)-(?:low|medium|high|max)$/.exec(splitId)
+    const m = /^(.*)-(?:low|medium|high|xhigh|max)$/.exec(splitId)
     if (m && m[1]) {
       const base = m[1]
       if (
-        isLevelThinkingModel(base) &&
+        discoveredUnifiedThinkingVariants(base) !== undefined &&
         !entries.some((e) => e.id === base) &&
         !entries.some((e) => e.id === `${base}-tiered`)
       ) {
@@ -427,6 +423,7 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
 
 /** Catalog-only model list used when the endpoint is unreachable. */
 export function catalogModelList(): LlmModelInfo[] {
+  clearDiscoveredUnifiedThinkingFamilies()
   const list = AGY_PUBLIC_MODELS.map((model) => ({
     provider: AGY_PROVIDER,
     id: model.id,
@@ -459,9 +456,9 @@ export function resolveAgyModel(provider: string, model: string): LlmResolvedMod
   const meta = catalogModel(model)
   if (isLevelThinkingModel(model)) {
     const efforts = levelThinkingEffortsFor(model)
-    const reasoningInfo: LlmModelReasoningInfo = efforts.length === 2
-      ? { ...PRO_LEVEL_REASONING, efforts: [...PRO_LEVEL_REASONING.efforts] }
-      : { ...LEVEL_REASONING, efforts: [...LEVEL_REASONING.efforts] }
+    const reasoningInfo: LlmModelReasoningInfo = {
+      efforts: efforts.map((effort) => ({ id: ReasoningEffortId(effort), name: EFFORT_NAMES[effort] })),
+    }
     return {
       provider,
       id: model,

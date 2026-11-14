@@ -195,7 +195,7 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     sessions.startHealthProbe(healthIntervalMs)
   }
   const adapter = new AgyAdapter({
-    getSession: (model, conversationKey) => sessions.getSession(model, undefined, conversationKey),
+    getSession: (model, conversationKey, requireExactModel) => sessions.getSession(model, undefined, conversationKey, requireExactModel),
     reportFailure: (kind, session, info) => sessions.reportFailure(kind, session, info),
     markSuccess: (session) => sessions.markSuccess(session),
     resolveAttachments: () => ctx.get('attachments') as AgyAttachmentStore | undefined,

@@ -38,7 +38,8 @@ import {
   generateAntigravityRequestId,
 } from '../runtime/identity.ts'
 import { setThoughtSignature } from '../runtime/signature-cache.ts'
-import { toAgyRequestBody } from './translate.ts'
+import { resolveWireModel, toAgyRequestBody } from './translate.ts'
+import { discoveredUnifiedThinkingVariants, isModelHidden } from './catalog.ts'
 import type { AgyResolvedImage } from './translate.ts'
 import { resolveMultimodalFiles } from './multimodal.ts'
 import { AgyStreamIdleTimeoutError, parseAgySse, UnmappedFinishReasonError } from './parse.ts'
@@ -77,7 +78,7 @@ export interface AgyAdapterOptions {
    * ranking). `conversationKey` scopes account affinity, so concurrent
    * conversations hold independent pins.
    */
-  getSession(model?: string, conversationKey?: string): Promise<AgyAccountSession | undefined>
+  getSession(model?: string, conversationKey?: string, requireExactModel?: boolean): Promise<AgyAccountSession | undefined>
   /** Report a classified upstream failure so the shell can cool/rotate/revoke. */
   reportFailure(
     kind: FailureKind,
@@ -262,7 +263,7 @@ export class AgyAdapter extends LlmAdapter {
     const all = await this.listAllModels()
     const hidden = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
     if (hidden === undefined || hidden.size === 0) return all
-    return all.filter((model) => !hidden.has(model.id))
+    return all.filter((model) => !isModelHidden(model.id, hidden))
   }
 
   /**
@@ -325,7 +326,13 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return resolveAgyModel(provider, model)
+    const resolved = resolveAgyModel(provider, model)
+    const variants = discoveredUnifiedThinkingVariants(model)
+    const hidden = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
+    if (!variants || !hidden || !resolved.reasoning) return resolved
+    const visible = new Set<string>(variants.filter((variant) => !hidden.has(variant.wireId)).map((variant) => variant.effort))
+    const efforts = resolved.reasoning.efforts.filter((effort) => visible.has(effort.id))
+    return { ...resolved, reasoning: efforts.length > 0 ? { ...resolved.reasoning, efforts } : undefined }
   }
 
   // `prepareCall` is deliberately NOT overridden: the LlmAdapter base class
@@ -414,9 +421,14 @@ export class AgyAdapter extends LlmAdapter {
      * here and to derive the upstream `sessionId` below.
      */
     const conversationKey = options.sessionId === undefined ? undefined : String(options.sessionId)
+    const hiddenModels = this.options.modelVisibility?.disabledFor(AGY_PROVIDER)
+    const wireModel = resolveWireModel(options.model, options.reasoningEffort, hiddenModels)
     let session: AgyAccountSession | undefined
     try {
-      session = await this.options.getSession(options.model, conversationKey)
+      // Account capability caches contain upstream IDs, not synthetic UI IDs.
+      session = wireModel === options.model
+        ? await this.options.getSession(wireModel, conversationKey)
+        : await this.options.getSession(wireModel, conversationKey, true)
     } catch (error) {
       if (error instanceof AgyAuthError) {
         if (error.kind === 'transport') {
@@ -492,6 +504,7 @@ export class AgyAdapter extends LlmAdapter {
           sessionId:
             deriveAntigravitySessionId(session.account.email, conversationKey, generation) ?? undefined,
           requestId,
+          wireModel,
           ...(this.options.thinkingBudgetFor === undefined
             ? {}
             : { thinkingBudgetFor: this.options.thinkingBudgetFor }),

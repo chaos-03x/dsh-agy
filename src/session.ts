@@ -46,6 +46,7 @@ import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from '
 import { currentAgyVersion } from './oauth/constants.ts'
 import { accountFetch, isProxyUnreachableError, probeFetch, proxiedFetch } from './proxy.ts'
 import { describeFetchError } from './runtime/classify.ts'
+import { isUnifiedThinkingFamily } from './adapter/catalog.ts'
 import type { Fingerprint } from './types.ts'
 
 export interface SessionManagerOptions {
@@ -192,18 +193,23 @@ interface QuotaRefreshResult {
  * still applies on this path.
  */
 /** Whether a specific account is known to support the requested model. */
-export function isModelSupportedByAccount(account: ManagedAccount, model?: string): boolean {
+export function isModelSupportedByAccount(account: ManagedAccount, model?: string, requireExactModel = false): boolean {
   if (!model || !account.cachedModels || account.cachedModels.length === 0) return true
   if (account.cachedModels.includes(model)) return true
+  if (requireExactModel) return false
   const tieredMatch = /^(.*)-tiered$/.exec(model)
   if (tieredMatch) {
     const base = tieredMatch[1]
     if (account.cachedModels.some((m) => m === model || m.startsWith(base + '-'))) return true
   }
-  const levelMatch = /^(.*)-(?:low|medium|high)$/.exec(model)
+  const levelMatch = /^(.*)-(?:low|medium|high|xhigh|max)$/.exec(model)
   if (levelMatch) {
     const base = levelMatch[1]
     if (account.cachedModels.some((m) => m === model || m === `${base}-tiered` || m.startsWith(base + '-'))) return true
+  }
+  if (isUnifiedThinkingFamily(model)) {
+    const prefix = `${model}-`
+    return account.cachedModels.some((id) => id.startsWith(prefix) && /^(?:low|medium|high|xhigh|max)$/.test(id.slice(prefix.length)))
   }
   return false
 }
@@ -804,6 +810,7 @@ export class AgySessionManager {
     storage: AccountStorageV4,
     model?: string,
     conversationKey?: string,
+    requireExactModel = false,
   ): Promise<{ account: ManagedAccount; index: number } | undefined> {
     const now = Date.now()
     for (const account of storage.accounts) clearExpiredState(account, now)
@@ -824,7 +831,7 @@ export class AgySessionManager {
         const last = storage.accounts[lastIndex]!
         if (
           last.enabled !== false &&
-          isModelSupportedByAccount(last, model) &&
+          isModelSupportedByAccount(last, model, requireExactModel) &&
           !isCoolingDown(last, now) &&
           !isFamilyRateLimited(last, familyKey, now) &&
           !isFamilyQuotaExhausted(last, family, now)
@@ -835,7 +842,7 @@ export class AgySessionManager {
     }
     const eligible = storage.accounts
       .map((account, index) => ({ account, index }))
-      .filter(({ account }) => account.enabled !== false && isModelSupportedByAccount(account, model))
+      .filter(({ account }) => account.enabled !== false && isModelSupportedByAccount(account, model, requireExactModel))
     if (eligible.length === 0) return undefined
 
     // Prioritize the active account as long as it is enabled, supports the model,
@@ -844,7 +851,7 @@ export class AgySessionManager {
     const isActiveUsable = (acc: ManagedAccount | undefined): acc is ManagedAccount =>
       acc !== undefined
       && acc.enabled !== false
-      && isModelSupportedByAccount(acc, model)
+      && isModelSupportedByAccount(acc, model, requireExactModel)
       && !isCoolingDown(acc, now)
       && !isFamilyRateLimited(acc, familyKey, now)
       && !isFamilyQuotaExhausted(acc, family, now)
@@ -909,11 +916,14 @@ export class AgySessionManager {
    *   which scopes account affinity. Concurrent conversations therefore hold
    *   independent pins. Omitted by callers with no conversation (CLI, probes),
    *   which share one anonymous bucket.
+   * @param requireExactModel - the model is a concrete wire variant; a sibling
+   *   is not enough evidence that an account can serve it.
    */
   async getSession(
     model?: string,
     accountIndex?: number,
     conversationKey?: string,
+    requireExactModel = false,
   ): Promise<AgyAccountSession | undefined> {
     let storage = await this.store.load()
     if (accountIndex !== undefined) {
@@ -944,7 +954,7 @@ export class AgySessionManager {
         // In-memory overlay on storage already took place in refreshQuotaCache.
       }
       const picked = accountIndex === undefined
-        ? await this.pickAccount(storage, model, conversationKey)
+        ? await this.pickAccount(storage, model, conversationKey, requireExactModel)
         : (() => {
           const account = storage.accounts[accountIndex]
           if (!account) throw new Error(`account #${accountIndex} not found`)
@@ -1254,8 +1264,11 @@ export class AgySessionManager {
     // because it did touch the account's identity.
     const startedAt = Date.now()
     let session: AgyAccountSession | undefined
+    let wireModel: string
     try {
-      session = await this.getSession(model, options.accountIndex)
+      const { resolveWireModel } = await import('./adapter/translate.ts')
+      wireModel = resolveWireModel(model)
+      session = await this.getSession(wireModel, options.accountIndex, undefined, wireModel !== model)
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -1279,6 +1292,7 @@ export class AgySessionManager {
           projectId: session.account.projectId,
           sessionId: deriveAntigravitySessionId(session.account.email) ?? undefined,
           requestId,
+          wireModel,
         },
       )
       const headers = {

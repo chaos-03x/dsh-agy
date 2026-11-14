@@ -1676,6 +1676,17 @@ describe('fingerprint version freshness', () => {
   }, 5_000)
 
   describe('account model capability routing', () => {
+    it('routes an exact discrete tier only to an account that advertised it', async () => {
+      stubTokenEndpoint()
+      const now = Date.now()
+      const quota = { google: { remainingFraction: 0.8, resetTime: new Date(now + 3_600_000).toISOString() } }
+      const low = { ...account('low@x'), cachedQuota: quota, cachedQuotaUpdatedAt: now, cachedModels: ['gemini-4-hydrogen-low'] }
+      const extra = { ...account('extra@x'), cachedQuota: quota, cachedQuotaUpdatedAt: now, cachedModels: ['gemini-4-hydrogen-xhigh'] }
+      const sessions = new AgySessionManager({ store: new InMemoryAccountStore(storage([low, extra], 0)) })
+      const selected = await sessions.getSession('gemini-4-hydrogen-xhigh', undefined, 'session-1', true)
+      expect(selected?.index).toBe(1)
+    })
+
     it('isModelSupportedByAccount filters models correctly based on cachedModels', async () => {
       const { isModelSupportedByAccount } = await import('../src/session.ts')
       const accWithModels: ManagedAccount = {

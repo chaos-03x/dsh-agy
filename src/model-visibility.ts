@@ -195,13 +195,21 @@ export class ModelVisibility {
    * trade for not introducing a lock file into a settings toggle.
    */
   setDisabled(provider: string, modelId: string, disabled: boolean): void {
-    if (modelId === '') throw new Error('setDisabled: modelId must not be empty')
+    this.setDisabledMany(provider, [{ modelId, disabled }])
+  }
+
+  /** Apply one user action affecting a family and its legacy tiers atomically. */
+  setDisabledMany(provider: string, updates: readonly { modelId: string; disabled: boolean }[]): void {
+    if (updates.some(({ modelId }) => modelId === '')) throw new Error('setDisabled: modelId must not be empty')
+    if (updates.length === 0) return
     this.reload()
     const next: DisabledModelMap = {}
     for (const [key, models] of Object.entries(this.disabled)) next[key] = { ...models }
     const perProvider = { ...(next[provider] ?? {}) }
-    if (disabled) perProvider[modelId] = true
-    else delete perProvider[modelId]
+    for (const { modelId, disabled } of updates) {
+      if (disabled) perProvider[modelId] = true
+      else delete perProvider[modelId]
+    }
     if (Object.keys(perProvider).length === 0) delete next[provider]
     else next[provider] = perProvider
     this.write(next)

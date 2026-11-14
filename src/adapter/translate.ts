@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto'
 import type { GenerateOptions, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { generateAntigravityRequestId } from '../runtime/identity.ts'
 import { getThoughtSignature, THOUGHT_SIGNATURE_SENTINEL } from '../runtime/signature-cache.ts'
-import { catalogModel, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
+import { catalogModel, discoveredUnifiedThinkingVariants, isLevelThinkingModel, isUnifiedThinkingFamily, levelThinkingEffortsFor } from './catalog.ts'
 import { isClaudeModel, supportsMultimodalFiles, type AgyResolvedMultimodalFile } from './multimodal.ts'
 import {
   conversationMessages,
@@ -592,12 +592,29 @@ function toolsToDeclarations(tools: ToolSchema[] | undefined): AgyRequestBody['r
  * Discrete-variant models (Gemini 4 Argon, Claude 5.5 series) are unified in DSH
  * with level thinking, and mapped to the matching discrete wire model on request.
  */
-export function resolveWireModel(model: string, effort?: string): string {
-  if (isUnifiedThinkingFamily(model)) {
-    const target = effort === 'low' ? 'low' : effort === 'high' ? 'high' : 'medium'
-    return `${model}-${target}`
+export function resolveWireModel(model: string, effort?: string, hidden: ReadonlySet<string> = new Set()): string {
+  if (!isUnifiedThinkingFamily(model)) return model
+  const requested = effort?.toLowerCase()
+  const explicit = requested === 'none' || requested === 'off' ? undefined : requested
+  const variants = discoveredUnifiedThinkingVariants(model)
+  if (variants) {
+    const visible = variants.filter((variant) => !hidden.has(variant.wireId))
+    // The blacklist is presentation-only: an explicitly selected legacy tier
+    // remains callable; Default picks a visible tier when one exists.
+    const defaults = visible.length > 0 ? visible : variants
+    const picked = explicit
+      ? variants.find((variant) => variant.effort === explicit)
+      : defaults.find((variant) => variant.effort === 'medium') ?? defaults[0]
+    if (!picked) throw new Error(`Antigravity model ${model} does not advertise reasoning effort ${explicit}`)
+    return picked.wireId
   }
-  return model
+  // Offline catalog fallback retains the documented static families, but never
+  // silently converts an unknown effort to Medium.
+  const target = explicit ?? 'medium'
+  if (!levelThinkingEffortsFor(model).some((level) => level === target)) {
+    throw new Error(`Antigravity model ${model} does not advertise reasoning effort ${target}`)
+  }
+  return `${model}-${target}`
 }
 
 /** Build the wrapped Antigravity request body for one call. */
@@ -608,6 +625,10 @@ export function toAgyRequestBody(
     sessionId?: string
     images?: Map<string, AgyResolvedImage>
     multimodalFiles?: Map<string, AgyResolvedMultimodalFile[]>
+    /** Legacy hidden concrete variants, used only to choose a visible Default. */
+    hiddenModels?: ReadonlySet<string>
+    /** Freeze the selected wire variant across account selection and dispatch. */
+    wireModel?: string
     /**
      * The request id, when the caller also stamps it on the wire
      * (`x-goog-request-id`). Generating it here as well produced TWO different
@@ -689,7 +710,12 @@ export function toAgyRequestBody(
   // When purpose is 'session-title' or reasoning is off, thinkingBudget: 0 prevents
   // default thinking tokens from exhausting tight output caps (e.g. maxTokens: 64).
   const effort = options.reasoningEffort?.toLowerCase()
-  if (isLevelThinkingModel(options.model)) {
+  // Account selection may invalidate/reload discovery concurrently. The
+  // already-selected wire ID determines whether this request is id-bound.
+  const discrete = context.wireModel === undefined
+    ? isUnifiedThinkingFamily(options.model)
+    : context.wireModel !== options.model
+  if (discrete || isLevelThinkingModel(options.model)) {
     if (options.purpose === 'session-title' || effort === 'none' || effort === 'off') {
       generationConfig.thinkingConfig = { thinkingBudget: 0 }
     } else if (effort === undefined) {
@@ -701,11 +727,11 @@ export function toAgyRequestBody(
       if (tiered !== undefined) {
         generationConfig.thinkingConfig = { thinkingBudget: tiered, includeThoughts: true }
       }
-    } else if (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any)) {
+    } else if (discrete || (LEVEL_THINKING_LEVELS.has(effort) && levelThinkingEffortsFor(options.model).includes(effort as any))) {
       // A configured number for this level takes the place of the level token:
       // both together would let the level win (see `thinkingBudgetFor`).
       const configured = context.thinkingBudgetFor?.(effort)
-      if (options.model === 'gemini-4-argon' || options.model === 'claude-opus-5-5' || options.model === 'claude-sonnet-5-5') {
+      if (discrete) {
         if (configured !== undefined) {
           generationConfig.thinkingConfig = { thinkingBudget: configured, includeThoughts: true }
         }
@@ -738,7 +764,7 @@ export function toAgyRequestBody(
   return {
     project: context.projectId || undefined,
     requestId: context.requestId ?? generateAntigravityRequestId(),
-    model: resolveWireModel(options.model, effort),
+    model: context.wireModel ?? resolveWireModel(options.model, effort, context.hiddenModels),
     userAgent: 'antigravity',
     requestType: 'agent',
     request: {
