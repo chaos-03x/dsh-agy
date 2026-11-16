@@ -586,8 +586,15 @@ export const AGY_STYLES_CSS = `
 }
 
 .agy-ui-popover.desktop {
+  position: fixed;
+  position-area: bottom span-right;
+  position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+  align-self: start;
+  justify-self: start;
+  margin: 6px 0;
   width: 380px;
-  max-width: calc(100vw - 24px);
+  max-width: min(380px, calc(100vw - 24px));
+  max-height: calc(100vh - 80px);
   border-radius: 14px;
   animation: agy-ui-popover-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }

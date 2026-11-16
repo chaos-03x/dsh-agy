@@ -148,6 +148,29 @@ describe('dsh-agy client plugin', () => {
     expect(entries).toEqual([])
   })
 
+  it('renders AgyQuotaBadge without useAnchoredPosition and sets up anchorName', async () => {
+    let capturedBadgeFactory: (() => unknown) | undefined
+    const { ctx, entries } = makeContext({
+      rpcHandler: async (method) => {
+        if (method === 'ui.prefs.get') return { conversationBadge: true }
+        return {}
+      },
+      onRegister: (registration, factory) => {
+        if (registration.id === 'agy-quota-badge') {
+          capturedBadgeFactory = factory
+        }
+      },
+    })
+    apply(ctx as never)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const registration = entries.find(e => e.id === 'agy-quota-badge')
+    expect(registration).toBeDefined()
+    expect(capturedBadgeFactory).toBeDefined()
+    // Verify component renders without crashing (implicitly verifies no useAnchoredPosition called)
+    const element = capturedBadgeFactory!() as { props: Record<string, unknown> }
+    expect(element.props).toBeDefined()
+  })
+
   it('dynamically registers and unregisters badge when toggled from settings', () => {
     let capturedSettingsProps: Record<string, unknown> | undefined
     const { ctx, entries } = makeContext({

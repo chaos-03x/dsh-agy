@@ -4,11 +4,11 @@
  * Shows the tightest of the active account's tracked windows, and opens the
  * window breakdown floating card on hover or click.
  *
- * Built with DSH native UI primitives (Button, Tag, StateDot, useAnchoredPosition,
+ * Built with DSH native UI primitives (Button, Tag, StateDot,
  * useDismissOnOutsidePointer) and semantic design tokens (--dsw-*).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 // `react-dom` is shared into the shell's frozen module table
 // (`PLATFORM_MODULES`), so importing it here does NOT inline a second copy.
 import { createPortal } from 'react-dom'
@@ -17,7 +17,6 @@ import {
   Button,
   StateDot,
   Tag,
-  useAnchoredPosition,
   useDismissOnOutsidePointer,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -240,15 +239,8 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   // Dismiss pinned popover on outside pointer
   useDismissOnOutsidePointer(rootRef, isPinned, setIsPinned, panelRef)
 
-  // Anchored position calculation for desktop placement
-  const anchored = useAnchoredPosition({
-    open: isOpen && !isMobile,
-    anchorRef: rootRef,
-    panelRef,
-    side: 'bottom',
-    gap: 6,
-    margin: 12,
-  })
+  // CSS Anchor Name for desktop placement
+  const anchorName = `--agy-badge-${useId().replaceAll(':', '')}`
 
   const handleMouseEnterBadge = () => {
     if (leaveTimerRef.current !== null) {
@@ -340,14 +332,10 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       ref: panelRef,
       className: `agy-ui-popover ${isMobile ? 'mobile' : 'desktop'}`,
       style: !isMobile
-        ? (anchored === null
-            ? { visibility: 'hidden' as const }
-            : {
-                position: 'fixed' as const,
-                top: `${anchored.top}px`,
-                left: `${anchored.left}px`,
-                visibility: 'visible' as const,
-              })
+        ? {
+            position: 'fixed' as const,
+            positionAnchor: anchorName,
+          }
         : undefined,
       onMouseEnter: handleMouseEnterPopover,
       onMouseLeave: handleMouseLeavePopover,
@@ -527,10 +515,8 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
    * `position: fixed; inset: 0`, but rendering it inside the header meant its
    * backdrop covered only the header band.
    *
-   * `useAnchoredPosition` measures the ANCHOR's viewport rect and positions the
-   * panel with `position: fixed`, so it is portal-safe by construction — it was
-   * always written for a portaled panel (its own docstring says so), and this is
-   * what finally honours that.
+   * CSS anchors keep the popover attached to its trigger within layout-viewport
+   * size limits. Browser zoom and panning move it with the page.
    */
   const popoverNode = isOpen && typeof document !== 'undefined'
     ? createPortal(
@@ -552,7 +538,7 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     'span',
     {
       ref: rootRef,
-      style: { position: 'relative', display: 'inline-flex', alignItems: 'center' },
+      style: { position: 'relative', display: 'inline-flex', alignItems: 'center', anchorName },
     },
     h(
       Button,
