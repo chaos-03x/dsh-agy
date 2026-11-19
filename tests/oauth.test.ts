@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { decodeState, encodeState, generatePkcePair } from '../src/oauth/pkce.ts'
 import {
   accessTokenExpired,
@@ -10,9 +10,17 @@ import {
   AGY_VERSION_FALLBACK,
   antigravityUserAgent,
   currentAgyVersion,
+  currentHubVersion,
   getAgyBootstrapUserAgent,
   setResolvedAgyVersion,
+  setResolvedCliVersion,
+  setResolvedHubVersion,
 } from '../src/oauth/constants.ts'
+import { HUB_VERSION_FALLBACK } from '../src/ua-profile-types.ts'
+import { UaProfileStore, _setUaProfileStoreForTest } from '../src/ua-profile.ts'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { resolveAntigravityVersion, resolveAntigravityVersionBounded, resolveObservedAgyVersion, _clearVersionCacheForTest } from '../src/runtime/version.ts'
 import { authorizeAntigravity } from '../src/oauth/authorize.ts'
 import { bootstrapAccount, exchangeAntigravity, extractOnboardTierId } from '../src/oauth/exchange.ts'
@@ -301,7 +309,22 @@ describe('credential blob', () => {
   })
 })
 
+/**
+ * Point the process-wide UA profile at a fresh temp store and select a profile.
+ *
+ * The store is a process singleton (see `ua-profile.ts`), so a test that asserts
+ * on a UA shape must own it or it inherits whatever the previous test left.
+ */
+function selectProfile(id: 'hub' | 'cli'): void {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-oauth-ua-'))
+  const store = new UaProfileStore({ file: join(dir, 'agy-ua-profile.json'), revalidateIntervalMs: 0 })
+  store.setActive(id)
+  _setUaProfileStoreForTest(store)
+}
+
 describe('bootstrap UA version freshness', () => {
+  beforeEach(() => { selectProfile('hub') })
+
   afterEach(() => {
     vi.unstubAllGlobals()
     setResolvedAgyVersion(undefined)
@@ -316,33 +339,75 @@ describe('bootstrap UA version freshness', () => {
    * process presenting two different clients. The default now reads a published
    * shared value, which makes that drift unrepresentable.
    */
-  it('advertises the published version, not a per-call default', () => {
+  it('advertises the ACTIVE profile, so bootstrap and generation cannot disagree', () => {
+    // The default profile is the Electron desktop app, and it draws its version
+    // from the Electron line. The CLI line's published value must NOT leak into
+    // it: a `1.x` number inside an `Antigravity/2.x` string is exactly the pair
+    // that gets the generation retired and drops the Gemini quota group.
+    selectProfile('hub')
+    // The DEFAULT profile is the Electron/Hub app, so the bootstrap form is the
+    // hub shape carrying the hub line's version. The CLI value published here
+    // must NOT leak into it: a `1.x` number inside this shape is served the
+    // retirement notice AND loses the Gemini quota group (measured 2026-11-09).
     setResolvedAgyVersion('9.9.9')
-    expect(getAgyBootstrapUserAgent()).toContain('antigravity/hub/9.9.9')
-    // The short form used by the version feeds agrees with the bootstrap form.
-    expect(antigravityUserAgent()).toBe('antigravity/hub/9.9.9 (aidev_client; os_type=darwin; arch=arm64; cl=1003475615)')
+    setResolvedHubVersion('2.30.0')
+    expect(getAgyBootstrapUserAgent()).toContain('antigravity/hub/2.30.0')
+    expect(getAgyBootstrapUserAgent()).not.toContain('9.9.9')
+    // The non-generation client UA follows the same slot, and reads the hub line.
+    expect(antigravityUserAgent()).toBe(
+      'antigravity/hub/2.30.0 (aidev_client; os_type=macos; arch=arm64; cl=1003475615)',
+    )
   })
 
-  it('falls back to the pinned floor before any version is resolved', () => {
+  it('falls back to each line\'s own floor before any version is resolved', () => {
+    selectProfile('hub')
     setResolvedAgyVersion(undefined)
+    setResolvedHubVersion(undefined)
     expect(getAgyBootstrapUserAgent()).toContain(`antigravity/hub/${AGY_VERSION_FALLBACK}`)
     expect(currentAgyVersion()).toBe(AGY_VERSION_FALLBACK)
+    expect(currentHubVersion()).toBe(HUB_VERSION_FALLBACK)
+    expect(getAgyBootstrapUserAgent()).toContain(`antigravity/hub/${HUB_VERSION_FALLBACK}`)
   })
 
   it('publishes the resolved version for every User-Agent builder', async () => {
+    // The resolver keeps a 6h cache; an earlier test in this file already
+    // resolved a version, so the cold-start path must be re-entered explicitly.
+    _clearVersionCacheForTest()
     setResolvedAgyVersion(undefined)
+    setResolvedHubVersion(undefined)
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.includes('antigravity-hub-auto-updater')) {
+        return new Response('version: 2.29.0\nfiles:\n  - url: x\n', { status: 200 })
+      }
       if (url.includes('antigravity-auto-updater')) {
         return new Response(JSON.stringify([{ version: '1.2.3' }, { version: '1.20.1' }]), { status: 200 })
       }
       return new Response(JSON.stringify({ tag_name: '1.19.0' }), { status: 200 })
     }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
-    expect(await resolveAntigravityVersion(fetchImpl)).toBe('1.19.0')
-    // Resolution must reach the bootstrap UA without any call site passing it.
-    expect(getAgyBootstrapUserAgent()).toContain('antigravity/hub/1.19.0')
-    expect(antigravityUserAgent()).toBe('antigravity/hub/1.19.0 (aidev_client; os_type=darwin; arch=arm64; cl=1003475615)')
+    // The hub manifest is the primary source now, so it is what the resolver
+    // reports; the CLI feed is its fallback.
+    expect(await resolveAntigravityVersion(fetchImpl)).toBe('2.29.0')
+    // The published slot is MONOTONIC by design (`publishVersion`), and an
+    // earlier test in this file published `9.9.9` — so the builder keeps that
+    // higher value rather than moving backwards. Assert the LINE, not the number:
+    // what this test exists to pin is that a hub resolution reaches the hub
+    // SHAPE, which is what a wrong-line bug would break.
+    expect(getAgyBootstrapUserAgent()).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+/)
+    expect(antigravityUserAgent()).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+/)
+    expect(antigravityUserAgent()).not.toContain('antigravity/1.19.0')
+    expect(antigravityUserAgent()).not.toContain('/cli/')
+    // The bootstrap form follows the ACTIVE profile, so switching to the CLI
+    // renders the CLI shape from the CLI SLOT — a value published into the hub
+    // slot must not appear here (that is the line mismatch this suite guards).
+    selectProfile('cli')
+    setResolvedAgyVersion('2.28.2')
+    setResolvedCliVersion('1.19.0')
+    expect(getAgyBootstrapUserAgent()).toBe(
+      'antigravity/cli/1.19.0 (aidev_client; os_type=macos; arch=arm64; auth_method=consumer)',
+    )
+    setResolvedCliVersion(undefined)
   })
 
   it('reports nothing observed when the feeds yield nothing', async () => {
@@ -357,12 +422,9 @@ describe('bootstrap UA version freshness', () => {
     // An observation whose value equals the fallback is still an observation,
     // not a fallback substitution.
     _clearVersionCacheForTest()
-    const same = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input)
-      return url.includes('antigravity-auto-updater')
-        ? new Response(JSON.stringify([{ version: AGY_VERSION_FALLBACK }]), { status: 200 })
-        : new Response(JSON.stringify({ tag_name: AGY_VERSION_FALLBACK }), { status: 200 })
-    }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    const same = vi.fn(async () =>
+      new Response(`version: ${AGY_VERSION_FALLBACK}\nfiles: []\n`, { status: 200 }),
+    ) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
     expect(await resolveObservedAgyVersion(same)).toBe(AGY_VERSION_FALLBACK)
   })
 
@@ -378,15 +440,11 @@ describe('bootstrap UA version freshness', () => {
     // published slot (that slot is monotonic per process, so a lower test value
     // would be refused by design and prove nothing).
     _clearVersionCacheForTest()
-    const routed = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input)
-      if (url.includes('antigravity-auto-updater')) {
-        return new Response(JSON.stringify([{ version: '1.21.0' }]), { status: 200 })
-      }
-      return new Response(JSON.stringify({ tag_name: '1.21.0' }), { status: 200 })
-    }) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    const routed = vi.fn(async () =>
+      new Response('version: 2.21.0\nfiles: []\n', { status: 200 }),
+    ) as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
-    expect(await resolveAntigravityVersionBounded(1_000, routed)).toBe('1.21.0')
+    expect(await resolveAntigravityVersionBounded(1_000, routed)).toBe('2.21.0')
     // Every request went through the injected fetch, never the global one.
     expect(routed).toHaveBeenCalled()
 

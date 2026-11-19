@@ -161,7 +161,7 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     )
   }
 
-  const { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig } = await createAgyRuntime(ctx)
+  const { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig, uaProfile } = await createAgyRuntime(ctx)
   // Read per use rather than once here: the bound port is only known after the
   // server's listen callback has run. The host goes through `redirectHostFor`
   // so wildcard listeners map to loopback and bare IPv6 literals are bracketed.
@@ -175,6 +175,14 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
     recentRequests: () => recentStore.recentRequests(),
     modelVisibility,
     // Expose only the two operations the RPC needs, not the whole store.
+    // The active UA profile: `view()` renders the EFFECTIVE string, so the card
+    // shows what would actually be sent rather than only the selected id.
+    uaProfile: {
+      view: () => uaProfile.view(),
+      setActive: (id) => uaProfile.setActive(id),
+      setCustom: (input) => uaProfile.setCustom(input),
+      deleteCustom: (id) => uaProfile.deleteCustom(id),
+    },
     thinkingBudget: {
       all: () => thinkingBudget.all(),
       set: (level, value) => thinkingBudget.setBudget(level, value),

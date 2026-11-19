@@ -13,11 +13,11 @@ import {
   OAUTH_TOKEN_URL,
   OAUTH_USERINFO_URL,
   currentAgyVersion,
-  getAgyBootstrapUserAgent,
   resolveAgyClientCredentials,
 } from './constants.ts'
 import { decodeState } from './pkce.ts'
 import { proxiedFetch } from '../proxy.ts'
+import { activeUserAgent } from '../ua-profile.ts'
 
 const FETCH_TIMEOUT_MS = 10_000
 
@@ -135,7 +135,7 @@ export async function loadCodeAssist(
   const loadHeaders: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     'Content-Type': 'application/json',
-    'User-Agent': getAgyBootstrapUserAgent(),
+    'User-Agent': activeUserAgent(),
   }
 
   for (const baseEndpoint of AGY_ENDPOINT_FALLBACKS) {
@@ -187,7 +187,7 @@ export async function onboardAndDiscoverProject(
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     'Content-Type': 'application/json',
-    'User-Agent': getAgyBootstrapUserAgent(),
+    'User-Agent': activeUserAgent(),
   }
   const metadata = bootstrapMetadata()
 
@@ -263,7 +263,7 @@ export async function exchangeAntigravity(
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
         Accept: '*/*',
-        'User-Agent': getAgyBootstrapUserAgent(),
+        'User-Agent': activeUserAgent(),
       },
       body: new URLSearchParams({
         client_id: clientId,
@@ -285,7 +285,7 @@ export async function exchangeAntigravity(
     const userInfoResponse = await proxiedFetch(`${OAUTH_USERINFO_URL}?alt=json`, {
       headers: {
         Authorization: `Bearer ${tokenPayload.access_token}`,
-        'User-Agent': getAgyBootstrapUserAgent(),
+        'User-Agent': activeUserAgent(),
       },
     }, routing)
     const userInfo: UserInfo = userInfoResponse.ok

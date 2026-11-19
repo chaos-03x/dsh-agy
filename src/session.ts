@@ -36,14 +36,20 @@ import {
 import {
   generateFingerprint,
   getFingerprintData,
+  fingerprintUaNeedsMigration,
   getStableHeaders,
+  migrateStoredFingerprintUa,
   recordFingerprintVersion,
   updateFingerprintVersion,
 } from './runtime/fingerprint.ts'
+import { uaProfileStore } from './ua-profile.ts'
 import { deriveAntigravitySessionId, generateAntigravityRequestId } from './runtime/identity.ts'
 import { fingerprintMode } from './runtime/risk.ts'
-import { peekCachedAntigravityVersion, resolveAntigravityVersionBounded } from './runtime/version.ts'
-import { currentAgyVersion } from './oauth/constants.ts'
+import {
+  peekCachedAntigravityVersion,
+  resolveAntigravityVersionBounded,
+  resolveHubVersionBounded,
+} from './runtime/version.ts'
 import { accountFetch, isProxyUnreachableError, probeFetch, proxiedFetch } from './proxy.ts'
 import { describeFetchError } from './runtime/classify.ts'
 import type { Fingerprint } from './types.ts'
@@ -217,7 +223,10 @@ export function impersonationHeadersFor(account: ManagedAccount): AgyAccountSess
       clientMetadata: fingerprint.clientMetadata,
     }
   }
-  return getStableHeaders(getFingerprintData(), currentAgyVersion())
+  // Undefined = "let the active profile resolve its own line's version":
+  // passing the CLI-line value here is what put a `1.x` number inside an
+  // hub string (see `ua-profile.ts`).
+  return getStableHeaders(getFingerprintData())
 }
 
 export class AgySessionManager {
@@ -1027,7 +1036,7 @@ export class AgySessionManager {
       // a stronger anomaly than a stale version, and it was present on the most
       // common path (every fresh account, until it happened to hit a limit).
       if (!picked.account.fingerprint) {
-        const fingerprint = generateFingerprint(undefined, currentAgyVersion())
+        const fingerprint = generateFingerprint(undefined, uaProfileStore().activeVersion())
         const history = recordFingerprintVersion(picked.account.fingerprintHistory, fingerprint, 'initial')
         await this.store.mutate((s) => {
           const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
@@ -1039,6 +1048,24 @@ export class AgySessionManager {
         })
         picked.account.fingerprint = fingerprint
         picked.account.fingerprintHistory = history
+      } else if (fingerprintUaNeedsMigration(picked.account.fingerprint)) {
+        // An identity written BEFORE the CLI-shape fix carries the short UA,
+        // which the data plane answers with the "no longer supported" notice —
+        // and because an identity is created once and then reused, the shape
+        // fix alone would leave every existing install gated forever. Upgrade
+        // it in place on the next use, preserving the account's version.
+        //
+        // The rewrite runs on the STORED identity inside the lock, not on this
+        // process's clone: another process may have regenerated the fingerprint
+        // meanwhile, and writing our clone over it would silently discard that
+        // new identity. The predicate is checked first so a healthy identity
+        // never pays a write on the hot path.
+        const migrated = await this.store.mutate((s) => {
+          const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
+          if (!account?.fingerprint) return false
+          return migrateStoredFingerprintUa(account.fingerprint)
+        })
+        if (migrated) migrateStoredFingerprintUa(picked.account.fingerprint)
       }
 
       // A pinned (test) call must not touch the affinity pin: probing an account
@@ -1102,19 +1129,30 @@ export class AgySessionManager {
     const consecutive = (this.failureCounts.get(key) ?? 0) + 1
     this.failureCounts.set(key, consecutive)
     let nextIndexToRotate: number | null = null
-    const fpCachedVersion = kind === 'rate-limit' ? peekCachedAntigravityVersion() : null
-    // The version a newly generated fingerprint advertises. Cache first (no I/O),
-    // then a bounded live resolve, then `currentAgyVersion()` (the resolved version
-    // or the pinned fallback) — and never `generateFingerprint`'s own default,
-    // which picks a RANDOM entry from `versionPool`: whatever is chosen here is
-    // frozen into the account's identity for its lifetime, so a cold start with an
-    // unreachable feed could otherwise advertise a two-minor-old client forever.
-    // The probe rides the FAILING account's egress: the feeds belong to no account,
-    // but the request still egresses the host, and the boot-time probe already
-    // routes this way (see `probeFetch`).
-    const fpResolvedVersion = kind === 'rate-limit'
-      ? (fpCachedVersion ?? (await resolveAntigravityVersionBounded(750, probeFetch(session.account.proxy))) ?? currentAgyVersion())
-      : currentAgyVersion()
+    // The version a newly generated fingerprint advertises.
+    //
+    // It must come from the ACTIVE PROFILE's own line, which is why the shape and
+    // the version are read from one place: a hub-shaped UA carrying a CLI
+    // `1.x` number is served the retirement notice on generation AND gets only
+    // the Claude/GPT quota group back (see `ua-profile.ts`).
+    //
+    // Cache first (no I/O), then a bounded live resolve of the SAME line, then
+    // that line's floor — and never `generateFingerprint`'s own default, which
+    // would pick a RANDOM pool entry: whatever is chosen here is frozen into the
+    // account's identity for its lifetime. The probe rides the FAILING account's
+    // egress: the feeds belong to no account, but the request still egresses the
+    // host, and the boot-time probe already routes this way (see `probeFetch`).
+    const profile = uaProfileStore()
+    const hubLine = profile.activeVersionLine() === '2.x'
+    const fpCachedVersion = kind === 'rate-limit'
+      ? (hubLine ? null : peekCachedAntigravityVersion())
+      : null
+    const fpLiveVersion = kind === 'rate-limit' && fpCachedVersion === null
+      ? (hubLine
+        ? await resolveHubVersionBounded(750, probeFetch(session.account.proxy))
+        : await resolveAntigravityVersionBounded(750, probeFetch(session.account.proxy)))
+      : undefined
+    const fpResolvedVersion = fpCachedVersion ?? fpLiveVersion ?? profile.activeVersion()
 
     await this.store.mutate((storage) => {
       const account = storage.accounts.find((a) => this.accountKey(a) === key)

@@ -1,3 +1,3 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`quota badge snapshot render > renders the closed badge in node, with no RPC and no DOM 1`] = `"<span style="position:relative;display:inline-flex;align-items:center"><span>AGY ✦ 0</span></span>"`;
+exports[`quota badge snapshot render > renders the closed badge in node, with no RPC and no DOM 1`] = `"<span style="position:relative;display:inline-flex;align-items:center;anchor-name:--agy-badge-R0"><span>AGY ✦ 0</span></span>"`;
