@@ -21,6 +21,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import { join } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import AdmZip from 'adm-zip'
+import { proxiedFetch } from '../proxy.ts'
 import { agyDataDir } from '../store/paths.ts'
 import { CORE_PATH_ENV } from './types.ts'
 
@@ -118,7 +119,7 @@ export async function resolveCoreBinary(options: ResolveCoreOptions = {}): Promi
   if (existsSync(target)) return target
 
   mkdirSync(dir, { recursive: true })
-  const fetchImpl = options.fetchImpl ?? fetch
+  const fetchImpl = options.fetchImpl ?? proxiedFetch
   const url = `${RELEASE_BASE}/v${version}/${asset.asset}`
   const response = await fetchImpl(url, { signal: AbortSignal.timeout(120_000) })
   if (!response.ok) throw new Error(`core download failed: HTTP ${response.status} for ${asset.asset}`)
