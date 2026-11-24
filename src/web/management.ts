@@ -474,6 +474,16 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       }
     },
 
+    'account.clearCooldown': async (payload) => {
+      const index = asIndex(payload)
+      try {
+        await sessions.clearCooldown(index)
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+      return { ok: true as const }
+    },
+
     'account.fingerprint': async (payload) => {
       const index = asIndex(payload)
       const action = (payload as { action?: unknown })?.action === 'regenerate' ? 'regenerate' : 'show'

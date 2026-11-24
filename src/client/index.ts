@@ -458,6 +458,8 @@ interface AccountHandlers {
   onTest: (index: number) => void
   onExport: (index: number) => void
   onRegenerateFingerprint: (index: number) => void
+  /** Drop a local cooldown; the account is presumed healthy again. */
+  onClearCooldown: (index: number) => void
   onSetProxy: (index: number, proxy: string) => void
   /**
    * Probe a proxy. The draft is passed alongside the index so an UNSAVED value
@@ -564,6 +566,11 @@ function AccountDetail(props: {
     button(t('actionTest'), () => { handlers.onTest(account.index) }, { disabled: busy }),
     button(t('actionExport'), () => { handlers.onExport(account.index) }, { disabled: busy }),
     button(t('actionRegenerateFingerprint'), () => { handlers.onRegenerateFingerprint(account.index) }, { disabled: busy }),
+    // A cooldown is the plugin's guess, not an upstream fact, so recovery must
+    // not require waiting out a window the plugin invented.
+    account.state === 'cooling'
+      ? button(t('actionClearCooldown'), () => { handlers.onClearCooldown(account.index) }, { disabled: busy })
+      : null,
     button(t('actionDelete'), () => { handlers.onDelete(account.index) }, { variant: 'danger', disabled: busy })))
 
   /**
@@ -2488,6 +2495,10 @@ export function AgySettings(props: {
     },
     onRegenerateFingerprint: (index) => {
       void act(() => rpc.call('account.fingerprint', { index, action: 'regenerate' }))
+    },
+    onClearCooldown: (index) => {
+      // `act` refreshes the list afterwards, so the row leaves cooling on its own.
+      void act(() => rpc.call('account.clearCooldown', { index }))
     },
     onSetProxy: (index, proxy) => { void act(() => rpc.call('account.proxy', { index, proxy })) },
     /**
