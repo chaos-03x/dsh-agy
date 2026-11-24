@@ -460,6 +460,34 @@ export class AgySessionManager {
     }
   }
 
+  /**
+   * Clear an account's cooldown and its consecutive-failure count.
+   *
+   * The cooldown is local bookkeeping, not an upstream fact: a failure the
+   * plugin misread (a 403 from a stale token, say) parks the account for a
+   * window nobody asked for, and the user must be able to say "it is fine now"
+   * without waiting.
+   */
+  async clearCooldown(index: number): Promise<void> {
+    const storage = await this.store.load()
+    const account = storage.accounts[index]
+    if (account === undefined) throw new Error('account not found')
+    const key = this.accountKey(account)
+    this.failureCounts.delete(key)
+    await this.store.mutate((current) => {
+      const target = current.accounts[index]
+      if (target === undefined) return
+      delete (target as { coolingDownUntil?: number }).coolingDownUntil
+      delete (target as { cooldownReason?: string }).cooldownReason
+      delete (target as { cooldownSetAt?: string }).cooldownSetAt
+      // Family-scoped walls are the same kind of local guess, and they gate the
+      // pool even when no cooldown is set — leaving them behind made the button
+      // report success while the next request still said "temporarily blocked".
+      delete (target as { rateLimits?: unknown }).rateLimits
+      delete (target as { rateLimitResetTimes?: unknown }).rateLimitResetTimes
+    })
+  }
+
   private accountKey(account: ManagedAccount): string {
     return account.id ?? account.email ?? `idx-${account.refresh}`
   }
