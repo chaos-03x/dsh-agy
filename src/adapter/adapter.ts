@@ -392,6 +392,27 @@ export class AgyAdapter extends LlmAdapter {
    * `DSH_AGY_KEEP_SYSTEM_INSTRUCTION=1` restores the documented shape for a
    * caller that prefers it (and accepts the 400-and-crash risk).
    */
+  /**
+   * Whether the account's own quota cache says it still has quota.
+   *
+   * Used only to disbelieve a 429 that claims exhaustion: at least one live
+   * family window must still hold more than 20% — a soft-drain threshold, not a
+   * measurement. No usable cache means "no evidence", and the caller keeps the
+   * old, conservative reading (cool the account).
+   */
+  private quotaLooksAvailable(account: ManagedAccount): boolean {
+    const now = Date.now()
+    const windows = Object.values((account.cachedQuota ?? {}) as Record<string, unknown>)
+      .filter((entry): entry is { remainingFraction?: number, resetTime?: string } => entry !== null && typeof entry === 'object')
+    const live = windows.filter((entry) => {
+      if (typeof entry.remainingFraction !== 'number') return false
+      const resetAt = entry.resetTime === undefined ? Number.NaN : Date.parse(entry.resetTime)
+      return Number.isNaN(resetAt) || resetAt > now
+    })
+    if (live.length === 0) return false
+    return live.some((entry) => (entry.remainingFraction ?? 0) > 0.2)
+  }
+
   private mergeSystemIntoUser(): boolean {
     const raw = (process.env.DSH_AGY_KEEP_SYSTEM_INSTRUCTION ?? '').toLowerCase()
     return raw !== '1' && raw !== 'true'
@@ -629,6 +650,20 @@ export class AgyAdapter extends LlmAdapter {
 
       if (!response.ok) {
         const classified = classifyHttpError(response.status, response.headers, bodyText)
+        // A "quota exhausted" 429 that the account's own quota cache contradicts
+        // is upstream's risk-control rejection wearing a quota label. Cooling and
+        // rotating on those is what precedes real account bans (community
+        // reports: repeated fake 429s, then a 403), so the account is left alone
+        // and the failure stays retryable instead.
+        if (classified.rateLimitCategory === 'quota_exhausted'
+          && this.quotaLooksAvailable(session.account)) {
+          this.recordUsage(session, options.model, { ok: false, rateLimited: true, reason: 'rate-limit' }, attemptStartedAt)
+          throw new LlmError(
+            'agy rejected the request as quota-exhausted (429) while this account still has quota — treated as a content/risk rejection, not a quota event',
+            'RATE_LIMIT',
+            { providerRetryAfterMs: 2_000, requestId: ProviderRequestId(generateAntigravityRequestId()) },
+          )
+        }
         await this.options.reportFailure(classified.kind, session, {
           retryAfterMs: classified.retryAfterMs,
           status: response.status,

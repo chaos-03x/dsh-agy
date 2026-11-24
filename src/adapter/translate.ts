@@ -767,7 +767,10 @@ export function toAgyRequestBody(
       contents,
       ...(systemForWire ? { systemInstruction: { parts: [{ text: systemForWire }] } } : {}),
       ...(tools ? { tools } : {}),
-      ...(tools ? { toolConfig: { functionCallingConfig: { mode: 'VALIDATED' } } } : {}),
+      // ALWAYS sent, with or without tools. The official client does, and a
+      // reasoning model called without it answers 400 INVALID_ARGUMENT — the
+      // guard that only set it for tool requests is what broke plain text turns.
+      toolConfig: { functionCallingConfig: { mode: 'VALIDATED' } },
       ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
       ...(context.sessionId ? { sessionId: context.sessionId } : {}),
     },
