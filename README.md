@@ -157,6 +157,64 @@ valid until it expires or you revoke it in your Google account security settings
 
 ## Other things you may care about
 
+### Embedded proxy (Clash subscription)
+
+Settings → **Proxy** gives agy a private egress: paste a Clash subscription URL
+and the plugin downloads a proxy core (mihomo), writes a minimal runtime config
+from your profile, and routes **only this plugin's** requests through it. No
+Clash client has to be installed, and the system proxy, TUN device and any other
+application's traffic are left untouched.
+
+- The core listens on a loopback mixed port; Settings → Proxy shows the port,
+  the node list and the current node.
+- **All of agy's traffic rides it**, not just chat: token refresh, quota probes,
+  model discovery and the verification call are account-scoped too.
+- **Rotate on failure**: a transport failure (timeout, refused connection, TLS)
+  moves the group to the next node before the host's own retry re-sends. Quota
+  and content errors do not rotate — another node cannot fix them. A dead core
+  is reported as an ordinary network error, so the account is not benched while
+  the core restarts.
+- The binary is downloaded once from the official mihomo release into
+  `$DSH_HOME/agy/clash/`. `DSH_AGY_CLASH_CORE=/path/to/mihomo` skips the download
+  when you already have a core.
+- The subscription is fetched when you save it and **only re-fetched by an
+  explicit Restart** — boots reuse the cached profile, so the plugin never
+  silently updates your nodes.
+- The subscription URL and the controller secret live in
+  `$DSH_HOME/agy/agy-clash.json` (0600); the UI only ever shows the redacted host.
+- Turning the switch off stops the core and returns agy to its previous route
+  (per-account proxy, else the environment proxy).
+- v1 accepts a Clash YAML profile (`flag=meta`). Link-only subscriptions
+  (`ss://`, `vmess://`, base64 lists) are not parsed yet.
+
+The core is GPL-3.0 software downloaded at runtime and run as a separate
+process — it is not bundled, and this package stays MIT.
+
+#### What is proxied, and what is not
+
+Every request agy makes on an account's behalf rides the account's route
+(per-account proxy → embedded core → env proxy):
+
+| Call | Routed |
+|---|---|
+| generation (`streamGenerateContent`) | yes |
+| model discovery (`fetchAvailableModels`, `listAgyModels`) | yes |
+| quota probes (`retrieveUserQuotaSummary`, limits) | yes |
+| token refresh (OAuth token endpoint) | yes |
+| `loadCodeAssist` project healing | yes |
+| test call + `verify` (userinfo) | yes |
+| version feed (rate-limit re-fingerprint, boot warm-up) | yes |
+
+These are NOT proxied, by design or by necessity:
+
+| Call | Why |
+|---|---|
+| subscription fetch, core binary download | they run before a core exists; they honour `HTTP(S)_PROXY` (the env proxy) only |
+| web login / OAuth code exchange | there is no account yet to attach a route to (the CLI has `--proxy`) |
+| the core's own startup geodata download (`country.mmdb`) | it is the core's traffic, not agy's |
+| CLI subcommands | separate process; use `dsh-agy login --proxy` / `--proxy` flags |
+
+
 ### Thinking budget (reasoning effort)
 
 A thinking budget is a hidden parameter in the API that controls how hard the

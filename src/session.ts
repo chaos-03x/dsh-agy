@@ -5,7 +5,7 @@
  */
 
 import { AgyAuthError, AgyPoolBlockedError } from './types.ts'
-import type { AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails, QuotaGroup } from './types.ts'
+import type { AccountRouting, AccountStorageV4, AgyAccountSession, CachedQuota, FailureKind, ManagedAccount, OAuthAuthDetails, QuotaGroup } from './types.ts'
 import { refreshAccessToken } from './oauth/refresh.ts'
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from './oauth/auth.ts'
 import type { AccountStore } from './store/accounts.ts'
@@ -64,6 +64,18 @@ export interface SessionManagerOptions {
    * adapter, which sees their token usage.
    */
   recordUsage?: (record: UsageRecord) => void
+  /**
+   * Shared egress for account-scoped calls that have no proxy of their own.
+   *
+   * The embedded Clash core (`clash/manager.ts`) answers with its loopback mixed
+   * port. Control-plane traffic is exactly what a "route agy through my
+   * subscription" user expects to move too: token refresh, quota probes, model
+   * discovery and the verification call all leave this host otherwise.
+   *
+   * A per-account proxy still wins, and the two are NOT equivalent when they
+   * fail — see `AccountRouting.egress`.
+   */
+  egressProxy?: (account: ManagedAccount) => string | undefined
 }
 
 /** A usage record emitted by the session manager's non-chat call paths. */
@@ -225,6 +237,7 @@ export class AgySessionManager {
   private readonly onRotate: SessionManagerOptions['onRotate']
   private readonly onHealthReport: SessionManagerOptions['onHealthReport']
   private readonly recordUsageOption: SessionManagerOptions['recordUsage']
+  private readonly egressProxy: SessionManagerOptions['egressProxy']
   private readonly tokenCache = new Map<string, TokenCacheEntry>()
   /** In-flight refresh promises keyed by account: concurrent requests share one refresh. */
   private readonly refreshInFlight = new Map<string, Promise<OAuthAuthDetails | undefined>>()
@@ -449,6 +462,30 @@ export class AgySessionManager {
     this.onRotate = options.onRotate
     this.onHealthReport = options.onHealthReport
     this.recordUsageOption = options.recordUsage
+    this.egressProxy = options.egressProxy
+  }
+
+  /**
+   * Proxy URL for one account-scoped request: the account's own proxy first,
+   * then the shared egress (the embedded Clash core), then the env/direct route.
+   */
+  private proxyUrlFor(account: ManagedAccount): string | undefined {
+    return account.proxy ?? this.egressProxy?.(account)
+  }
+
+  /**
+   * Routing (proxy plus its OWNER) for one account-scoped request.
+   *
+   * The owner matters only for failure classification: a dead per-account proxy
+   * is a proxy verdict (fail closed, do not bench the account), while a dead
+   * shared core is an ordinary network error.
+   */
+  private routingFor(account: ManagedAccount, streaming = false): AccountRouting {
+    const stream = streaming ? { streaming: true } : {}
+    if (account.proxy) return { proxyUrl: account.proxy, egress: 'account', ...stream }
+    const coreProxy = this.egressProxy?.(account)
+    if (coreProxy) return { proxyUrl: coreProxy, egress: 'core', ...stream }
+    return stream
   }
 
   /** Emit one non-chat usage record; a ledger failure never breaks the call. */
@@ -477,7 +514,7 @@ export class AgySessionManager {
     const refreshing = (async (): Promise<OAuthAuthDetails | undefined> => {
       const result = await refreshAccessToken(
         { access: cached?.access ?? '', expires: cached?.expires ?? 0, refresh: account.refresh },
-        { clientId: account.clientId, proxyUrl: account.proxy },
+        { clientId: account.clientId, proxyUrl: this.proxyUrlFor(account) },
       )
       if (result.type === 'success') {
         if (!account.clientId && result.clientId) {
@@ -576,7 +613,7 @@ export class AgySessionManager {
         const auth = await this.accessTokenFor(account)
         if (!auth) return []
         const { fetchQuotaSummary } = await import('./adapter/quota-summary.ts')
-        const routed = accountFetch({ proxyUrl: account.proxy })
+        const routed = accountFetch(this.routingFor(account))
         const bounded = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
           const timeout = AbortSignal.timeout(AgySessionManager.QUOTA_FETCH_TIMEOUT_MS)
           const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
@@ -733,7 +770,7 @@ export class AgySessionManager {
           const auth = await this.accessTokenFor(account)
           if (!auth) return null
           const { fetchAvailableModels } = await import('./adapter/models.ts')
-          const routed = accountFetch({ proxyUrl: account.proxy })
+          const routed = accountFetch(this.routingFor(account))
           // ONE timeout per probe, both bounded by the same budget the model
           // probe already used; the account's proxy is honoured on both, or the
           // summary call would egress direct and leak the account's real IP.
@@ -992,7 +1029,7 @@ export class AgySessionManager {
       if (!picked.account.projectId && !this.projectRetryFailed.has(key)) {
         try {
           const { loadCodeAssist } = await import('./oauth/exchange.ts')
-          const { projectId } = await loadCodeAssist(auth.access, { proxyUrl: picked.account.proxy })
+          const { projectId } = await loadCodeAssist(auth.access, this.routingFor(picked.account))
           if (projectId) {
             await this.store.mutate((s) => {
               const account = s.accounts.find((candidate) => this.accountKey(candidate) === key)
@@ -1113,7 +1150,7 @@ export class AgySessionManager {
     // but the request still egresses the host, and the boot-time probe already
     // routes this way (see `probeFetch`).
     const fpResolvedVersion = kind === 'rate-limit'
-      ? (fpCachedVersion ?? (await resolveAntigravityVersionBounded(750, probeFetch(session.account.proxy))) ?? currentAgyVersion())
+      ? (fpCachedVersion ?? (await resolveAntigravityVersionBounded(750, probeFetch(this.proxyUrlFor(session.account)))) ?? currentAgyVersion())
       : currentAgyVersion()
 
     await this.store.mutate((storage) => {
@@ -1288,7 +1325,7 @@ export class AgySessionManager {
         'User-Agent': session.impersonation['User-Agent'],
         'X-Goog-Api-Client': session.impersonation['X-Goog-Api-Client'],
       }
-      const routing = { proxyUrl: session.account.proxy, streaming: true }
+      const routing = this.routingFor(session.account, true)
       const response = await fetchAgyFirstOk(
         '/v1internal:streamGenerateContent?alt=sse',
         {
@@ -1374,9 +1411,13 @@ export class AgySessionManager {
         this.emitUsage({ account: key, source: 'verify', ok: false, latencyMs: Date.now() - startedAt })
         return { ok: false, error: 'refresh failed (revoked?)' }
       }
+      // Verification is account-scoped like any other call: it must ride the same
+      // egress (per-account proxy, then the shared core), or a "verified" badge
+      // would describe a route the plugin does not actually use.
+      const verifyRouting = this.routingFor(account)
       const response = await proxiedFetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
         headers: { Authorization: `Bearer ${auth.access}` },
-      }, account.proxy ? { proxyUrl: account.proxy } : undefined)
+      }, verifyRouting.proxyUrl === undefined ? undefined : verifyRouting)
       if (!response.ok) {
         this.emitUsage({ account: key, source: 'verify', ok: false, latencyMs: Date.now() - startedAt })
         return { ok: false, error: `userinfo ${response.status}` }

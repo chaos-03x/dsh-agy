@@ -1,0 +1,11 @@
+feat(clash): rotate inside the current region before crossing a border
+
+Google scores an account's LOCATION - current IP plus its login history plus its
+usual region - not a single request's address. A rotation that hops Hong Kong to
+Japan to Singapore on consecutive failures is exactly the pattern the community
+reports before a soft block, and the auto group makes hops easy.
+
+Rotation now reads the current node's region from its label (flag emoji, then the
+common Chinese and English names) and prefers a live same-region node, crossing a
+border only when the region has no alternative. An unrecognised label falls back
+to plain ranking rather than guessing.

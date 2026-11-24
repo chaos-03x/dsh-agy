@@ -21,7 +21,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 
 import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
-import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
+import type { AccountRouting, AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
 import {
@@ -125,6 +125,24 @@ export interface AgyAdapterOptions {
    * `resolveMultimodalFiles` answers with its built-in constant.
    */
   maxInlineBytes?(): number | undefined
+  /**
+   * Proxy the request must ride, resolved per account.
+   *
+   * The embedded Clash core (`clash/manager.ts`) is one such resolver: while the
+   * feature is on it answers with the core's loopback mixed port. A RESOLVER
+   * rather than a setting because that port only exists while the core runs.
+   *
+   * `account.proxy` wins over this — an explicitly configured per-account proxy
+   * is a decision about that account, and a shared core must not silently
+   * override it.
+   */
+  resolveProxy?(account: ManagedAccount): string | undefined
+  /**
+   * A request died in transport. The embedded core uses this to move the node
+   * group before the HOST's retry re-sends; it is not a retry hook — this
+   * attempt still fails, per the "one DSH call, one provider attempt" rule.
+   */
+  onTransportFailure?(account: ManagedAccount, error: unknown): void
   /** Resolve the harness attachment store; undefined outside the harness (standalone CLI). */
   resolveAttachments?(): AgyAttachmentStore | undefined
   /**
@@ -291,7 +309,7 @@ export class AgyAdapter extends LlmAdapter {
         const session = await this.options.getSession()
         // Model discovery is account-scoped: route it through the account's proxy
         // (control-plane class, so the standard timeouts apply).
-        const routing = { proxyUrl: session?.account.proxy }
+        const routing = session === undefined ? { proxyUrl: undefined } : this.routingFor(session.account)
         const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
         this.cachedModels = { models, at: Date.now() }
         return models
@@ -341,6 +359,33 @@ export class AgyAdapter extends LlmAdapter {
    * when the store is missing or a read fails — silently dropping images and
    * sending text-only is the exact failure mode this path exists to prevent.
    */
+  /**
+   * The proxy a request must ride.
+   *
+   * Precedence is deliberate: an explicitly configured per-account proxy wins
+   * over the injected resolver (the embedded Clash core), because that setting
+   * is a decision about THIS account and a shared egress must not override it.
+   * `undefined` means the env/direct route, unchanged from before this seam.
+   */
+  private proxyFor(account: ManagedAccount): string | undefined {
+    return this.routingFor(account).proxyUrl
+  }
+
+  /**
+   * Full routing for one account, including WHO owns the proxy.
+   *
+   * The `egress` tag is load-bearing: a refused connection to the embedded core
+   * is a network error (the account is healthy), while the same failure on a
+   * per-account proxy is a proxy verdict that fails closed.
+   */
+  private routingFor(account: ManagedAccount, streaming = false): AccountRouting {
+    const stream = streaming ? { streaming: true } : {}
+    if (account.proxy) return { proxyUrl: account.proxy, egress: 'account', ...stream }
+    const coreProxy = this.options.resolveProxy?.(account)
+    if (coreProxy) return { proxyUrl: coreProxy, egress: 'core', ...stream }
+    return stream
+  }
+
   private async resolveRequestImages(options: GenerateOptions): Promise<Map<string, AgyResolvedImage>> {
     const refs = collectImageRefs(options)
     const images = new Map<string, AgyResolvedImage>()
@@ -463,7 +508,7 @@ export class AgyAdapter extends LlmAdapter {
     // (it carried only the control-plane calls before, so a proxied account
     // silently generated from the host's real IP), and the streaming
     // dispatcher drops the per-gap body timeout a reasoning pause would trip.
-    const routing = { proxyUrl: session.account.proxy, streaming: true }
+    const routing = this.routingFor(session.account, true)
 
     /**
      * Send one request, resending at most once when the upstream reports the
@@ -518,7 +563,10 @@ export class AgyAdapter extends LlmAdapter {
             routing,
           )
         } catch (error) {
-          const classified = classifyFetchError(error, { proxyUrl: session.account.proxy })
+          const classified = classifyFetchError(error, routing)
+          // Hand the failure to the egress owner BEFORE reporting it: the next
+          // attempt (the host's retry) should already ride a different node.
+          this.options.onTransportFailure?.(session.account, error)
           await this.options.reportFailure(classified.kind, session)
           // A transport failure consumed no tokens, but it is a real attempt
           // against this account's quota — record the request, not the usage.

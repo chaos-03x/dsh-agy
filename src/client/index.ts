@@ -32,7 +32,7 @@ import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
 import { agoText, formatQuotaReset, quotaColor, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
-import type { AccountView, AgyRpcClient, AgyRpcResult, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
+import type { AccountView, AgyRpcClient, AgyRpcResult, ClashProbe, ClashStatus, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
@@ -79,7 +79,7 @@ type RecentEntry = AgyRpcResult<'pool.recent'>['recent'][number]
 const RPC_CHANNEL = '/api'
 const RPC_ENDPOINT = 'agy'
 
-type TabId = 'accounts' | 'models' | 'config' | 'usage' | 'credentials'
+type TabId = 'accounts' | 'models' | 'proxy' | 'config' | 'usage' | 'credentials'
 
 /**
  * How long a one-shot action's verdict stays on screen.
@@ -1423,6 +1423,166 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
  * shared form — and one card's failed load cannot blank the others. Nothing here
  * holds cross-card state, which is the property that keeps that true.
  */
+/**
+ * The embedded proxy core: one subscription, one switch, one node picker.
+ *
+ * Self-loading and host-authoritative, like `MultimodalCard`: every mutation
+ * returns the fresh status and THAT is what renders, so the card cannot drift
+ * from the core's real state. `enabled` and `running` are separate readouts on
+ * purpose — a configured core that failed to start is exactly the case a single
+ * "on/off" would misreport.
+ *
+ * The subscription URL is a credential (providers put a token in its path), so
+ * the box is a password input, the saved value is never echoed back (the host
+ * returns only the redacted host), and an EMPTY box means "unchanged" — the same
+ * draft semantics as `account.proxy`, where emptiness is display state, not a
+ * write.
+ */
+function ProxyTab(props: { rpc: AgyRpcClient, t: T }): ReactNode {
+  const { rpc, t } = props
+  const [status, setStatus] = useState<ClashStatus | null>(null)
+  const [probe, setProbe] = useState<ClashProbe | null>(null)
+  const [probing, setProbing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+
+  const apply = useCallback((next: ClashStatus): void => {
+    setStatus(next)
+    setDraft('')
+    setError(next.lastError === '' ? undefined : t('proxyError', { message: next.lastError }))
+  }, [t])
+
+  const load = useCallback((): void => {
+    void (async () => {
+      try {
+        const next = await rpc.call('clash.status', {})
+        if (!alive.current) return
+        apply(next)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      }
+    })()
+  }, [apply, rpc])
+
+  useEffect(() => { load() }, [load])
+
+  const run = (action: () => Promise<ClashStatus>): void => {
+    setBusy(true)
+    void (async () => {
+      try {
+        const next = await action()
+        if (!alive.current) return
+        apply(next)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        if (alive.current) setBusy(false)
+      }
+    })()
+  }
+
+  const runProbe = (): void => {
+    setProbing(true)
+    void (async () => {
+      try {
+        const next = await rpc.call('clash.probe', {})
+        if (!alive.current) return
+        setProbe(next)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        if (alive.current) setProbing(false)
+      }
+    })()
+  }
+
+  const enabled = status?.enabled === true
+  const running = status?.running === true
+  const nodes = status?.nodes ?? []
+  const statusText = !enabled
+    ? t('proxyStatusDisabled')
+    : running
+      ? t('proxyStatusRunning', { port: status?.mixedPort ?? 0 })
+      : t('proxyStatusStopped')
+
+  return h('div', { className: 'agy-root' },
+    h('div', { className: 'agy-card' },
+      h('div', { className: 'agy-card-head' },
+        h('div', { className: 'agy-card-title' }, t('proxyTitle')),
+        h(Tag, { tone: running ? 'success' : 'neutral' }, statusText)),
+      h('div', { className: 'agy-card-body' },
+        h('div', { className: 'agy-hint' }, t('proxyHelp')),
+        h('div', { className: 'agy-defs' },
+          h('dt', null, t('proxySubscription')),
+          h('dd', null, h(Input, {
+            value: draft,
+            type: 'password',
+            placeholder: status === null || status.subscriptionHost === ''
+              ? t('proxySubscriptionPlaceholder')
+              : status.subscriptionHost,
+            onChange: (event: { target: { value: string } }) => { setDraft(event.target.value) },
+          }))),
+        h('div', { className: 'agy-actions' },
+          button(t('proxySave'), () => {
+            run(() => rpc.call('clash.configure', {
+              enabled: true,
+              ...(draft === '' ? {} : { subscriptionUrl: draft }),
+            }))
+          }, { size: 'sm', disabled: busy }),
+          button(t('proxyDisable'), () => {
+            run(() => rpc.call('clash.configure', { enabled: false }))
+          }, { size: 'sm', disabled: busy || !enabled }),
+          button(t('proxyRestart'), () => {
+            run(() => rpc.call('clash.restart', {}))
+          }, { size: 'sm', disabled: busy || !enabled || draft !== '' })),
+        h('div', { className: 'agy-defs' },
+          h('dt', null, t('proxyNode')),
+          h('dd', null, nodes.length === 0
+            ? h('span', { className: 'agy-hint' }, t('proxyNoNodes'))
+            : h('select', {
+              className: 'agy-select',
+              value: status?.node ?? '',
+              disabled: busy,
+              onChange: (event: { target: { value: string } }) => {
+                const node = event.target.value
+                run(() => rpc.call('clash.select', { node }))
+              },
+            }, nodes.map((node) => h('option', { key: node, value: node }, node))))),
+        h('div', { className: 'agy-rowactions' },
+          // On demand, never on a timer: mihomo already re-probes the group on
+          // its own interval, so a second poll would be a second source of truth.
+          button(t('proxyProbe'), runProbe, { size: 'sm', disabled: probing || !running }),
+          probe === null
+            ? null
+            : h('span', { className: 'agy-hint' }, t('proxyProbeResult', {
+              available: probe.available,
+              total: probe.total,
+              best: probe.best?.name ?? '—',
+            }))),
+        h(Switch, {
+          label: t('proxyAutoRotate'),
+          checked: status?.autoRotate === true,
+          disabled: busy || status === null,
+          onChange: (checked: boolean) => {
+            run(() => rpc.call('clash.configure', { autoRotate: checked }))
+          },
+        }),
+        status?.fetchedAt === undefined || status.fetchedAt === ''
+          ? null
+          : h('div', { className: 'agy-hint' }, t('proxyFetchedAt', { time: status.fetchedAt })),
+        error === undefined ? null : h('div', { className: 'agy-error' }, error))),
+  )
+}
+
 function ConfigTab(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const { rpc, t } = props
   return h('div', { className: 'agy-root' },
@@ -2464,7 +2624,9 @@ export function AgySettings(props: {
         : h('div', { className: 'agy-root' },
           h('div', { className: 'agy-error' }, modelError),
           button(t('refresh'), () => { void loadModels() }, { size: 'sm' }))
-      : tab === 'config'
+      : tab === 'proxy'
+        ? h(ProxyTab, { rpc, t })
+        : tab === 'config'
         ? h(ConfigTab, { rpc, t })
         : tab === 'usage'
           ? h(UsageTab, { stats, lang: props.lang, t })
@@ -2517,6 +2679,7 @@ export function AgySettings(props: {
     h('div', { className: 'agy-tabs' },
       tabButton('accounts', t('tabAccounts'), accounts.length),
       tabButton('models', t('tabModels'), models.length > 0 ? models.length : undefined),
+      tabButton('proxy', t('tabProxy')),
       tabButton('config', t('tabConfig')),
       tabButton('usage', t('tabUsage')),
       tabButton('credentials', t('tabCredentials'))),

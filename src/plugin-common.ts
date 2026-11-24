@@ -10,13 +10,14 @@ import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { AgyAdapter } from './adapter/adapter.ts'
 import type { AgyAttachmentStore } from './adapter/adapter.ts'
+import { ClashManager } from './clash/manager.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { ModelVisibility } from './model-visibility.ts'
 import { MultimodalConfigStore } from './multimodal-config.ts'
 import { ThinkingBudgetStore } from './thinking-budget.ts'
 import { UsageStats } from './stats.ts'
 import { RecentActivityStore } from './recent-store.ts'
-import { probeFetch, proxiedFetch } from './proxy.ts'
+import { accountFetch, probeFetch, proxiedFetch } from './proxy.ts'
 import { pickProbeProxyUrl } from './runtime/rotation.ts'
 import { resolveAntigravityVersion } from './runtime/version.ts'
 import type { FetchLike } from './runtime/version.ts'
@@ -72,17 +73,24 @@ export async function resolveCodec(ctx: Context): Promise<{ codec: SecretCodec; 
  * Fire-and-forget version warm-up so fingerprint generation inside the
  * rate-limit path never waits on a cold feed.
  *
- * Routed through `pickProbeProxyUrl`: the release feeds are not account-scoped,
- * but the host IP is exactly what a per-account-proxy user asked to hide, and a
- * bare `proxiedFetch` sends this boot-time request directly. Never throws — an
+ * Routed through `pickProbeProxyUrl` and then the shared egress: the release
+ * feeds are not account-scoped, but the host IP is exactly what a proxied user
+ * asked to hide, and a bare `proxiedFetch` sends this boot-time request directly.
+ * Order matters: an account proxy is a user decision about that account, the
+ * shared core is the fallback for accounts without one. Never throws — an
  * unreadable store or a dead feed must not be the reason plugin boot fails.
  */
-async function warmVersionCache(store: AccountStore): Promise<void> {
+async function warmVersionCache(store: AccountStore, coreProxy: () => string | undefined): Promise<void> {
   let fetchImpl: FetchLike = proxiedFetch
   try {
     const storage = await store.load()
-    const proxyUrl = pickProbeProxyUrl(storage.accounts, storage.activeIndex)
-    fetchImpl = probeFetch(proxyUrl)
+    const accountProxy = pickProbeProxyUrl(storage.accounts, storage.activeIndex)
+    const coreUrl = accountProxy === undefined || accountProxy === '' ? coreProxy() : undefined
+    if (accountProxy !== undefined && accountProxy !== '') {
+      fetchImpl = probeFetch(accountProxy)
+    } else if (coreUrl !== undefined) {
+      fetchImpl = accountFetch({ proxyUrl: coreUrl, egress: 'core' })
+    }
   } catch {
     // Fall through to the env/direct route.
   }
@@ -99,6 +107,8 @@ export interface AgyRuntime {
   modelVisibility: ModelVisibility
   thinkingBudget: ThinkingBudgetStore
   multimodalConfig: MultimodalConfigStore
+  /** The embedded Clash core that can carry agy's traffic (settings → 代理). */
+  clash: ClashManager
 }
 
 /**
@@ -149,7 +159,11 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     )
   }
   const store = new JsonAccountStore({ file: accountsMigrated.file, codec })
-  void warmVersionCache(store)
+  // Built before the warm-up below: that probe is one of the requests a user
+  // asking for "agy through my subscription" expects to move, and it runs before
+  // any account exists to carry a proxy.
+  const clash = new ClashManager()
+  void warmVersionCache(store, () => clash.proxyUrlFor())
   // The persisted recent-activity ring, built FIRST so it seeds from disk
   // before any record can arrive and `pool.recent` shows the other processes'
   // history immediately. Same soft-fail reporting contract as the ledger.
@@ -179,6 +193,17 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   const modelVisibility = new ModelVisibility()
   const thinkingBudget = new ThinkingBudgetStore()
   const multimodalConfig = new MultimodalConfigStore()
+  // Start the core best-effort: never blocks plugin boot — a dead core must not
+  // stop DSH from starting, only from proxying. `ensure()` reads the cached
+  // profile, so a boot performs no network request of its own.
+  if (clash.snapshot().enabled) {
+    void clash.ensure().catch((error: unknown) => {
+      ctx.logger.warn(
+        '[dsh-agy] embedded Clash core did not start: '
+        + `${error instanceof Error ? error.message : String(error)} — agy requests will fail until it does`,
+      )
+    })
+  }
   // The adapter's model-list cache is keyed to no account (see
   // `AgyAdapter.invalidateModelCache`), so every event that can switch the
   // account discovery rides must drop it. The adapter does not exist yet when
@@ -188,6 +213,10 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     store,
     recordUsage: (record) => { stats.record(record) },
     onRotate: () => { invalidateModelCache() },
+    // Same egress as the adapter: token refresh, quota probes, model discovery
+    // and the verification call are account-scoped traffic too, and a user who
+    // asked for "agy through my subscription" means all of it.
+    egressProxy: () => clash.proxyUrlFor(),
   })
   // Optional background health probe (DSH_AGY_HEALTH_INTERVAL_MS), off by default.
   const healthIntervalMs = Number(process.env.DSH_AGY_HEALTH_INTERVAL_MS ?? 0)
@@ -206,6 +235,13 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     claudeBudgetFor: () => thinkingBudget.claudeBudget(),
     tieredBudgetFor: () => thinkingBudget.tieredBudget(),
     maxInlineBytes: () => multimodalConfig.maxInlineBytes(),
+    resolveProxy: () => clash.proxyUrlFor(),
+    onTransportFailure: () => {
+      // Restart-then-rotate: a dead core has no nodes to rotate, so bring it back
+      // first. The failing attempt is already lost — this prepares the HOST's
+      // retry, which is the only retry this project allows.
+      void clash.ensure().then(() => clash.rotate()).catch(() => {})
+    },
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })
   invalidateModelCache = () => { adapter.invalidateModelCache() }
@@ -225,8 +261,11 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   process.once('exit', () => {
     stats.flushSync()
     recentStore.flushSync()
+    // A surviving core would keep a listener (and a subscription's partially
+    // spent quota) alive with no way for the user to reach it through DSH.
+    clash.stop()
   })
-  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig }
+  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig, clash }
 }
 
 export { AGY_PROVIDER }

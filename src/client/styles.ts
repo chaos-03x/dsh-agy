@@ -107,6 +107,14 @@ export const AGY_STYLES_CSS = `
   background: ${aliasVar('bg-layer-2')}; }
 .agy-empty { padding: 24px 12px; text-align: center; font: var(--dsw-font-xs-13); color: ${aliasVar('label-tertiary')}; }
 .agy-hint { margin: 0; font: var(--dsw-font-xxs-12); color: ${aliasVar('label-tertiary')}; }
+/* The node picker. A native <select> because the list is provider-shaped (tens
+   of entries, unknown at build time) and the primitives catalog has no select;
+   the border/font tokens are what keep it reading as part of the host UI. */
+.agy-select {
+  max-width: 100%; padding: 4px 6px; font: var(--dsw-font-xxs-12);
+  color: ${aliasVar('label-secondary')}; background: ${aliasVar('bg-layer-1')};
+  border: 0.5px solid ${aliasVar('border-l1')}; border-radius: 6px;
+}
 .agy-aside { font: var(--dsw-font-xxxs-11); color: ${aliasVar('label-tertiary')}; }
 .agy-grow { flex: 1; }
 
