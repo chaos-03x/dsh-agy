@@ -219,6 +219,20 @@ function ledgerAccountKey(session: AgyAccountSession): string | undefined {
  * This adapter performs its own dispatch (see the `fetchAgyFirstOk` call in
  * `stream()`); nothing downstream re-adds the header.
  */
+/**
+ * Minimum spacing between upstream attempts on one account, in ms.
+ *
+ * `DSH_AGY_MIN_REQUEST_INTERVAL_MS` overrides the 1.5s default; 0 disables the
+ * throttle. An unparseable value falls back to the default rather than to zero:
+ * a typo must not silently remove the protection.
+ */
+export function minRequestIntervalMs(): number {
+  const raw = process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+  if (raw === undefined || raw === '') return 1_500
+  const value = Number(raw)
+  return Number.isFinite(value) && value >= 0 ? value : 1_500
+}
+
 export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
   return {
     authorization: `Bearer ${session.auth.access}`,
@@ -243,6 +257,15 @@ export class AgyAdapter extends LlmAdapter {
   private readonly options: AgyAdapterOptions
   private cachedModels: { models: readonly LlmModelInfo[]; at: number } | null = null
   private inFlightModels: Promise<readonly LlmModelInfo[]> | null = null
+  /**
+   * Last upstream attempt per account, for the minimum-interval throttle.
+   *
+   * Upstream treats bursts as bot traffic: the community reports whole pools
+   * being rate-limited after a few hundred milliseconds of fan-out, and a burst
+   * of FAKE 429s is what precedes a real 403. One request per account per
+   * interval is cheap insurance and costs nothing when the host is idle.
+   */
+  private readonly lastAttemptAt = new Map<string, number>()
 
   constructor(options: AgyAdapterOptions) {
     super()
@@ -341,6 +364,52 @@ export class AgyAdapter extends LlmAdapter {
    * when the store is missing or a read fails — silently dropping images and
    * sending text-only is the exact failure mode this path exists to prevent.
    */
+  /**
+   * What the account's own quota cache says about a "quota exhausted" 429.
+   *
+   * `spent` requires EVIDENCE: at least one live family window at or below the
+   * 20% soft-drain threshold. `available` is the opposite (a live window above
+   * it). `unknown` means there is no usable cache at all — and that is the case
+   * that made this check miss: an account that had never been probed has an empty
+   * cache, so the first fake 429 still parked it for 24 hours.
+   *
+   * Only `spent` keeps the old, conservative reading; the other two are treated
+   * as content rejections, because cooling/rotating on a fake 429 is what
+   * precedes a real ban.
+   */
+  private quotaVerdict(account: ManagedAccount): 'spent' | 'available' | 'unknown' {
+    const now = Date.now()
+    const windows = Object.values((account.cachedQuota ?? {}) as Record<string, unknown>)
+      .filter((entry): entry is { remainingFraction?: number, resetTime?: string } => entry !== null && typeof entry === 'object')
+    const live = windows.filter((entry) => {
+      if (typeof entry.remainingFraction !== 'number') return false
+      const resetAt = entry.resetTime === undefined ? Number.NaN : Date.parse(entry.resetTime)
+      return Number.isNaN(resetAt) || resetAt > now
+    })
+    if (live.length === 0) return 'unknown'
+    return live.some((entry) => (entry.remainingFraction ?? 0) > 0.2) ? 'available' : 'spent'
+  }
+
+  /**
+   * Minimum spacing between upstream attempts on one account.
+   *
+   * Bursts are the shape upstream reads as automation, and a run of fake 429s is
+   * what precedes a real ban. The default (1.5s) is far below any interactive
+   * need and only bites when several conversations fire at once.
+   * `DSH_AGY_MIN_REQUEST_INTERVAL_MS` overrides it; 0 disables the throttle.
+   */
+  private async throttle(session: AgyAccountSession): Promise<void> {
+    const interval = minRequestIntervalMs()
+    if (interval <= 0) return
+    const key = session.account.email ?? session.account.id ?? 'default'
+    const previous = this.lastAttemptAt.get(key)
+    if (previous !== undefined) {
+      const wait = previous + interval - Date.now()
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+    this.lastAttemptAt.set(key, Date.now())
+  }
+
   private async resolveRequestImages(options: GenerateOptions): Promise<Map<string, AgyResolvedImage>> {
     const refs = collectImageRefs(options)
     const images = new Map<string, AgyResolvedImage>()
@@ -556,11 +625,26 @@ export class AgyAdapter extends LlmAdapter {
     const MAX_MALFORMED_RETRIES = 3
 
     for (let malformedAttempt = 0; ; malformedAttempt++) {
+      await this.throttle(session)
       const attemptStartedAt = Date.now()
       const { response, bodyText } = await sendAttempt(attemptStartedAt)
 
       if (!response.ok) {
         const classified = classifyHttpError(response.status, response.headers, bodyText)
+        // A "quota exhausted" 429 that the account's own quota cache contradicts
+        // is upstream's risk-control rejection wearing a quota label. Cooling and
+        // rotating on those is what precedes real account bans (community
+        // reports: repeated fake 429s, then a 403), so the account is left alone
+        // and the failure stays retryable instead.
+        if (classified.rateLimitCategory === 'quota_exhausted'
+          && this.quotaVerdict(session.account) !== 'spent') {
+          this.recordUsage(session, options.model, { ok: false, rateLimited: true, reason: 'rate-limit' }, attemptStartedAt)
+          throw new LlmError(
+            'agy rejected the request as quota-exhausted (429) while this account still has quota — treated as a content/risk rejection, not a quota event',
+            'RATE_LIMIT',
+            { providerRetryAfterMs: 2_000, requestId: ProviderRequestId(generateAntigravityRequestId()) },
+          )
+        }
         await this.options.reportFailure(classified.kind, session, {
           retryAfterMs: classified.retryAfterMs,
           status: response.status,

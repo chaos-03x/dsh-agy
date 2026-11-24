@@ -12,7 +12,7 @@ import {
 } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId, isLevelThinkingModel, levelThinkingEffortsFor, registerDiscoveredTieredModels, resetDiscoveredTieredModels } from '../src/adapter/catalog.ts'
-import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
+import { AgyAdapter, buildRequestHeaders, minRequestIntervalMs } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { getThoughtSignature } from '../src/runtime/signature-cache.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
@@ -454,7 +454,7 @@ describe('translate', () => {
    * it through the conversation path put the prompt on the wire as an ordinary
    * USER turn; it belongs in `systemInstruction`.
    */
-  it('lifts a system-role message into systemInstruction, not a user turn', () => {
+  it('folds a system-role message into the first user turn (never the system slot)', () => {
     const messages = [
       { id: 's', role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: 'be terse' }] },
       { id: 'u', role: 'user', content: [{ type: 'text', text: 'hello' }] },
@@ -463,9 +463,12 @@ describe('translate', () => {
       generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
       {},
     )
-    expect(body.request.systemInstruction).toEqual({ parts: [{ text: 'be terse' }] })
+    expect(body.request.systemInstruction).toBeUndefined()
     expect(body.request.contents).toHaveLength(1)
-    expect(body.request.contents[0]).toEqual({ role: 'user', parts: [{ text: 'hello' }] })
+    expect(body.request.contents[0]).toEqual({
+      role: 'user',
+      parts: [{ text: 'be terse\n\n' }, { text: 'hello' }],
+    })
   })
 
   it('keeps options.system ahead of the system-role message when both are present', () => {
@@ -480,7 +483,8 @@ describe('translate', () => {
       }),
       {},
     )
-    expect(body.request.systemInstruction).toEqual({ parts: [{ text: 'from options\n\nfrom history' }] })
+    expect(body.request.systemInstruction).toBeUndefined()
+    expect((body.request.contents[0]?.parts)[0]?.text).toBe('from options\n\nfrom history\n\n')
   })
 
   it('skips a developer message: tool bookkeeping is not a conversation turn', () => {
@@ -575,7 +579,8 @@ describe('translate', () => {
       }),
       {},
     )
-    expect(body.request.systemInstruction).toEqual({ parts: [{ text: 'be helpful' }] })
+    expect(body.request.systemInstruction).toBeUndefined()
+    expect((body.request.contents[0]?.parts)[0]?.text).toBe('be helpful\n\n')
     expect(body.request.tools).toEqual([{
       functionDeclarations: [{
         name: 't1',
@@ -2352,6 +2357,172 @@ describe('AgyAdapter', () => {
     })
   })
 
+  it('spaces consecutive attempts on one account (burst protection)', async () => {
+    // Upstream reads a burst as automation, and a run of fake 429s precedes a
+    // real 403. The suite disables the throttle globally; this test opts in.
+    process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS = '150'
+    try {
+      const times: number[] = []
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        times.push(Date.now())
+        return new Response(sseStream(['data: [DONE]']), { status: 200 })
+      }))
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+      })
+      for await (const _ of adapter.stream(generateOptions())) void _
+      for await (const _ of adapter.stream(generateOptions())) void _
+      expect(times).toHaveLength(2)
+      expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(140)
+    } finally {
+      delete process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+    }
+  })
+
+  it('falls back to the default interval for an unparseable value', () => {
+    const previous = process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+    process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS = 'not-a-number'
+    try {
+      expect(minRequestIntervalMs()).toBe(1500)
+      process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS = '0'
+      expect(minRequestIntervalMs()).toBe(0)
+      delete process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+      expect(minRequestIntervalMs()).toBe(1500)
+    } finally {
+      if (previous === undefined) delete process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+      else process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS = previous
+    }
+  })
+
+  it('never puts the system text in the systemInstruction slot', async () => {
+    // Measured upstream: requestType "agent" TOGETHER with a non-empty
+    // systemInstruction returns a fabricated 429 on every endpoint; each field
+    // alone is 200. There is no switch for this shape, because it is not a
+    // preference: it fails 100% of the time and reports itself as a quota issue.
+    const bodies: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ''))
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions({
+      system: 'You are a test assistant.',
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+    }))) void _
+    const body = JSON.parse(bodies[0]!) as {
+      requestType?: string
+      request: { systemInstruction?: unknown, contents: Array<{ role: string, parts: Array<{ text: string }> }> }
+    }
+    expect(body.requestType).toBe('agent')
+    expect(body.request.systemInstruction).toBeUndefined()
+    expect(body.request.contents[0]?.parts.some((part) => part.text.includes('You are a test assistant.'))).toBe(true)
+  })
+
+  it('neutralises the phrases the content filter keys on', async () => {
+    const bodies: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ''))
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    }))
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    const system = [
+      'You are Claude Code.',
+      'You MUST run the tests before claiming completion. This is REQUIRED.',
+      'Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context.',
+    ].join('\n')
+    for await (const _ of adapter.stream(generateOptions({ system }))) void _
+    const body = JSON.parse(bodies[0]!) as { request: { contents: Array<{ parts: Array<{ text: string }> }> } }
+    const sent = body.request.contents.flatMap((content) => content.parts.map((part) => part.text)).join('\n')
+    expect(sent).not.toMatch(/Claude Code/i)
+    expect(sent).not.toMatch(/dual-use security tools/i)
+    expect(sent).not.toMatch(/\bMUST\b|\bREQUIRED\b/i)
+    // Replaced with synonyms, not lower-cased: the filter is case-insensitive.
+    expect(sent).toMatch(/should/)
+    expect(sent).toMatch(/needed/)
+  })
+
+  it('does not cool the account for a fake 429 when its quota is demonstrably unspent', async () => {
+    // Upstream disguises risk-control rejections as RESOURCE_EXHAUSTED. Cooling
+    // and rotating on those is what precedes account bans (community reports), so
+    // the account is left alone and the failure stays retryable instead.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+      { status: 429 },
+    )))
+    const reportFailure = vi.fn(async () => {})
+    const adapter = new AgyAdapter({
+      getSession: async () => session({
+        account: {
+          email: 'q@x',
+          refresh: 'rt|p',
+          projectId: 'p',
+          addedAt: 0,
+          lastUsed: 0,
+          cachedQuota: { gemini: { remainingFraction: 0.9, resetTime: new Date(Date.now() + 3_600_000).toISOString() } },
+        } as never,
+      }),
+      reportFailure,
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    expect(reportFailure).not.toHaveBeenCalled()
+  })
+
+  it('also refuses to cool when the account has no quota cache at all', async () => {
+    // The miss that mattered: an account never probed has an EMPTY cache, so
+    // "no evidence" was read as "really exhausted" and the first fake 429 parked
+    // it for 24 hours anyway.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+      { status: 429 },
+    )))
+    const reportFailure = vi.fn(async () => {})
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure,
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    expect(reportFailure).not.toHaveBeenCalled()
+  })
+
+  it('keeps a 429 terminal when the account really has no quota left', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+      { status: 429 },
+    )))
+    const reportFailure = vi.fn(async () => {})
+    const adapter = new AgyAdapter({
+      getSession: async () => session({
+        account: {
+          email: 'q@x',
+          refresh: 'rt|p',
+          projectId: 'p',
+          addedAt: 0,
+          lastUsed: 0,
+          cachedQuota: { gemini: { remainingFraction: 0, resetTime: new Date(Date.now() + 3_600_000).toISOString() } },
+        } as never,
+      }),
+      reportFailure,
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'QUOTA' })
+    expect(reportFailure).toHaveBeenCalled()
+  })
+
   it('streams a response and reports no failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
@@ -3233,7 +3404,18 @@ describe('AgyAdapter', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"status":"RESOURCE_EXHAUSTED"}}', { status: 429 })))
     const failures: Array<{ kind: string; session: AgyAccountSession }> = []
     const adapter = new AgyAdapter({
-      getSession: async () => session(),
+      // Evidence of a spent window: without it the adapter now refuses to cool
+      // (a fake 429 looks identical), so the terminal path needs the cache.
+      getSession: async () => session({
+        account: {
+          email: 'a@b.c',
+          refresh: 'rt|p',
+          projectId: 'p',
+          addedAt: 0,
+          lastUsed: 0,
+          cachedQuota: { gemini: { remainingFraction: 0, resetTime: new Date(Date.now() + 3_600_000).toISOString() } },
+        } as never,
+      }),
       reportFailure: async (kind, s) => { failures.push({ kind, session: s }) },
     })
     await expect(async () => {
