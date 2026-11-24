@@ -305,6 +305,15 @@ export interface AgyRpcMethods {
       history: number
     }
   }
+  /**
+   * Drop an account's local cooldown.
+   *
+   * The cooldown is the plugin's suspicion about the upstream, not a server
+   * fact, so a user who knows the account is fine clears it instead of waiting
+   * out a window the plugin guessed — a single misread failure used to park a
+   * healthy account for a day.
+   */
+  'account.clearCooldown': { payload: { index: number }; result: { ok: true } }
   'account.proxy': {
     payload: { index: number; proxy: string }
     result: { ok: true; proxy: string | null; proxyMasked: string | null; rawLogs: string | null }

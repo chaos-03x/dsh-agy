@@ -1354,6 +1354,35 @@ describe('getSession transport context (issue #29)', () => {
   })
 })
 
+describe('clearCooldown', () => {
+  it('drops the local cooling window and the failure count', async () => {
+    // The cooldown is a local suspicion, not an upstream fact: a misread failure
+    // parked a healthy account for 24h, and the user must be able to say "it is
+    // fine now" instead of waiting out a window the plugin invented.
+    const cooled: ManagedAccount = {
+      ...account('cool@x'),
+      coolingDownUntil: Date.now() + 24 * 60 * 60 * 1000,
+      cooldownReason: 'quota-exhausted',
+      cooldownSetAt: new Date().toISOString(),
+    }
+    const store = new InMemoryAccountStore(storage([cooled]))
+    const sessions = new AgySessionManager({ store })
+
+    await sessions.clearCooldown(0)
+
+    const after = (await store.load()).accounts[0] as ManagedAccount & { cooldownSetAt?: string }
+    expect(after.coolingDownUntil).toBeUndefined()
+    expect(after.cooldownReason).toBeUndefined()
+    expect(after.cooldownSetAt).toBeUndefined()
+  })
+
+  it('rejects an index that does not exist', async () => {
+    const store = new InMemoryAccountStore(storage([account('a@b.c')]))
+    const sessions = new AgySessionManager({ store })
+    await expect(sessions.clearCooldown(9)).rejects.toThrow(/not found/i)
+  })
+})
+
 describe('testCall routing (issue #29)', () => {
   afterEach(() => vi.unstubAllGlobals())
 
