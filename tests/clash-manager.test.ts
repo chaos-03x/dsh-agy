@@ -38,6 +38,8 @@ interface Harness {
   selected: string[]
   stateFile: string
   configFile: string
+  /** How many times the subscription URL was fetched. */
+  fetches: () => number
 }
 
 function harness(overrides: { enabled?: boolean, subscriptionUrl?: string, now?: () => number } = {}): Harness {
@@ -62,6 +64,7 @@ function harness(overrides: { enabled?: boolean, subscriptionUrl?: string, now?:
       return new Response(JSON.stringify({}))
     }) as typeof fetch,
   })
+  let fetchCount = 0
   const manager = new ClashManager({
     stateFile,
     configFile,
@@ -73,6 +76,7 @@ function harness(overrides: { enabled?: boolean, subscriptionUrl?: string, now?:
         selected.push(JSON.parse(String(init.body)).name as string)
         return new Response('{}')
       }
+      fetchCount += 1
       return new Response(PROFILE)
     }) as typeof fetch,
     now: overrides.now ?? (() => Date.now()),
@@ -83,7 +87,7 @@ function harness(overrides: { enabled?: boolean, subscriptionUrl?: string, now?:
       subscriptionUrl: overrides.subscriptionUrl ?? '',
     })
   }
-  return { manager, core, selected, stateFile, configFile }
+  return { manager, core, selected, stateFile, configFile, fetches: () => fetchCount }
 }
 
 describe('ClashManager lifecycle', () => {
@@ -144,8 +148,20 @@ describe('ClashManager lifecycle', () => {
     expect(h.selected.at(-1)).toBe('hk-01')
   })
 
-  it('stops the child process and clears the running state when disabled', async () => {
+  it('serves restarts from the cached profile and only re-fetches on explicit refresh', async () => {
     const h = harness({ enabled: true, subscriptionUrl: 'https://sub.example/tok' })
+    await h.manager.ensure()
+    expect(h.fetches()).toBe(1)
+    h.manager.stop()
+    // Boot path: cache only. Re-pulling the subscription on every start would be
+    // the auto-updater this feature explicitly does not ship.
+    await h.manager.ensure()
+    expect(h.fetches()).toBe(1)
+    await h.manager.restart(true)
+    expect(h.fetches()).toBe(2)
+  })
+
+  it('stops the child process and clears the running state when disabled', async () => {    const h = harness({ enabled: true, subscriptionUrl: 'https://sub.example/tok' })
     await h.manager.ensure()
     h.manager.configure({ enabled: false })
     await h.manager.stop()

@@ -167,12 +167,19 @@ application's traffic are left untouched.
 
 - The core listens on a loopback mixed port; Settings → Proxy shows the port,
   the node list and the current node.
+- **All of agy's traffic rides it**, not just chat: token refresh, quota probes,
+  model discovery and the verification call are account-scoped too.
 - **Rotate on failure**: a transport failure (timeout, refused connection, TLS)
   moves the group to the next node before the host's own retry re-sends. Quota
-  and content errors do not rotate — another node cannot fix them.
+  and content errors do not rotate — another node cannot fix them. A dead core
+  is reported as an ordinary network error, so the account is not benched while
+  the core restarts.
 - The binary is downloaded once from the official mihomo release into
   `$DSH_HOME/agy/clash/`. `DSH_AGY_CLASH_CORE=/path/to/mihomo` skips the download
   when you already have a core.
+- The subscription is fetched when you save it and **only re-fetched by an
+  explicit Restart** — boots reuse the cached profile, so the plugin never
+  silently updates your nodes.
 - The subscription URL and the controller secret live in
   `$DSH_HOME/agy/agy-clash.json` (0600); the UI only ever shows the redacted host.
 - Turning the switch off stops the core and returns agy to its previous route

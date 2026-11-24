@@ -246,6 +246,16 @@ export interface AccountRouting {
   /** Per-account proxy; unset means the env/direct route. */
   proxyUrl?: string
   /**
+   * Who owns {@link proxyUrl}.
+   *
+   * `account` (the default, and what every pre-existing call site means) is the
+   * user's per-account proxy: a connection failure there is a PROXY verdict and
+   * fails closed. `core` is the plugin's own embedded egress (see
+   * `clash/manager.ts`) — shared infrastructure, so its failures are ordinary
+   * network errors and must not bench a healthy account.
+   */
+  egress?: 'account' | 'core'
+  /**
    * Generation stream: long model silences are normal, so the per-gap body
    * inactivity timer must be disabled (AGENTS.md "Proxy Routing").
    */
@@ -254,6 +264,10 @@ export interface AccountRouting {
 
 /** Whether a request ran through an explicit per-account proxy. */
 export function isProxyRouted(routing: AccountRouting | undefined): boolean {
+  // The embedded core is NOT a "proxy route" for classification purposes: see
+  // `AccountRouting.egress`. Callers still get `proxyUrl` (the request must ride
+  // it); only the fail-closed verdict is withheld.
+  if (routing?.egress === 'core') return false
   return Boolean(routing?.proxyUrl)
 }
 

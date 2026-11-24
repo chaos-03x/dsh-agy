@@ -58,8 +58,14 @@ export interface ClashNode {
 export const DEFAULT_MIXED_PORT = 47890
 export const DEFAULT_CONTROLLER_PORT = 47891
 
-/** How long a started core gets to answer its controller before we call it dead. */
-export const CORE_READY_TIMEOUT_MS = 15_000
+/**
+ * How long a started core gets to answer its controller before we call it dead.
+ *
+ * Generous on purpose: the FIRST start of a subscription that uses GEOIP rules
+ * also downloads country.mmdb, and mihomo does not open its REST API until that
+ * finishes. A tight window turned "cold cache" into "broken proxy".
+ */
+export const CORE_READY_TIMEOUT_MS = 60_000
 
 /** Minimum spacing between automatic rotations, so one flapping turn cannot spin nodes. */
 export const ROTATE_MIN_INTERVAL_MS = 5_000

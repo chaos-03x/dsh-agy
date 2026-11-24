@@ -92,6 +92,15 @@ describe('buildRuntimeConfig', () => {
     expect((config.dns as Record<string, unknown>)['enhanced-mode']).toBe('normal')
   })
 
+  it('points geodata at a mirror and disables auto-update', () => {
+    // Without this the core blocks on its first start downloading country.mmdb
+    // from GitHub and never opens its controller inside the readiness window.
+    const geox = config['geox-url'] as Record<string, string> | undefined
+    expect(geox?.mmdb).toMatch(/^https:\/\//)
+    expect(geox?.geosite).toMatch(/^https:\/\//)
+    expect(config['geo-auto-update']).toBe(false)
+  })
+
   it('appends a catch-all MATCH when the profile has none', () => {
     const rules = config.rules as string[]
     expect(rules[rules.length - 1]).toBe('MATCH,节点选择')

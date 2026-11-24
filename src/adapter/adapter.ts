@@ -21,7 +21,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 
 import { AgyAuthError, AgyPoolBlockedError } from '../types.ts'
-import type { AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
+import type { AccountRouting, AgyAccountSession, FailureKind, ManagedAccount, OAuthAuthDetails } from '../types.ts'
 import type { RateLimitCategory } from '../runtime/classify.ts'
 import { fetchAgyFirstOk } from '../oauth/constants.ts'
 import {
@@ -309,7 +309,7 @@ export class AgyAdapter extends LlmAdapter {
         const session = await this.options.getSession()
         // Model discovery is account-scoped: route it through the account's proxy
         // (control-plane class, so the standard timeouts apply).
-        const routing = { proxyUrl: session === undefined ? undefined : this.proxyFor(session.account) }
+        const routing = session === undefined ? { proxyUrl: undefined } : this.routingFor(session.account)
         const models = await listAgyModels(session?.auth.access, session?.account.projectId, accountFetch(routing))
         this.cachedModels = { models, at: Date.now() }
         return models
@@ -368,7 +368,22 @@ export class AgyAdapter extends LlmAdapter {
    * `undefined` means the env/direct route, unchanged from before this seam.
    */
   private proxyFor(account: ManagedAccount): string | undefined {
-    return account.proxy ?? this.options.resolveProxy?.(account)
+    return this.routingFor(account).proxyUrl
+  }
+
+  /**
+   * Full routing for one account, including WHO owns the proxy.
+   *
+   * The `egress` tag is load-bearing: a refused connection to the embedded core
+   * is a network error (the account is healthy), while the same failure on a
+   * per-account proxy is a proxy verdict that fails closed.
+   */
+  private routingFor(account: ManagedAccount, streaming = false): AccountRouting {
+    const stream = streaming ? { streaming: true } : {}
+    if (account.proxy) return { proxyUrl: account.proxy, egress: 'account', ...stream }
+    const coreProxy = this.options.resolveProxy?.(account)
+    if (coreProxy) return { proxyUrl: coreProxy, egress: 'core', ...stream }
+    return stream
   }
 
   private async resolveRequestImages(options: GenerateOptions): Promise<Map<string, AgyResolvedImage>> {
@@ -493,7 +508,7 @@ export class AgyAdapter extends LlmAdapter {
     // (it carried only the control-plane calls before, so a proxied account
     // silently generated from the host's real IP), and the streaming
     // dispatcher drops the per-gap body timeout a reasoning pause would trip.
-    const routing = { proxyUrl: this.proxyFor(session.account), streaming: true }
+    const routing = this.routingFor(session.account, true)
 
     /**
      * Send one request, resending at most once when the upstream reports the
@@ -548,7 +563,7 @@ export class AgyAdapter extends LlmAdapter {
             routing,
           )
         } catch (error) {
-          const classified = classifyFetchError(error, { proxyUrl: routing.proxyUrl })
+          const classified = classifyFetchError(error, routing)
           // Hand the failure to the egress owner BEFORE reporting it: the next
           // attempt (the host's retry) should already ride a different node.
           this.options.onTransportFailure?.(session.account, error)

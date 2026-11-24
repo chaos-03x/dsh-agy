@@ -119,6 +119,18 @@ export function buildRuntimeConfig(input: RuntimeConfigInput): Record<string, un
     'external-controller': `127.0.0.1:${controllerPort}`,
     secret: controllerSecret,
     profile: { 'store-selected': false, 'store-fake-ip': false },
+    // First start downloads country.mmdb (the subscription's GEOIP rules need
+    // it), and the core does not open its controller until that finishes. The
+    // default source is GitHub, which is exactly what is slow or blocked on the
+    // networks this feature is for, so point at a CDN mirror and keep the files
+    // pinned rather than auto-updating them behind the user's back.
+    'geo-auto-update': false,
+    'geox-url': {
+      geoip: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.db',
+      geosite: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.db',
+      mmdb: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb',
+      asn: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb',
+    },
     dns: {
       enable: true,
       ipv6: false,

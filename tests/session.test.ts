@@ -1352,6 +1352,57 @@ describe('getSession transport context (issue #29)', () => {
       })
     })
   })
+
+  it('treats a dead EMBEDDED CORE as transport, not proxy_unreachable', async () => {
+    // The core is shared infrastructure this plugin owns, not a user's proxy: a
+    // refused connection must not bench a healthy account (it would be cooled
+    // while the core restarts, and the pool would drain for nothing).
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const error = new TypeError('fetch failed')
+      ;(error as unknown as { cause?: unknown }).cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+      throw error
+    }))
+
+    await withProxyFixture(async (coreUrl) => {
+      const store = new InMemoryAccountStore(storage([account('core@x')]))
+      const sessions = new AgySessionManager({ store, egressProxy: () => coreUrl })
+
+      await expect(sessions.getSession()).rejects.toMatchObject({
+        name: 'AgyAuthError',
+        kind: 'transport',
+        message: expect.not.stringMatching(/proxy_unreachable/),
+      })
+    })
+  })
+
+  it('routes control-plane traffic through the injected egress', async () => {
+    // Token refresh is the first account-scoped call; without this seam a user
+    // who enabled the embedded core still leaked that request from the host IP.
+    const { dispatcherForAsync, proxyAgent } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('token')) {
+        return new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }), { status: 200 })
+      }
+      return new Response(JSON.stringify({}), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (coreUrl) => {
+      const store = new InMemoryAccountStore(storage([account('core@x')]))
+      const sessions = new AgySessionManager({ store, egressProxy: () => coreUrl })
+
+      await sessions.getSession().catch(() => undefined)
+
+      const init = fetchSpy.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined
+      expect(init?.dispatcher).toBe(await dispatcherForAsync(coreUrl))
+      expect(init?.dispatcher).not.toBe(proxyAgent)
+    })
+  })
 })
 
 describe('testCall routing (issue #29)', () => {
