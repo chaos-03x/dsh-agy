@@ -24,6 +24,7 @@ import type { SubscriptionProfile } from './config.ts'
 import { ClashController, subscriptionHostForDisplay } from './controller.ts'
 import { resolveCoreBinary } from './core.ts'
 import { ClashStore } from './store.ts'
+import { proxiedFetch } from '../proxy.ts'
 import {
   CORE_READY_TIMEOUT_MS,
   DEFAULT_CONTROLLER_PORT,
@@ -78,7 +79,7 @@ export class ClashManager {
   constructor(options: ClashManagerOptions = {}) {
     this.store = new ClashStore(options.stateFile)
     this.configFile = options.configFile ?? `${this.store.path.replace(/\.json$/, '')}-config.yaml`
-    this.fetchImpl = options.fetchImpl ?? fetch
+    this.fetchImpl = options.fetchImpl ?? proxiedFetch
     this.controllerFor = options.controllerFor
       ?? ((port, secret) => new ClashController({ port, secret }))
     this.spawnCore = options.spawnCore ?? ((bin, args) => spawn(bin, args, { stdio: 'ignore', windowsHide: true }))

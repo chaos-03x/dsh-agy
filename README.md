@@ -190,6 +190,31 @@ application's traffic are left untouched.
 The core is GPL-3.0 software downloaded at runtime and run as a separate
 process — it is not bundled, and this package stays MIT.
 
+#### What is proxied, and what is not
+
+Every request agy makes on an account's behalf rides the account's route
+(per-account proxy → embedded core → env proxy):
+
+| Call | Routed |
+|---|---|
+| generation (`streamGenerateContent`) | yes |
+| model discovery (`fetchAvailableModels`, `listAgyModels`) | yes |
+| quota probes (`retrieveUserQuotaSummary`, limits) | yes |
+| token refresh (OAuth token endpoint) | yes |
+| `loadCodeAssist` project healing | yes |
+| test call + `verify` (userinfo) | yes |
+| version feed (rate-limit re-fingerprint, boot warm-up) | yes |
+
+These are NOT proxied, by design or by necessity:
+
+| Call | Why |
+|---|---|
+| subscription fetch, core binary download | they run before a core exists; they honour `HTTP(S)_PROXY` (the env proxy) only |
+| web login / OAuth code exchange | there is no account yet to attach a route to (the CLI has `--proxy`) |
+| the core's own startup geodata download (`country.mmdb`) | it is the core's traffic, not agy's |
+| CLI subcommands | separate process; use `dsh-agy login --proxy` / `--proxy` flags |
+
+
 ### Thinking budget (reasoning effort)
 
 A thinking budget is a hidden parameter in the API that controls how hard the

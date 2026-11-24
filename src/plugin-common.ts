@@ -17,7 +17,7 @@ import { MultimodalConfigStore } from './multimodal-config.ts'
 import { ThinkingBudgetStore } from './thinking-budget.ts'
 import { UsageStats } from './stats.ts'
 import { RecentActivityStore } from './recent-store.ts'
-import { probeFetch, proxiedFetch } from './proxy.ts'
+import { accountFetch, probeFetch, proxiedFetch } from './proxy.ts'
 import { pickProbeProxyUrl } from './runtime/rotation.ts'
 import { resolveAntigravityVersion } from './runtime/version.ts'
 import type { FetchLike } from './runtime/version.ts'
@@ -73,17 +73,24 @@ export async function resolveCodec(ctx: Context): Promise<{ codec: SecretCodec; 
  * Fire-and-forget version warm-up so fingerprint generation inside the
  * rate-limit path never waits on a cold feed.
  *
- * Routed through `pickProbeProxyUrl`: the release feeds are not account-scoped,
- * but the host IP is exactly what a per-account-proxy user asked to hide, and a
- * bare `proxiedFetch` sends this boot-time request directly. Never throws — an
+ * Routed through `pickProbeProxyUrl` and then the shared egress: the release
+ * feeds are not account-scoped, but the host IP is exactly what a proxied user
+ * asked to hide, and a bare `proxiedFetch` sends this boot-time request directly.
+ * Order matters: an account proxy is a user decision about that account, the
+ * shared core is the fallback for accounts without one. Never throws — an
  * unreadable store or a dead feed must not be the reason plugin boot fails.
  */
-async function warmVersionCache(store: AccountStore): Promise<void> {
+async function warmVersionCache(store: AccountStore, coreProxy: () => string | undefined): Promise<void> {
   let fetchImpl: FetchLike = proxiedFetch
   try {
     const storage = await store.load()
-    const proxyUrl = pickProbeProxyUrl(storage.accounts, storage.activeIndex)
-    fetchImpl = probeFetch(proxyUrl)
+    const accountProxy = pickProbeProxyUrl(storage.accounts, storage.activeIndex)
+    const coreUrl = accountProxy === undefined || accountProxy === '' ? coreProxy() : undefined
+    if (accountProxy !== undefined && accountProxy !== '') {
+      fetchImpl = probeFetch(accountProxy)
+    } else if (coreUrl !== undefined) {
+      fetchImpl = accountFetch({ proxyUrl: coreUrl, egress: 'core' })
+    }
   } catch {
     // Fall through to the env/direct route.
   }
@@ -152,7 +159,11 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     )
   }
   const store = new JsonAccountStore({ file: accountsMigrated.file, codec })
-  void warmVersionCache(store)
+  // Built before the warm-up below: that probe is one of the requests a user
+  // asking for "agy through my subscription" expects to move, and it runs before
+  // any account exists to carry a proxy.
+  const clash = new ClashManager()
+  void warmVersionCache(store, () => clash.proxyUrlFor())
   // The persisted recent-activity ring, built FIRST so it seeds from disk
   // before any record can arrive and `pool.recent` shows the other processes'
   // history immediately. Same soft-fail reporting contract as the ledger.
@@ -182,11 +193,9 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   const modelVisibility = new ModelVisibility()
   const thinkingBudget = new ThinkingBudgetStore()
   const multimodalConfig = new MultimodalConfigStore()
-  // The embedded core is built before the adapter: the adapter's routing seam is
-  // synchronous and fail-closed, so the manager has to exist for the very first
-  // request. Starting it is best-effort here and never blocks plugin boot — a
-  // dead core must not stop DSH from starting, only from proxying.
-  const clash = new ClashManager()
+  // Start the core best-effort: never blocks plugin boot — a dead core must not
+  // stop DSH from starting, only from proxying. `ensure()` reads the cached
+  // profile, so a boot performs no network request of its own.
   if (clash.snapshot().enabled) {
     void clash.ensure().catch((error: unknown) => {
       ctx.logger.warn(

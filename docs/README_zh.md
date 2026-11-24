@@ -154,6 +154,30 @@ rm -rf ~/.dsh/agy           # 账号、用量统计、模型可见性、思考�
 
 内核是 GPL-3.0 软件，运行时下载并以独立进程运行 —— 不随包分发，本包仍是 MIT。
 
+#### 哪些走了代理，哪些没走
+
+agy 代表账号发起的每个请求都走账号的路由（每账号代理 → 内置内核 → 环境代理）：
+
+| 调用 | 是否走代理 |
+|---|---|
+| 生成（`streamGenerateContent`） | 是 |
+| 模型发现（`fetchAvailableModels`、`listAgyModels`） | 是 |
+| 配额探测（`retrieveUserQuotaSummary`、limits） | 是 |
+| token 刷新（OAuth token 端点） | 是 |
+| `loadCodeAssist` 项目修复 | 是 |
+| 测试调用与 `verify`（userinfo） | 是 |
+| 版本 feed（限流换指纹、启动预热） | 是 |
+
+下列请求**不走**，要么设计如此，要么客观做不到：
+
+| 调用 | 原因 |
+|---|---|
+| 拉订阅、下载内核二进制 | 发生在内核存在之前；只认 `HTTP(S)_PROXY` 环境代理 |
+| Web 端登录 / OAuth 换码 | 此刻还没有账号可挂路由（CLI 有 `--proxy`） |
+| 内核自己启动时下 `country.mmdb` | 那是内核的流量，不是 agy 的 |
+| CLI 子命令 | 独立进程；用 `dsh-agy login --proxy` / `--proxy` |
+
+
 ### 思考预算（reasoning effort）
 
 思考预算是 API 里的一个隐藏参数，用来控制模型思考的努力程度。上游给其中几个取值起了名字，这就是你在模型选择器里看到的 reasoning effort（high / medium / low）。填入预算会替换掉原本的 high / medium / low 传给模型，而不是叠加。
