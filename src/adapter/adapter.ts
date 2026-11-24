@@ -356,14 +356,19 @@ export class AgyAdapter extends LlmAdapter {
    * caller that prefers it (and accepts the 400-and-crash risk).
    */
   /**
-   * Whether the account's own quota cache says it still has quota.
+   * What the account's own quota cache says about a "quota exhausted" 429.
    *
-   * Used only to disbelieve a 429 that claims exhaustion: at least one live
-   * family window must still hold more than 20% — a soft-drain threshold, not a
-   * measurement. No usable cache means "no evidence", and the caller keeps the
-   * old, conservative reading (cool the account).
+   * `spent` requires EVIDENCE: at least one live family window at or below the
+   * 20% soft-drain threshold. `available` is the opposite (a live window above
+   * it). `unknown` means there is no usable cache at all — and that is the case
+   * that made this check miss: an account that had never been probed has an empty
+   * cache, so the first fake 429 still parked it for 24 hours.
+   *
+   * Only `spent` keeps the old, conservative reading; the other two are treated
+   * as content rejections, because cooling/rotating on a fake 429 is what
+   * precedes a real ban.
    */
-  private quotaLooksAvailable(account: ManagedAccount): boolean {
+  private quotaVerdict(account: ManagedAccount): 'spent' | 'available' | 'unknown' {
     const now = Date.now()
     const windows = Object.values((account.cachedQuota ?? {}) as Record<string, unknown>)
       .filter((entry): entry is { remainingFraction?: number, resetTime?: string } => entry !== null && typeof entry === 'object')
@@ -372,8 +377,8 @@ export class AgyAdapter extends LlmAdapter {
       const resetAt = entry.resetTime === undefined ? Number.NaN : Date.parse(entry.resetTime)
       return Number.isNaN(resetAt) || resetAt > now
     })
-    if (live.length === 0) return false
-    return live.some((entry) => (entry.remainingFraction ?? 0) > 0.2)
+    if (live.length === 0) return 'unknown'
+    return live.some((entry) => (entry.remainingFraction ?? 0) > 0.2) ? 'available' : 'spent'
   }
 
   private mergeSystemIntoUser(): boolean {
@@ -607,7 +612,7 @@ export class AgyAdapter extends LlmAdapter {
         // reports: repeated fake 429s, then a 403), so the account is left alone
         // and the failure stays retryable instead.
         if (classified.rateLimitCategory === 'quota_exhausted'
-          && this.quotaLooksAvailable(session.account)) {
+          && this.quotaVerdict(session.account) !== 'spent') {
           this.recordUsage(session, options.model, { ok: false, rateLimited: true, reason: 'rate-limit' }, attemptStartedAt)
           throw new LlmError(
             'agy rejected the request as quota-exhausted (429) while this account still has quota — treated as a content/risk rejection, not a quota event',

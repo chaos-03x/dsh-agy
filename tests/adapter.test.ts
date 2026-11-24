@@ -2429,6 +2429,26 @@ describe('AgyAdapter', () => {
     expect(reportFailure).not.toHaveBeenCalled()
   })
 
+  it('also refuses to cool when the account has no quota cache at all', async () => {
+    // The miss that mattered: an account never probed has an EMPTY cache, so
+    // "no evidence" was read as "really exhausted" and the first fake 429 parked
+    // it for 24 hours anyway.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+      { status: 429 },
+    )))
+    const reportFailure = vi.fn(async () => {})
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure,
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    expect(reportFailure).not.toHaveBeenCalled()
+  })
+
   it('keeps a 429 terminal when the account really has no quota left', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
       '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
@@ -3336,7 +3356,18 @@ describe('AgyAdapter', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":{"status":"RESOURCE_EXHAUSTED"}}', { status: 429 })))
     const failures: Array<{ kind: string; session: AgyAccountSession }> = []
     const adapter = new AgyAdapter({
-      getSession: async () => session(),
+      // Evidence of a spent window: without it the adapter now refuses to cool
+      // (a fake 429 looks identical), so the terminal path needs the cache.
+      getSession: async () => session({
+        account: {
+          email: 'a@b.c',
+          refresh: 'rt|p',
+          projectId: 'p',
+          addedAt: 0,
+          lastUsed: 0,
+          cachedQuota: { gemini: { remainingFraction: 0, resetTime: new Date(Date.now() + 3_600_000).toISOString() } },
+        } as never,
+      }),
       reportFailure: async (kind, s) => { failures.push({ kind, session: s }) },
     })
     await expect(async () => {
