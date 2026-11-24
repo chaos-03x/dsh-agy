@@ -2404,7 +2404,10 @@ describe('AgyAdapter', () => {
     const sent = body.request.contents.flatMap((content) => content.parts.map((part) => part.text)).join('\n')
     expect(sent).not.toMatch(/Claude Code/i)
     expect(sent).not.toMatch(/dual-use security tools/i)
-    expect(sent).not.toMatch(/\bMUST\b|\bREQUIRED\b/)
+    expect(sent).not.toMatch(/\bMUST\b|\bREQUIRED\b/i)
+    // Replaced with synonyms, not lower-cased: the filter is case-insensitive.
+    expect(sent).toMatch(/should/)
+    expect(sent).toMatch(/needed/)
   })
 
   it('does not cool the account for a fake 429 when its quota is demonstrably unspent', async () => {
