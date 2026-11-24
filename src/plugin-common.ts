@@ -204,6 +204,10 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     store,
     recordUsage: (record) => { stats.record(record) },
     onRotate: () => { invalidateModelCache() },
+    // Same egress as the adapter: token refresh, quota probes, model discovery
+    // and the verification call are account-scoped traffic too, and a user who
+    // asked for "agy through my subscription" means all of it.
+    egressProxy: () => clash.proxyUrlFor(),
   })
   // Optional background health probe (DSH_AGY_HEALTH_INTERVAL_MS), off by default.
   const healthIntervalMs = Number(process.env.DSH_AGY_HEALTH_INTERVAL_MS ?? 0)

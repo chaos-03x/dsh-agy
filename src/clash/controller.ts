@@ -95,13 +95,23 @@ export class ClashController {
     })
   }
 
-  /** Probe one node's delay; used by the panel's manual test button. */
-  async delay(node: string, url = 'https://www.gstatic.com/generate_204', timeoutMs = 5_000): Promise<number> {
+  /**
+   * Delay-test every node in a group at once (`GET /group/{name}/delay`).
+   *
+   * Used by `verify:clash` against a real subscription: picking the first node
+   * blindly makes a dead node look like a broken egress, which is exactly the
+   * confusion a "does my subscription work" question must not produce.
+   */
+  async groupDelay(group: string, url: string, timeoutMs: number): Promise<Record<string, number>> {
     const query = `?url=${encodeURIComponent(url)}&timeout=${timeoutMs}`
-    const raw = (await this.call(`/proxies/${encodeURIComponent(node)}/delay${query}`, {
-      signal: AbortSignal.timeout(timeoutMs + 1_000),
-    })) as { delay?: unknown }
-    return typeof raw.delay === 'number' ? raw.delay : 0
+    const raw = (await this.call(`/group/${encodeURIComponent(group)}/delay${query}`, {
+      signal: AbortSignal.timeout(timeoutMs + 5_000),
+    })) as Record<string, unknown>
+    const out: Record<string, number> = {}
+    for (const [name, value] of Object.entries(raw ?? {})) {
+      if (typeof value === 'number') out[name] = value
+    }
+    return out
   }
 }
 

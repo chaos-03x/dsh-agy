@@ -88,6 +88,29 @@ if (source === '') {
 const manager = new ClashManager({ stateFile, configFile })
 manager.configure({ enabled: true, subscriptionUrl, autoRotate: true })
 
+/** One GET through the core's mixed port, body as text. */
+function fetchThroughProxy(port: number, target: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(target)
+    const request = httpRequest({
+      host: '127.0.0.1',
+      port,
+      method: 'GET',
+      path: target,
+      headers: { host: parsed.host },
+      timeout: 25_000,
+    }, (response) => {
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk: string) => { body += chunk })
+      response.on('end', () => resolve(body.trim()))
+    })
+    request.on('timeout', () => { request.destroy(new Error(`proxy probe timed out: ${target}`)) })
+    request.on('error', reject)
+    request.end()
+  })
+}
+
 try {
   await manager.ensure()
   const status = await manager.status()
@@ -100,27 +123,27 @@ try {
 
   // ── Egress: a real HTTP request through the core's mixed port must come out of
   // the node. This is the assertion the first version of this script lacked.
-  const egress = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-    const request = httpRequest({
-      host: '127.0.0.1',
-      port: status.mixedPort,
-      method: 'GET',
-      path: 'http://agy-clash-egress.test/probe',
-      headers: { host: 'agy-clash-egress.test' },
-      timeout: 20_000,
-    }, (response) => {
-      let body = ''
-      response.setEncoding('utf8')
-      response.on('data', (chunk: string) => { body += chunk })
-      response.on('end', () => { resolve({ status: response.statusCode ?? 0, body }) })
-    })
-    request.on('timeout', () => { request.destroy(new Error('egress probe timed out')) })
-    request.on('error', reject)
-    request.end()
-  })
-  console.log(`egress: HTTP ${egress.status} body=${JSON.stringify(egress.body)} via-upstream=${JSON.stringify(fakeUpstreamSeen)}`)
-
   if (source === '') {
+    const egress = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const request = httpRequest({
+        host: '127.0.0.1',
+        port: status.mixedPort,
+        method: 'GET',
+        path: 'http://agy-clash-egress.test/probe',
+        headers: { host: 'agy-clash-egress.test' },
+        timeout: 20_000,
+      }, (response) => {
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk: string) => { body += chunk })
+        response.on('end', () => { resolve({ status: response.statusCode ?? 0, body }) })
+      })
+      request.on('timeout', () => { request.destroy(new Error('egress probe timed out')) })
+      request.on('error', reject)
+      request.end()
+    })
+    console.log(`egress: HTTP ${egress.status} body=${JSON.stringify(egress.body)} via-upstream=${JSON.stringify(fakeUpstreamSeen)}`)
+
     if (egress.status !== 200 || egress.body !== 'ok') {
       throw new Error(`egress did not leave through the node (HTTP ${egress.status})`)
     }
@@ -137,6 +160,49 @@ try {
     const after = (await controller.group(status.group)).now
     console.log(`rotate: ${String(rotated)} ${before} -> ${after}`)
     if (!rotated || before === after) throw new Error('rotation did not move the node')
+  }
+
+  // ── Real subscription: prove agy can actually egress through it. Pick the
+  // fastest node by the group's own delay test, then request a real target.
+  if (source !== '') {
+    const group = await controller.group(status.group)
+    const delays = await controller.groupDelay(status.group, 'http://www.gstatic.com/generate_204', 5_000)
+    const ranked = Object.entries(delays).filter(([, ms]) => ms > 0).sort((a, b) => a[1] - b[1])
+    console.log(`delays: ${ranked.slice(0, 5).map(([name, ms]) => `${name}=${ms}ms`).join(', ') || '(none reachable)'}`)
+    if (ranked.length === 0) throw new Error('no node in the subscription answered the delay test')
+    await controller.select(status.group, ranked[0]![0])
+    console.log(`selected: ${ranked[0]![0]}`)
+
+    const probe = await new Promise<{ status: number }>((resolve, reject) => {
+      const request = httpRequest({
+        host: '127.0.0.1',
+        port: status.mixedPort,
+        method: 'GET',
+        path: 'http://www.gstatic.com/generate_204',
+        // The Host header must name the TARGET: Node would otherwise stamp the
+        // proxy's own address here and gstatic answers 400.
+        headers: { host: 'www.gstatic.com' },
+        timeout: 25_000,
+      }, (response) => {
+        response.resume()
+        response.on('end', () => resolve({ status: response.statusCode ?? 0 }))
+      })
+      request.on('timeout', () => { request.destroy(new Error('egress probe timed out')) })
+      request.on('error', reject)
+      request.end()
+    })
+    console.log(`real egress: HTTP ${probe.status} via ${ranked[0]![0]}`)
+    if (probe.status < 200 || probe.status >= 400) throw new Error(`subscription egress failed (HTTP ${probe.status})`)
+
+    // Prove the traffic really left through the node rather than matching a
+    // DIRECT rule: compare the exit IP seen through the core with the host's own.
+    const ipViaCore = await fetchThroughProxy(status.mixedPort, 'http://api.ipify.org')
+    const ipDirect = await (await fetch('http://api.ipify.org')).text()
+    console.log(`exit ip: core=${ipViaCore} direct=${ipDirect}`)
+    if (ipViaCore === '' || ipViaCore === ipDirect) {
+      throw new Error(`exit ip did not change through the core (core=${ipViaCore} direct=${ipDirect})`)
+    }
+    void group
   }
   console.log('OK')
 } finally {

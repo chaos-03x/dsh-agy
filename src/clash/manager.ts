@@ -17,7 +17,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { buildRuntimeConfig, parseSubscription, pickGroup, serializeRuntimeConfig } from './config.ts'
 import type { SubscriptionProfile } from './config.ts'
@@ -112,21 +112,21 @@ export class ClashManager {
    * Start the core if it is enabled and not already up. Returns the proxy URL,
    * or undefined while disabled. Concurrent callers share one start.
    */
-  async ensure(): Promise<string | undefined> {
+  async ensure(refresh = false): Promise<string | undefined> {
     if (!this.state.enabled) return undefined
     if (this.child !== undefined) return this.proxyUrlFor()
     if (this.startPromise === undefined) {
-      this.startPromise = this.start().finally(() => { this.startPromise = undefined })
+      this.startPromise = this.start(refresh).finally(() => { this.startPromise = undefined })
     }
     await this.startPromise
     return this.proxyUrlFor()
   }
 
-  /** Start the core: fetch the subscription, write the config, spawn, wait ready. */
-  async start(): Promise<void> {
+  /** Start the core: reuse the cached profile (or fetch), write the config, spawn, wait ready. */
+  async start(refresh = false): Promise<void> {
     if (this.child !== undefined) return
     try {
-      const profile = await this.loadProfile()
+      const profile = await this.loadProfile(refresh)
       const config = buildRuntimeConfig({
         profile,
         mixedPort: this.state.mixedPort || DEFAULT_MIXED_PORT,
@@ -154,10 +154,16 @@ export class ClashManager {
     }
   }
 
-  /** Stop and start again, re-fetching the subscription (the panel's restart). */
-  async restart(): Promise<void> {
+  /**
+   * Stop and start again. `refresh` re-fetches the subscription.
+   *
+   * Boots do NOT refresh: a plugin that re-pulls a subscription every start is
+   * an auto-updater nobody asked for (a stated non-goal). Only the user's
+   * explicit save/restart passes `true`.
+   */
+  async restart(refresh = false): Promise<void> {
     this.stop()
-    await this.ensure()
+    await this.ensure(refresh)
   }
 
   /** Kill the child and mark the feature not running (state.enabled is untouched). */
@@ -253,7 +259,15 @@ export class ClashManager {
     return this.controllerFor(this.state.controllerPort, this.state.controllerSecret)
   }
 
-  private async loadProfile(): Promise<SubscriptionProfile> {
+  private async loadProfile(refresh = false): Promise<SubscriptionProfile> {
+    // Cache first: see `restart` for why a boot must not re-pull the subscription.
+    if (!refresh) {
+      const cached = this.readCachedProfile()
+      if (cached !== undefined) {
+        this.state.fetchedAt = this.state.fetchedAt || new Date(this.now()).toISOString()
+        return cached
+      }
+    }
     const url = this.state.subscriptionUrl
     if (url === '') throw new Error('no subscription configured — paste a Clash subscription URL in Settings → 代理')
     const response = await this.fetchImpl(url, {
@@ -270,7 +284,28 @@ export class ClashManager {
     }
     this.profile = profile
     this.state.fetchedAt = new Date(this.now()).toISOString()
+    try {
+      // Cached next to the generated config, 0600 like it: the profile carries
+      // the same node credentials, and this is what makes a restart (and every
+      // later boot) work offline.
+      writeFileSync(this.profileCacheFile(), body, { mode: 0o600 })
+    } catch {
+      // A cache that cannot be written only costs a re-fetch next start.
+    }
     return profile
+  }
+
+  /** Where the last fetched profile body is kept. */
+  private profileCacheFile(): string {
+    return this.configFile.replace(/\.ya?ml$/i, '') + '-profile.yaml'
+  }
+
+  private readCachedProfile(): SubscriptionProfile | undefined {
+    try {
+      return parseSubscription(readFileSync(this.profileCacheFile(), 'utf8'))
+    } catch {
+      return undefined
+    }
   }
 
   private async waitReady(): Promise<void> {

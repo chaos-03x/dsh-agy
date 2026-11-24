@@ -131,7 +131,7 @@ export interface AgyManagementOptions {
     status: () => Promise<ClashStatus>
     configure: (patch: { enabled?: boolean; subscriptionUrl?: string; autoRotate?: boolean }) => void
     select: (node: string) => Promise<void>
-    restart: () => Promise<void>
+    restart: (refresh?: boolean) => Promise<void>
   }
 }
 
@@ -687,8 +687,9 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
       if (needsRestart) {
         try {
           // Apply immediately: a save that only persisted would leave the panel
-          // showing a state the core is not actually in.
-          await clash.restart()
+          // showing a state the core is not actually in. Only a NEW subscription
+          // re-fetches; flipping the switch rides the cached profile.
+          await clash.restart(body?.subscriptionUrl !== undefined)
         } catch (error) {
           // The settings are persisted on purpose (the user sees what they typed);
           // the start failure is reported as its own message, not as a rejected payload.
@@ -711,7 +712,9 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
 
     'clash.restart': async () => {
       try {
-        await clash.restart()
+        // The explicit Restart is the ONE place that re-fetches the subscription:
+        // it is the user's request for fresh nodes, not an auto-update.
+        await clash.restart(true)
       } catch (error) {
         fail(error instanceof Error ? error.message : String(error))
       }
