@@ -422,6 +422,35 @@ export function mergeModelCatalog(dynamic: DiscoveredModels): LlmModelInfo[] {
     }
   }
   entries.sort(compareModels)
+  return uniqueDisplayNames(entries)
+}
+
+/**
+ * Make every display name unique — but only where it would actually collide.
+ *
+ * A subscription can advertise `gemini-4-hydrogen` AND `gemini-4-hydrogen-tiered`
+ * (plus both `-xhigh` forms), and the tiered label is derived by stripping
+ * `-tiered`, so two different ids rendered as one row. The tiered id is ALSO the
+ * entry that deliberately carries the base label when it hides the split
+ * `low/medium/high` siblings, so a blanket suffix would break that unification —
+ * the suffix is applied only to a tiered id that collides with a sibling label.
+ */
+function uniqueDisplayNames(entries: LlmModelInfo[]): LlmModelInfo[] {
+  const counts = new Map<string, number>()
+  for (const entry of entries) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1)
+  for (const entry of entries) {
+    if ((counts.get(entry.name) ?? 0) > 1 && /-tiered(?:-|$)/.test(entry.id)) {
+      entry.name = `${entry.name} (Tiered)`
+    }
+  }
+  // Anything still sharing a label is disambiguated by its id, the value the
+  // picker actually sends.
+  const used = new Set<string>()
+  for (const entry of entries) {
+    const name = used.has(entry.name) ? `${entry.name} · ${entry.id}` : entry.name
+    used.add(name)
+    entry.name = name
+  }
   return entries
 }
 
