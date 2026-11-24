@@ -12,7 +12,7 @@ import {
 } from '../src/adapter/parse.ts'
 import { catalogModelList, fetchAvailableModels, listAgyModels, mergeModelCatalog, resolveAgyModel } from '../src/adapter/models.ts'
 import { AGY_PUBLIC_MODELS, formatTieredModelName, isChatCallableModelId, isLevelThinkingModel, levelThinkingEffortsFor, registerDiscoveredTieredModels, resetDiscoveredTieredModels } from '../src/adapter/catalog.ts'
-import { AgyAdapter, buildRequestHeaders } from '../src/adapter/adapter.ts'
+import { AgyAdapter, buildRequestHeaders, minRequestIntervalMs } from '../src/adapter/adapter.ts'
 import type { AgyAccountSession } from '../src/adapter/adapter.ts'
 import { getThoughtSignature } from '../src/runtime/signature-cache.ts'
 import { AgyAuthError, AgyPoolBlockedError } from '../src/types.ts'
@@ -2355,6 +2355,44 @@ describe('AgyAdapter', () => {
       const init = fetchSpy.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined
       expect(init?.dispatcher).toBe(await dispatcherForAsync(accountProxy))
     })
+  })
+
+  it('spaces consecutive attempts on one account (burst protection)', async () => {
+    // Upstream reads a burst as automation, and a run of fake 429s precedes a
+    // real 403. The suite disables the throttle globally; this test opts in.
+    process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS = '150'
+    try {
+      const times: number[] = []
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        times.push(Date.now())
+        return new Response(sseStream(['data: [DONE]']), { status: 200 })
+      }))
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+      })
+      for await (const _ of adapter.stream(generateOptions())) void _
+      for await (const _ of adapter.stream(generateOptions())) void _
+      expect(times).toHaveLength(2)
+      expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(140)
+    } finally {
+      delete process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+    }
+  })
+
+  it('falls back to the default interval for an unparseable value', () => {
+    const previous = process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+    process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS = 'not-a-number'
+    try {
+      expect(minRequestIntervalMs()).toBe(1500)
+      process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS = '0'
+      expect(minRequestIntervalMs()).toBe(0)
+      delete process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+      expect(minRequestIntervalMs()).toBe(1500)
+    } finally {
+      if (previous === undefined) delete process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+      else process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS = previous
+    }
   })
 
   it('never puts the system text in the systemInstruction slot', async () => {

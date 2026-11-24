@@ -219,6 +219,20 @@ function ledgerAccountKey(session: AgyAccountSession): string | undefined {
  * This adapter performs its own dispatch (see the `fetchAgyFirstOk` call in
  * `stream()`); nothing downstream re-adds the header.
  */
+/**
+ * Minimum spacing between upstream attempts on one account, in ms.
+ *
+ * `DSH_AGY_MIN_REQUEST_INTERVAL_MS` overrides the 1.5s default; 0 disables the
+ * throttle. An unparseable value falls back to the default rather than to zero:
+ * a typo must not silently remove the protection.
+ */
+export function minRequestIntervalMs(): number {
+  const raw = process.env.DSH_AGY_MIN_REQUEST_INTERVAL_MS
+  if (raw === undefined || raw === '') return 1_500
+  const value = Number(raw)
+  return Number.isFinite(value) && value >= 0 ? value : 1_500
+}
+
 export function buildRequestHeaders(session: AgyAccountSession): Record<string, string> {
   return {
     authorization: `Bearer ${session.auth.access}`,
@@ -243,6 +257,15 @@ export class AgyAdapter extends LlmAdapter {
   private readonly options: AgyAdapterOptions
   private cachedModels: { models: readonly LlmModelInfo[]; at: number } | null = null
   private inFlightModels: Promise<readonly LlmModelInfo[]> | null = null
+  /**
+   * Last upstream attempt per account, for the minimum-interval throttle.
+   *
+   * Upstream treats bursts as bot traffic: the community reports whole pools
+   * being rate-limited after a few hundred milliseconds of fan-out, and a burst
+   * of FAKE 429s is what precedes a real 403. One request per account per
+   * interval is cheap insurance and costs nothing when the host is idle.
+   */
+  private readonly lastAttemptAt = new Map<string, number>()
 
   constructor(options: AgyAdapterOptions) {
     super()
@@ -365,6 +388,26 @@ export class AgyAdapter extends LlmAdapter {
     })
     if (live.length === 0) return 'unknown'
     return live.some((entry) => (entry.remainingFraction ?? 0) > 0.2) ? 'available' : 'spent'
+  }
+
+  /**
+   * Minimum spacing between upstream attempts on one account.
+   *
+   * Bursts are the shape upstream reads as automation, and a run of fake 429s is
+   * what precedes a real ban. The default (1.5s) is far below any interactive
+   * need and only bites when several conversations fire at once.
+   * `DSH_AGY_MIN_REQUEST_INTERVAL_MS` overrides it; 0 disables the throttle.
+   */
+  private async throttle(session: AgyAccountSession): Promise<void> {
+    const interval = minRequestIntervalMs()
+    if (interval <= 0) return
+    const key = session.account.email ?? session.account.id ?? 'default'
+    const previous = this.lastAttemptAt.get(key)
+    if (previous !== undefined) {
+      const wait = previous + interval - Date.now()
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+    this.lastAttemptAt.set(key, Date.now())
   }
 
   private async resolveRequestImages(options: GenerateOptions): Promise<Map<string, AgyResolvedImage>> {
@@ -582,6 +625,7 @@ export class AgyAdapter extends LlmAdapter {
     const MAX_MALFORMED_RETRIES = 3
 
     for (let malformedAttempt = 0; ; malformedAttempt++) {
+      await this.throttle(session)
       const attemptStartedAt = Date.now()
       const { response, bodyText } = await sendAttempt(attemptStartedAt)
 
