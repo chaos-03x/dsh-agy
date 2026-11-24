@@ -19,9 +19,9 @@ import type { ThinkingBudgets } from './thinking-types.ts'
 import type { QuotaGroup } from './types.ts'
 import type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 import type { UsageCounters, UsageSource } from './usage-types.ts'
-import type { ClashStatus } from './clash/types.ts'
+import type { ClashProbe, ClashStatus } from './clash/types.ts'
 
-export type { ClashStatus } from './clash/types.ts'
+export type { ClashProbe, ClashStatus } from './clash/types.ts'
 
 export type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 export type { QuotaGroup, QuotaWindow } from './types.ts'
@@ -429,6 +429,13 @@ export interface AgyRpcMethods {
   }
   /** Pin the agy group to one node. */
   'clash.select': { payload: { node: string }; result: ClashStatus }
+  /**
+   * Measure every node against the agy endpoint, on demand.
+   *
+   * mihomo owns the periodic probing; this reads its current ranking so the
+   * panel can answer "is my subscription actually able to reach Antigravity".
+   */
+  'clash.probe': { payload: Record<string, never>; result: ClashProbe }
   /** Stop and start the core (re-fetches the subscription). */
   'clash.restart': { payload: Record<string, never>; result: ClashStatus }
 }

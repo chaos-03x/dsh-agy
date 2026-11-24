@@ -88,12 +88,24 @@ describe('buildRuntimeConfig', () => {
     expect(config['tproxy-port']).toBeUndefined()
   })
 
+  it('adds an auto group that probes the agy endpoint, and puts it first', () => {
+    const groups = config['proxy-groups'] as Array<Record<string, unknown>>
+    const auto = groups.find((group) => group.name === 'agy-auto')
+    expect(auto).toBeDefined()
+    expect(auto?.type).toBe('url-test')
+    expect(auto?.url).toBe('https://cloudcode-pa.googleapis.com/')
+    // The root path answers 404; matching it proves TLS + Google's front door.
+    expect(auto?.['expected-status']).toBe(404)
+    expect(auto?.lazy).toBe(false)
+    const select = groups.find((group) => group.name === '节点选择')
+    expect((select?.proxies as string[])[0]).toBe('agy-auto')
+  })
+
   it('never enables fake-ip, which would hand agy unroutable 198.18.x addresses', () => {
     expect((config.dns as Record<string, unknown>)['enhanced-mode']).toBe('normal')
   })
 
-  it('points geodata at a mirror and disables auto-update', () => {
-    // Without this the core blocks on its first start downloading country.mmdb
+  it('points geodata at a mirror and disables auto-update', () => {    // Without this the core blocks on its first start downloading country.mmdb
     // from GitHub and never opens its controller inside the readiness window.
     const geox = config['geox-url'] as Record<string, string> | undefined
     expect(geox?.mmdb).toMatch(/^https:\/\//)

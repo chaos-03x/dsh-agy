@@ -93,12 +93,40 @@ export function pickGroup(profile: SubscriptionProfile, preferred: string): Sele
 }
 
 /**
+ * Name of the synthesized auto-select group.
+ *
+ * mihomo owns health checking: a `url-test` group re-probes on its own interval
+ * and re-picks the best node. Rebuilding that in the plugin would mean a second
+ * timer, a second state machine and a second source of truth for "which node is
+ * good", so the plugin only synthesizes the group and reads its answer.
+ */
+export const AUTO_GROUP = 'agy-auto'
+
+/**
+ * Probe target for that group.
+ *
+ * It is the host agy actually talks to: a node that cannot reach Cloud Code is
+ * useless here even if it reaches gstatic. The root path answers 404, so the
+ * expected status says "Google's front door answered" — a TLS failure or an
+ * intercepted 200 both fail the test, which is the discrimination we want.
+ */
+export const AUTO_PROBE_URL = 'https://cloudcode-pa.googleapis.com/'
+export const AUTO_PROBE_EXPECTED_STATUS = 404
+
+/** Per-node probe interval, in seconds. */
+export const AUTO_PROBE_INTERVAL_S = 120
+
+/**
  * Build the runtime config document.
  *
  * `rules` keeps the provider's routing (so a subscription's DIRECT rules still
  * bypass the proxy) but always ends with a catch-all to the selected group, and
  * the DNS block is pinned to `redir-host`-free minimal settings: fake-ip would
  * hand agy a 198.18.x address it then tries to dial directly.
+ *
+ * The select group also gains {@link AUTO_GROUP} as its FIRST member, so the
+ * default route is "best measured node for agy" while manual pinning stays one
+ * click away.
  */
 export function buildRuntimeConfig(input: RuntimeConfigInput): Record<string, unknown> {
   const { profile, mixedPort, controllerPort, controllerSecret } = input
@@ -109,6 +137,7 @@ export function buildRuntimeConfig(input: RuntimeConfigInput): Record<string, un
   if (!rules.some((r) => r.trim().toUpperCase().startsWith('MATCH,'))) {
     rules.push(`MATCH,${group?.name ?? (profile.proxies[0]?.name ?? 'DIRECT')}`)
   }
+  const groups = withAutoGroup(profile.groups, group?.name ?? '', profile.proxies.map((proxy) => proxy.name))
   return {
     'mixed-port': mixedPort,
     'allow-lan': false,
@@ -139,9 +168,48 @@ export function buildRuntimeConfig(input: RuntimeConfigInput): Record<string, un
       nameserver: ['223.5.5.5', '1.1.1.1'],
     },
     proxies: profile.proxies,
-    'proxy-groups': profile.groups,
+    'proxy-groups': groups,
     rules,
   }
+}
+
+/**
+ * Insert the synthesized auto group into the chosen selector.
+ *
+ * Members are copied from that selector rather than from the whole proxy list: a
+ * subscription's selector is exactly "the nodes this profile considers usable",
+ * and it may deliberately exclude expired or relay-only entries. A profile with
+ * no selector gets nothing — inventing one would change routing behind the
+ * user's back.
+ */
+export function withAutoGroup(
+  groups: SubscriptionProfile['groups'],
+  selectName: string,
+  nodeNames: readonly string[],
+): SubscriptionProfile['groups'] {
+  if (selectName === '') return groups
+  const target = groups.find((group) => group.name === selectName)
+  if (target === undefined) return groups
+  // Real nodes only. A selector usually lists other GROUPS too (auto/direct/
+  // failover), and copying those would make the synthesized group reference the
+  // selector that references it — a cycle mihomo silently drops, taking the
+  // whole auto group with it.
+  const members = (target.proxies ?? []).filter(
+    (name) => name !== AUTO_GROUP && nodeNames.includes(name),
+  )
+  if (members.length === 0) return groups
+  if (groups.some((group) => group.name === AUTO_GROUP)) return groups
+  target.proxies = [AUTO_GROUP, ...members]
+  return [...groups, {
+    name: AUTO_GROUP,
+    type: 'url-test',
+    proxies: members,
+    url: AUTO_PROBE_URL,
+    'expected-status': AUTO_PROBE_EXPECTED_STATUS,
+    interval: AUTO_PROBE_INTERVAL_S,
+    tolerance: 50,
+    lazy: false,
+  }]
 }
 
 /** Serialize the runtime config (kept separate so tests can assert on the text). */

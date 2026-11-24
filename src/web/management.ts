@@ -35,6 +35,7 @@ import type {
   AccountUsageView,
   AccountView,
   AgyRpcMethod,
+  ClashProbe,
   ClashStatus,
   ModelView,
   MultimodalView,
@@ -132,6 +133,7 @@ export interface AgyManagementOptions {
     configure: (patch: { enabled?: boolean; subscriptionUrl?: string; autoRotate?: boolean }) => void
     select: (node: string) => Promise<void>
     restart: (refresh?: boolean) => Promise<void>
+    probe: () => Promise<ClashProbe>
   }
 }
 
@@ -708,6 +710,14 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         fail(error instanceof Error ? error.message : String(error))
       }
       return clash.status()
+    },
+
+    'clash.probe': async () => {
+      try {
+        return await clash.probe()
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
     },
 
     'clash.restart': async () => {

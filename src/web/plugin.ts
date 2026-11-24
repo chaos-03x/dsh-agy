@@ -196,7 +196,8 @@ async function registerAgyWeb(ctx: Context, webServer: WebServerLike): Promise<(
       status: () => clash.status(),
       configure: (patch) => { clash.configure(patch) },
       select: (node) => clash.select(node),
-      restart: () => clash.restart(),
+      restart: (refresh) => clash.restart(refresh),
+      probe: () => clash.probe(),
     },
     // The adapter's *unfiltered* catalog, so a hidden model still appears in
     // the settings list alongside the switch that un-hides it.
