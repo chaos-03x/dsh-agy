@@ -32,6 +32,21 @@ export interface ClashState {
 }
 
 /** What the settings panel renders. Never includes the subscription URL or the secret. */
+/** One measured node, as the auto group reports it. */
+export interface ClashProbeNode {
+  name: string
+  /** Round-trip ms; 0 means the probe failed. */
+  ms: number
+}
+
+/** Result of one on-demand probe of the synthesized auto group. */
+export interface ClashProbe {
+  total: number
+  available: number
+  best: ClashProbeNode | null
+  nodes: ClashProbeNode[]
+}
+
 export interface ClashStatus {
   enabled: boolean
   running: boolean

@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { mkdtempSync, readFileSync, statSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ClashController } from '../src/clash/controller.ts'
@@ -17,9 +18,9 @@ proxies:
   - { name: hk-01, type: ss, server: 1.1.1.1, port: 443, cipher: aes-128-gcm, password: p }
   - { name: jp-01, type: ss, server: 2.2.2.2, port: 443, cipher: aes-128-gcm, password: p }
 proxy-groups:
-  - { name: 节点选择, type: select, proxies: [hk-01, jp-01] }
+  - { name: 鑺傜偣閫夋嫨, type: select, proxies: [hk-01, jp-01] }
 rules:
-  - MATCH,节点选择
+  - MATCH,鑺傜偣閫夋嫨
 `
 
 function fakeCore(): CoreProcessLike & { killed: boolean } {
@@ -61,6 +62,10 @@ function harness(overrides: { enabled?: boolean, subscriptionUrl?: string, now?:
       if (url.includes('/proxies/') && !url.includes('/delay')) {
         return new Response(JSON.stringify({ now: selected.at(-1) ?? 'hk-01', all: ['hk-01', 'jp-01'] }))
       }
+      if (url.includes('/group/') && url.includes('/delay')) {
+        // jp-01 is faster: rotation must prefer a MEASURED node over list order.
+        return new Response(JSON.stringify({ 'hk-01': 120, 'jp-01': 40 }))
+      }
       return new Response(JSON.stringify({}))
     }) as typeof fetch,
   })
@@ -91,15 +96,14 @@ function harness(overrides: { enabled?: boolean, subscriptionUrl?: string, now?:
 }
 
 describe('ClashManager lifecycle', () => {
-  it('does nothing while disabled — no spawn, no proxy url', async () => {
+  it('does nothing while disabled 鈥?no spawn, no proxy url', async () => {
     const h = harness({ enabled: false })
     expect(await h.manager.ensure()).toBeUndefined()
     expect(h.core.killed).toBe(false)
   })
 
   it('fails closed: enabled but not started still yields the loopback url', () => {
-    // Returning undefined here would send agy traffic direct over the host IP —
-    // the leak this whole feature exists to prevent. A refused connection is the
+    // Returning undefined here would send agy traffic direct over the host IP 鈥?    // the leak this whole feature exists to prevent. A refused connection is the
     // acceptable failure; a silent direct request is not.
     const h = harness({ enabled: true, subscriptionUrl: 'https://sub.example/tok' })
     expect(h.manager.proxyUrlFor()).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
@@ -148,8 +152,52 @@ describe('ClashManager lifecycle', () => {
     expect(h.selected.at(-1)).toBe('hk-01')
   })
 
-  it('serves restarts from the cached profile and only re-fetches on explicit refresh', async () => {
+  it('probes the auto group against the agy endpoint and reports availability', async () => {
     const h = harness({ enabled: true, subscriptionUrl: 'https://sub.example/tok' })
+    await h.manager.ensure()
+    const probe = await h.manager.probe()
+    expect(probe.total).toBe(2)
+    expect(probe.available).toBe(2)
+    expect(probe.best?.name).toBe('jp-01')
+  })
+
+  it('rotates to the fastest MEASURED node, not simply the next in the list', async () => {
+    // When the selector currently rides the auto group, "next in list" is
+    // meaningless 鈥?there is no index. Order is jp-01 (40ms) then hk-01.
+    const h = harness({ enabled: true, subscriptionUrl: 'https://sub.example/tok' })
+    await h.manager.ensure()
+    h.manager.select('鈾伙笍 鑷姩閫夋嫨').catch(() => {})
+    await h.manager.rotate()
+    expect(h.selected.at(-1)).toBe('jp-01')
+  })
+
+  it('moves to free loopback ports when the configured ones are taken', async () => {
+    // Two DSH processes (desktop + web server) each build a runtime, so a fixed
+    // port is a collision, not a constant: the second core would bind-fail while
+    // the readiness probe talked to the FIRST one's controller.
+    const blocker = createServer(() => {})
+    await new Promise<void>((resolve) => { blocker.listen(0, '127.0.0.1', resolve) })
+    const taken = (blocker.address() as { port: number }).port
+    try {
+      const h = harness({ enabled: true, subscriptionUrl: 'https://sub.example/tok' })
+      const manager = new ClashManager({
+        stateFile: h.stateFile.replace('agy-clash.json', 'ports.json'),
+        configFile: h.configFile.replace('config.yaml', 'ports.yaml'),
+        mixedPort: taken,
+        resolveCore: async () => '/fake/mihomo',
+        spawnCore: () => fakeCore(),
+        controllerFor: () => new ClashController({ port: 1, secret: 's', fetchImpl: (async () => new Response(JSON.stringify({ version: '1' }))) as typeof fetch }),
+        fetchImpl: (async () => new Response(PROFILE)) as typeof fetch,
+      })
+      manager.configure({ enabled: true, subscriptionUrl: 'https://sub.example/tok' })
+      await manager.ensure()
+      expect(manager.snapshot().mixedPort).not.toBe(taken)
+    } finally {
+      blocker.close()
+    }
+  })
+
+  it('serves restarts from the cached profile and only re-fetches on explicit refresh', async () => {    const h = harness({ enabled: true, subscriptionUrl: 'https://sub.example/tok' })
     await h.manager.ensure()
     expect(h.fetches()).toBe(1)
     h.manager.stop()
@@ -184,3 +232,4 @@ describe('ClashManager lifecycle', () => {
     expect((await manager.status()).lastError).toMatch(/subscription/i)
   })
 })
+

@@ -18,8 +18,9 @@
 
 import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { dirname } from 'node:path'
-import { buildRuntimeConfig, parseSubscription, pickGroup, serializeRuntimeConfig } from './config.ts'
+import { AUTO_GROUP, AUTO_PROBE_URL, buildRuntimeConfig, parseSubscription, pickGroup, serializeRuntimeConfig } from './config.ts'
 import type { SubscriptionProfile } from './config.ts'
 import { ClashController, subscriptionHostForDisplay } from './controller.ts'
 import { resolveCoreBinary } from './core.ts'
@@ -31,6 +32,8 @@ import {
   DEFAULT_MIXED_PORT,
   ROTATE_MIN_INTERVAL_MS,
   emptyClashState,
+  type ClashProbe,
+  type ClashProbeNode,
   type ClashState,
   type ClashStatus,
 } from './types.ts'
@@ -50,6 +53,9 @@ export interface ClashManagerOptions {
   spawnCore?: (bin: string, args: string[]) => CoreProcessLike
   resolveCore?: () => Promise<string>
   now?: () => number
+  /** Override the persisted port (tests, or a caller that owns the numbering). */
+  mixedPort?: number
+  controllerPort?: number
 }
 
 /** Fields the settings panel may change. */
@@ -86,6 +92,8 @@ export class ClashManager {
     this.resolveCore = options.resolveCore ?? (() => resolveCoreBinary())
     this.now = options.now ?? (() => Date.now())
     this.state = this.store.load()
+    if (options.mixedPort !== undefined) this.state.mixedPort = options.mixedPort
+    if (options.controllerPort !== undefined) this.state.controllerPort = options.controllerPort
   }
 
   /** Merge settings and persist immediately (the panel saves per action). */
@@ -127,6 +135,7 @@ export class ClashManager {
   async start(refresh = false): Promise<void> {
     if (this.child !== undefined) return
     try {
+      await this.ensurePorts()
       const profile = await this.loadProfile(refresh)
       const config = buildRuntimeConfig({
         profile,
@@ -196,8 +205,18 @@ export class ClashManager {
       const controller = this.controller()
       const current = await controller.group(group)
       if (current.all.length < 2) return false
-      const index = current.all.indexOf(current.now)
-      const next = current.all[(index + 1 + current.all.length) % current.all.length]
+      // Measured node first: the selector usually rides the auto group, where
+      // "the next in the list" has no meaning — list order is the provider's
+      // packaging order, not quality. The auto group's own ranking is the only
+      // evidence of which node currently answers, so prefer it and fall back to
+      // list order only when the probe says nothing.
+      const measured = await this.probe().catch(() => undefined)
+      const ranked = (measured?.nodes ?? []).filter((node) => node.ms > 0).map((node) => node.name)
+      const next = ranked.find((name) => name !== current.now)
+        ?? (() => {
+          const index = current.all.indexOf(current.now)
+          return current.all[(index + 1 + current.all.length) % current.all.length]
+        })()
       if (next === undefined || next === current.now) return false
       await controller.select(group, next)
       this.state.node = next
@@ -211,6 +230,32 @@ export class ClashManager {
       this.state.lastError = error instanceof Error ? error.message : String(error)
       this.store.save(this.state)
       return false
+    }
+  }
+
+  /**
+   * Probe every node in the auto group against the agy endpoint, on demand.
+   *
+   * On demand rather than on a timer: mihomo already re-tests the group on its
+   * own interval, so a plugin-side poll would be a second source of truth. This
+   * exists for the panel (and for `rotate`) to read the CURRENT ranking.
+   */
+  async probe(): Promise<ClashProbe> {
+    const delays = await this.controller().groupDelay(AUTO_GROUP, AUTO_PROBE_URL, 5_000)
+    const nodes: ClashProbeNode[] = Object.entries(delays)
+      .map(([name, ms]) => ({ name, ms: typeof ms === 'number' ? ms : 0 }))
+      .sort((a, b) => {
+        // Unreachable nodes rank last rather than first.
+        if (a.ms === 0 && b.ms !== 0) return 1
+        if (b.ms === 0 && a.ms !== 0) return -1
+        return a.ms - b.ms
+      })
+    const available = nodes.filter((node) => node.ms > 0).length
+    return {
+      total: nodes.length,
+      available,
+      best: available > 0 ? nodes[0]! : null,
+      nodes,
     }
   }
 
@@ -258,6 +303,23 @@ export class ClashManager {
 
   private controller(): ClashController {
     return this.controllerFor(this.state.controllerPort, this.state.controllerSecret)
+  }
+
+  /**
+   * Claim two free loopback ports, reusing the persisted pair when possible.
+   *
+   * A fixed port is a collision, not a constant: the desktop and the web server
+   * each build a runtime, so the second core would fail to bind while the
+   * readiness probe talked to the FIRST core's controller — a green start over
+   * somebody else's node list.
+   */
+  private async ensurePorts(): Promise<void> {
+    const mixed = await pickFreePort(this.state.mixedPort)
+    const controller = await pickFreePort(this.state.controllerPort, mixed)
+    if (mixed === this.state.mixedPort && controller === this.state.controllerPort) return
+    this.state.mixedPort = mixed
+    this.state.controllerPort = controller
+    this.store.save(this.state)
   }
 
   private async loadProfile(refresh = false): Promise<SubscriptionProfile> {
@@ -342,4 +404,30 @@ export class ClashManager {
 /** Convenience for tests and for a cold `status()` before any core exists. */
 export function initialClashState(): ClashState {
   return emptyClashState()
+}
+
+/**
+ * A free loopback port: `desired` when it still binds, otherwise an OS-assigned
+ * one. `avoid` keeps the two ports from colliding with each other.
+ */
+export async function pickFreePort(desired: number, avoid?: number): Promise<number> {
+  const attempt = (port: number): Promise<number | undefined> => new Promise((resolve) => {
+    const server = createServer()
+    server.unref()
+    server.once('error', () => { resolve(undefined) })
+    server.listen({ port, host: '127.0.0.1', exclusive: true }, () => {
+      const address = server.address()
+      const chosen = typeof address === 'object' && address !== null ? address.port : undefined
+      server.close(() => { resolve(chosen) })
+    })
+  })
+  if (desired !== avoid) {
+    const ok = await attempt(desired)
+    if (ok !== undefined) return ok
+  }
+  for (let tries = 0; tries < 5; tries += 1) {
+    const free = await attempt(0)
+    if (free !== undefined && free !== avoid) return free
+  }
+  throw new Error('no free loopback port available for the proxy core')
 }

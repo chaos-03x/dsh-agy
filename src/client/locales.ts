@@ -298,6 +298,8 @@ export const zh = {
   proxyAutoRotate: '传输失败时自动切节点',
   proxyFetchedAt: '订阅更新于 {time}',
   proxyNoNodes: '内核启动后显示节点列表。',
+  proxyProbe: '测速',
+  proxyProbeResult: '可用 {available}/{total} · 最优 {best}',
   proxyError: '内核错误：{message}',
 } satisfies Record<string, string>
 
@@ -569,5 +571,7 @@ export const en: Record<AgyLocaleKey, string> = {
   proxyAutoRotate: 'Rotate node on transport failure',
   proxyFetchedAt: 'Subscription updated {time}',
   proxyNoNodes: 'The node list appears once the core is running.',
+  proxyProbe: 'Test nodes',
+  proxyProbeResult: '{available}/{total} reachable · best {best}',
   proxyError: 'Core error: {message}',
 }

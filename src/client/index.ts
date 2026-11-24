@@ -32,7 +32,7 @@ import { en, zh, type AgyLocaleKey } from './locales.ts'
 import { h } from './element.ts'
 import { AgyQuotaBadge } from './quota-badge.ts'
 import { agoText, formatQuotaReset, quotaColor, stateLabel, untilText, windowLabel, MINUTE_MS, HOUR_MS } from './quota-view.ts'
-import type { AccountView, AgyRpcClient, AgyRpcResult, ClashStatus, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
+import type { AccountView, AgyRpcClient, AgyRpcResult, ClashProbe, ClashStatus, ModelView, MultimodalView, StatsView, ThinkingBudgets, UiPrefsView } from '../rpc-contract.ts'
 import { CLAUDE_BUDGET_MAX, CLAUDE_BUDGET_MIN, THINKING_BUDGET_MAX, THINKING_BUDGET_MIN, THINKING_LEVELS } from '../thinking-types.ts'
 import { MULTIMODAL_DEFAULT_MB, MULTIMODAL_MAX_MB, MULTIMODAL_MIN_MB } from '../multimodal-types.ts'
 import type { UsageCounters } from '../usage-types.ts'
@@ -1441,6 +1441,8 @@ function ThinkingBudgetCard(props: { rpc: AgyRpcClient, t: T }): ReactNode {
 function ProxyTab(props: { rpc: AgyRpcClient, t: T }): ReactNode {
   const { rpc, t } = props
   const [status, setStatus] = useState<ClashStatus | null>(null)
+  const [probe, setProbe] = useState<ClashProbe | null>(null)
+  const [probing, setProbing] = useState(false)
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
@@ -1483,6 +1485,22 @@ function ProxyTab(props: { rpc: AgyRpcClient, t: T }): ReactNode {
         setError(caught instanceof Error ? caught.message : String(caught))
       } finally {
         if (alive.current) setBusy(false)
+      }
+    })()
+  }
+
+  const runProbe = (): void => {
+    setProbing(true)
+    void (async () => {
+      try {
+        const next = await rpc.call('clash.probe', {})
+        if (!alive.current) return
+        setProbe(next)
+      } catch (caught) {
+        if (!alive.current) return
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        if (alive.current) setProbing(false)
       }
     })()
   }
@@ -1539,6 +1557,17 @@ function ProxyTab(props: { rpc: AgyRpcClient, t: T }): ReactNode {
                 run(() => rpc.call('clash.select', { node }))
               },
             }, nodes.map((node) => h('option', { key: node, value: node }, node))))),
+        h('div', { className: 'agy-rowactions' },
+          // On demand, never on a timer: mihomo already re-probes the group on
+          // its own interval, so a second poll would be a second source of truth.
+          button(t('proxyProbe'), runProbe, { size: 'sm', disabled: probing || !running }),
+          probe === null
+            ? null
+            : h('span', { className: 'agy-hint' }, t('proxyProbeResult', {
+              available: probe.available,
+              total: probe.total,
+              best: probe.best?.name ?? '—',
+            }))),
         h(Switch, {
           label: t('proxyAutoRotate'),
           checked: status?.autoRotate === true,
