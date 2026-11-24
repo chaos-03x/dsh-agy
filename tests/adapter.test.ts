@@ -2400,6 +2400,61 @@ describe('AgyAdapter', () => {
     }
   })
 
+  it('does not cool the account for a fake 429 when its quota is demonstrably unspent', async () => {
+    // Upstream disguises risk-control rejections as RESOURCE_EXHAUSTED. Cooling
+    // and rotating on those is what precedes account bans (community reports), so
+    // the account is left alone and the failure stays retryable instead.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+      { status: 429 },
+    )))
+    const reportFailure = vi.fn(async () => {})
+    const adapter = new AgyAdapter({
+      getSession: async () => session({
+        account: {
+          email: 'q@x',
+          refresh: 'rt|p',
+          projectId: 'p',
+          addedAt: 0,
+          lastUsed: 0,
+          cachedQuota: { gemini: { remainingFraction: 0.9, resetTime: new Date(Date.now() + 3_600_000).toISOString() } },
+        } as never,
+      }),
+      reportFailure,
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    expect(reportFailure).not.toHaveBeenCalled()
+  })
+
+  it('keeps a 429 terminal when the account really has no quota left', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+      { status: 429 },
+    )))
+    const reportFailure = vi.fn(async () => {})
+    const adapter = new AgyAdapter({
+      getSession: async () => session({
+        account: {
+          email: 'q@x',
+          refresh: 'rt|p',
+          projectId: 'p',
+          addedAt: 0,
+          lastUsed: 0,
+          cachedQuota: { gemini: { remainingFraction: 0, resetTime: new Date(Date.now() + 3_600_000).toISOString() } },
+        } as never,
+      }),
+      reportFailure,
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toMatchObject({ code: 'QUOTA' })
+    expect(reportFailure).toHaveBeenCalled()
+  })
+
   it('streams a response and reports no failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
