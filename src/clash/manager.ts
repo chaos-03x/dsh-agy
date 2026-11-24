@@ -26,6 +26,7 @@ import { ClashController, subscriptionHostForDisplay } from './controller.ts'
 import { resolveCoreBinary } from './core.ts'
 import { ClashStore } from './store.ts'
 import { proxiedFetch } from '../proxy.ts'
+import { regionOfNode } from './region.ts'
 import {
   CORE_READY_TIMEOUT_MS,
   DEFAULT_CONTROLLER_PORT,
@@ -212,7 +213,17 @@ export class ClashManager {
       // list order only when the probe says nothing.
       const measured = await this.probe().catch(() => undefined)
       const ranked = (measured?.nodes ?? []).filter((node) => node.ms > 0).map((node) => node.name)
-      const next = ranked.find((name) => name !== current.now)
+      // Geography before speed: Google scores an account's LOCATION (current IP
+      // plus its login history), so hopping countries on consecutive failures is
+      // the migration pattern the community reports before a soft block. Stay in
+      // the current node's region while it has a live alternative; only cross a
+      // border when it does not.
+      const region = regionOfNode(current.now)
+      const sameRegion = region === undefined
+        ? undefined
+        : ranked.find((name) => name !== current.now && regionOfNode(name) === region)
+      const next = sameRegion
+        ?? ranked.find((name) => name !== current.now)
         ?? (() => {
           const index = current.all.indexOf(current.now)
           return current.all[(index + 1 + current.all.length) % current.all.length]
