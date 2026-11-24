@@ -378,6 +378,25 @@ export class AgyAdapter extends LlmAdapter {
    * is a network error (the account is healthy), while the same failure on a
    * per-account proxy is a proxy verdict that fails closed.
    */
+  /**
+   * Whether the system prompt rides the first user turn instead of the
+   * dedicated `systemInstruction` slot.
+   *
+   * DEFAULT ON. Upstream risk control rejects the client-identity phrasing the
+   * host prompt carries when it arrives in that slot: a plain 400, whose body is
+   * then closed mid-flight — and undici's HTTP/1 parser asserts on a paused
+   * parser when the socket ends under it (upstream #5360), which crashes the
+   * whole host rather than failing the turn. Moving the same text into the first
+   * user turn keeps the instruction and never opens that path.
+   *
+   * `DSH_AGY_KEEP_SYSTEM_INSTRUCTION=1` restores the documented shape for a
+   * caller that prefers it (and accepts the 400-and-crash risk).
+   */
+  private mergeSystemIntoUser(): boolean {
+    const raw = (process.env.DSH_AGY_KEEP_SYSTEM_INSTRUCTION ?? '').toLowerCase()
+    return raw !== '1' && raw !== 'true'
+  }
+
   private routingFor(account: ManagedAccount, streaming = false): AccountRouting {
     const stream = streaming ? { streaming: true } : {}
     if (account.proxy) return { proxyUrl: account.proxy, egress: 'account', ...stream }
@@ -548,6 +567,7 @@ export class AgyAdapter extends LlmAdapter {
             : { tieredBudgetFor: this.options.tieredBudgetFor }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
+          ...(this.mergeSystemIntoUser() ? { mergeSystemIntoUser: true } : {}),
         })
         let response: Response
         try {

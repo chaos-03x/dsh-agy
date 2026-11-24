@@ -2412,6 +2412,54 @@ describe('AgyAdapter', () => {
     expect(onTransportFailure).toHaveBeenCalledTimes(1)
   })
 
+  it('sends the system prompt inside the first user turn by default', async () => {
+    // Risk control: the dedicated system slot is rejected with a bare 400 whose
+    // body is closed mid-flight, and undici's parser asserts on that (upstream
+    // #5360) — crashing the host. Folding the text into the first user turn
+    // keeps the instruction and never opens that path.
+    const bodies: string[] = []
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ''))
+      return new Response(sseStream(['data: [DONE]']), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+    })
+    for await (const _ of adapter.stream(generateOptions({
+      system: 'You are a test assistant.',
+      messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+    }))) void _
+
+    const body = JSON.parse(bodies[0]!) as {
+      request: { systemInstruction?: unknown, contents: Array<{ role: string, parts: Array<{ text: string }> }> }
+    }
+    expect(body.request.systemInstruction).toBeUndefined()
+    expect(body.request.contents[0]?.parts.some((part) => part.text.includes('You are a test assistant.'))).toBe(true)
+  })
+
+  it('keeps the documented systemInstruction shape behind the escape hatch', async () => {
+    process.env.DSH_AGY_KEEP_SYSTEM_INSTRUCTION = '1'
+    try {
+      const bodies: string[] = []
+      vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(String(init?.body ?? ''))
+        return new Response(sseStream(['data: [DONE]']), { status: 200 })
+      }))
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+      })
+      for await (const _ of adapter.stream(generateOptions({ system: 'You are a test assistant.' }))) void _
+      const body = JSON.parse(bodies[0]!) as { request: { systemInstruction?: unknown } }
+      expect(body.request.systemInstruction).toBeDefined()
+    } finally {
+      delete process.env.DSH_AGY_KEEP_SYSTEM_INSTRUCTION
+    }
+  })
+
   it('streams a response and reports no failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',

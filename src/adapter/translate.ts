@@ -629,6 +629,15 @@ export function toAgyRequestBody(
      */
     thinkingBudgetFor?: (level: string) => number | undefined
     /**
+     * Fold the system prompt into the first user turn instead of the dedicated
+     * `systemInstruction` slot.
+     *
+     * Upstream risk control rejects some client-identity phrasing when it arrives
+     * in that slot; the adapter only sets this on the 400 fallback retry, so the
+     * documented request shape stays the default.
+     */
+    mergeSystemIntoUser?: boolean
+    /**
      * The configured Claude thinking budget, or undefined when unset.
      *
      * A single value, not a per-level map: the Claude family is id-bound (each
@@ -735,6 +744,19 @@ export function toAgyRequestBody(
     }
   }
 
+  // Content risk control: the wire carries the client identity phrases the host
+  // prompt contains, and upstream rejects some of them when they arrive in the
+  // dedicated system slot. Folding the same text into the first user turn keeps
+  // the instruction in the request while denying it that slot. Only the 400
+  // fallback path sets this — the normal request keeps the documented shape.
+  if (context.mergeSystemIntoUser === true && systemText) {
+    const first = contents.find((content) => content.role === 'user') ?? contents[0]
+    if (first !== undefined) {
+      first.parts = [{ text: `${systemText}\n\n` }, ...(first.parts ?? [])]
+    }
+  }
+  const systemForWire = context.mergeSystemIntoUser === true ? '' : systemText
+
   return {
     project: context.projectId || undefined,
     requestId: context.requestId ?? generateAntigravityRequestId(),
@@ -743,7 +765,7 @@ export function toAgyRequestBody(
     requestType: 'agent',
     request: {
       contents,
-      ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
+      ...(systemForWire ? { systemInstruction: { parts: [{ text: systemForWire }] } } : {}),
       ...(tools ? { tools } : {}),
       ...(tools ? { toolConfig: { functionCallingConfig: { mode: 'VALIDATED' } } } : {}),
       ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),

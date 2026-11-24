@@ -24,8 +24,8 @@ importers:
         specifier: ^4.1.2
         version: 4.1.2
       undici:
-        specifier: ^7.29.0
-        version: 7.29.0
+        specifier: 7.30.2
+        version: 7.30.2
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
@@ -2051,8 +2051,8 @@ packages:
   undici-types@7.18.2:
     resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
 
-  undici@7.29.0:
-    resolution: {integrity: sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==}
+  undici@7.30.2:
+    resolution: {integrity: sha512-mLyPQnHwUxaM/rideoK/+KL8DaAJLRl4aBCfmX444aCSLnIaomqPLtNRe2jdCYcsk5wZzXrDIQC8ZeYNRAYyIA==}
     engines: {node: '>=20.18.1'}
 
   uri-js@4.4.1:
@@ -4066,7 +4066,7 @@ snapshots:
 
   undici-types@7.18.2: {}
 
-  undici@7.29.0: {}
+  undici@7.30.2: {}
 
   uri-js@4.4.1:
     dependencies:
