@@ -1,0 +1,7 @@
+proxies:
+  - { name: local-a, type: http, server: 127.0.0.1, port: 7890 }
+  - { name: local-b, type: http, server: 127.0.0.1, port: 7890 }
+proxy-groups:
+  - { name: 节点选择, type: select, proxies: [local-a, local-b] }
+rules:
+  - MATCH,节点选择

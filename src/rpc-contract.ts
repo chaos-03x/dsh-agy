@@ -19,6 +19,9 @@ import type { ThinkingBudgets } from './thinking-types.ts'
 import type { QuotaGroup } from './types.ts'
 import type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 import type { UsageCounters, UsageSource } from './usage-types.ts'
+import type { ClashStatus } from './clash/types.ts'
+
+export type { ClashStatus } from './clash/types.ts'
 
 export type { SetUiPrefsPayload, UiPrefsView } from './ui-prefs-types.ts'
 export type { QuotaGroup, QuotaWindow } from './types.ts'
@@ -403,6 +406,31 @@ export interface AgyRpcMethods {
   }
   'ui.prefs.get': { payload: Record<string, never>; result: UiPrefsView }
   'ui.prefs.set': { payload: SetUiPrefsPayload; result: UiPrefsView }
+
+  /**
+   * The embedded proxy core (see `clash/manager.ts`).
+   *
+   * Separate from `account.proxy` on purpose: that one is a per-account HTTP
+   * proxy the user types, while this is a subscription-driven core the plugin
+   * owns. `status` never carries the subscription URL or the controller secret —
+   * only the redacted host.
+   */
+  'clash.status': { payload: Record<string, never>; result: ClashStatus }
+  /**
+   * Save settings and apply them (start, restart, or stop the core).
+   *
+   * Applying is part of this call rather than a second `clash.restart`: the
+   * panel has one save button, and a save that only persisted would leave the
+   * UI claiming a state the core is not in.
+   */
+  'clash.configure': {
+    payload: { enabled?: boolean; subscriptionUrl?: string; autoRotate?: boolean }
+    result: ClashStatus
+  }
+  /** Pin the agy group to one node. */
+  'clash.select': { payload: { node: string }; result: ClashStatus }
+  /** Stop and start the core (re-fetches the subscription). */
+  'clash.restart': { payload: Record<string, never>; result: ClashStatus }
 }
 
 /** Every method name, for the host's dispatch guard and the client's typing. */

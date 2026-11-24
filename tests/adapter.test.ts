@@ -2352,6 +2352,66 @@ describe('AgyAdapter', () => {
     })
   })
 
+  it('routes generation through the injected resolver when the account itself has no proxy', async () => {
+    // The embedded-core path: the account carries no per-account proxy, so the
+    // only thing pointing agy at the core is the injected resolver. Losing it
+    // here would silently send generation traffic direct.
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    const fetchSpy = vi.fn(async () => new Response(sseStream(['data: [DONE]']), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (coreProxy) => {
+      const adapter = new AgyAdapter({
+        getSession: async () => session(),
+        reportFailure: async () => {},
+        resolveProxy: () => coreProxy,
+      })
+      for await (const _ of adapter.stream(generateOptions())) void _
+
+      const init = fetchSpy.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined
+      expect(init?.dispatcher).toBe(await dispatcherForAsync(coreProxy, { streaming: true }))
+    })
+  })
+
+  it('lets an account proxy win over the injected resolver', async () => {
+    const { dispatcherForAsync } = await import('../src/proxy.ts')
+    const { withProxyFixture } = await import('./helpers/proxy-fixture.ts')
+    const fetchSpy = vi.fn(async () => new Response(sseStream(['data: [DONE]']), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await withProxyFixture(async (accountProxy) => {
+      const adapter = new AgyAdapter({
+        getSession: async () => session({
+          account: { email: 'a@b.c', refresh: 'rt|p', projectId: 'p', addedAt: 0, lastUsed: 0, proxy: accountProxy },
+        }),
+        reportFailure: async () => {},
+        resolveProxy: () => 'http://127.0.0.1:1',
+      })
+      for await (const _ of adapter.stream(generateOptions())) void _
+
+      const init = fetchSpy.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined
+      expect(init?.dispatcher).toBe(await dispatcherForAsync(accountProxy, { streaming: true }))
+    }, { credentials: 'user:sup3rs3cret' })
+  })
+
+  it('reports a transport failure so the embedded core can rotate nodes', async () => {
+    const fetchSpy = vi.fn(async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:47890') })
+    vi.stubGlobal('fetch', fetchSpy)
+    const onTransportFailure = vi.fn()
+
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async () => {},
+      onTransportFailure,
+    })
+
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toThrow()
+    expect(onTransportFailure).toHaveBeenCalledTimes(1)
+  })
+
   it('streams a response and reports no failure', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',

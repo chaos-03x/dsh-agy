@@ -157,6 +157,32 @@ valid until it expires or you revoke it in your Google account security settings
 
 ## Other things you may care about
 
+### Embedded proxy (Clash subscription)
+
+Settings → **Proxy** gives agy a private egress: paste a Clash subscription URL
+and the plugin downloads a proxy core (mihomo), writes a minimal runtime config
+from your profile, and routes **only this plugin's** requests through it. No
+Clash client has to be installed, and the system proxy, TUN device and any other
+application's traffic are left untouched.
+
+- The core listens on a loopback mixed port; Settings → Proxy shows the port,
+  the node list and the current node.
+- **Rotate on failure**: a transport failure (timeout, refused connection, TLS)
+  moves the group to the next node before the host's own retry re-sends. Quota
+  and content errors do not rotate — another node cannot fix them.
+- The binary is downloaded once from the official mihomo release into
+  `$DSH_HOME/agy/clash/`. `DSH_AGY_CLASH_CORE=/path/to/mihomo` skips the download
+  when you already have a core.
+- The subscription URL and the controller secret live in
+  `$DSH_HOME/agy/agy-clash.json` (0600); the UI only ever shows the redacted host.
+- Turning the switch off stops the core and returns agy to its previous route
+  (per-account proxy, else the environment proxy).
+- v1 accepts a Clash YAML profile (`flag=meta`). Link-only subscriptions
+  (`ss://`, `vmess://`, base64 lists) are not parsed yet.
+
+The core is GPL-3.0 software downloaded at runtime and run as a separate
+process — it is not bundled, and this package stays MIT.
+
 ### Thinking budget (reasoning effort)
 
 A thinking budget is a hidden parameter in the API that controls how hard the
