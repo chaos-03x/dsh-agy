@@ -1415,7 +1415,9 @@ describe('clearCooldown', () => {
       coolingDownUntil: Date.now() + 24 * 60 * 60 * 1000,
       cooldownReason: 'quota-exhausted',
       cooldownSetAt: new Date().toISOString(),
-    }
+      rateLimits: { google: Date.now() + 60_000 },
+      rateLimitResetTimes: { google: Date.now() + 60_000 },
+    } as ManagedAccount
     const store = new InMemoryAccountStore(storage([cooled]))
     const sessions = new AgySessionManager({ store })
 
@@ -1425,6 +1427,10 @@ describe('clearCooldown', () => {
     expect(after.coolingDownUntil).toBeUndefined()
     expect(after.cooldownReason).toBeUndefined()
     expect(after.cooldownSetAt).toBeUndefined()
+    // The family walls gate the pool too: clearing only the cooldown left the
+    // next request saying "temporarily blocked" about a window nothing showed.
+    expect(after.rateLimits).toBeUndefined()
+    expect((after as { rateLimitResetTimes?: unknown }).rateLimitResetTimes).toBeUndefined()
   })
 
   it('rejects an index that does not exist', async () => {
