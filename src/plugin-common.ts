@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { AgyAdapter } from './adapter/adapter.ts'
 import type { AgyAttachmentStore } from './adapter/adapter.ts'
+import { ClashManager } from './clash/manager.ts'
 import { AGY_PROVIDER } from './adapter/models.ts'
 import { ModelVisibility } from './model-visibility.ts'
 import { MultimodalConfigStore } from './multimodal-config.ts'
@@ -99,6 +100,8 @@ export interface AgyRuntime {
   modelVisibility: ModelVisibility
   thinkingBudget: ThinkingBudgetStore
   multimodalConfig: MultimodalConfigStore
+  /** The embedded Clash core that can carry agy's traffic (settings → 代理). */
+  clash: ClashManager
 }
 
 /**
@@ -179,6 +182,19 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   const modelVisibility = new ModelVisibility()
   const thinkingBudget = new ThinkingBudgetStore()
   const multimodalConfig = new MultimodalConfigStore()
+  // The embedded core is built before the adapter: the adapter's routing seam is
+  // synchronous and fail-closed, so the manager has to exist for the very first
+  // request. Starting it is best-effort here and never blocks plugin boot — a
+  // dead core must not stop DSH from starting, only from proxying.
+  const clash = new ClashManager()
+  if (clash.snapshot().enabled) {
+    void clash.ensure().catch((error: unknown) => {
+      ctx.logger.warn(
+        '[dsh-agy] embedded Clash core did not start: '
+        + `${error instanceof Error ? error.message : String(error)} — agy requests will fail until it does`,
+      )
+    })
+  }
   // The adapter's model-list cache is keyed to no account (see
   // `AgyAdapter.invalidateModelCache`), so every event that can switch the
   // account discovery rides must drop it. The adapter does not exist yet when
@@ -206,6 +222,13 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
     claudeBudgetFor: () => thinkingBudget.claudeBudget(),
     tieredBudgetFor: () => thinkingBudget.tieredBudget(),
     maxInlineBytes: () => multimodalConfig.maxInlineBytes(),
+    resolveProxy: () => clash.proxyUrlFor(),
+    onTransportFailure: () => {
+      // Restart-then-rotate: a dead core has no nodes to rotate, so bring it back
+      // first. The failing attempt is already lost — this prepares the HOST's
+      // retry, which is the only retry this project allows.
+      void clash.ensure().then(() => clash.rotate()).catch(() => {})
+    },
     recordUsage: (record) => { stats.record({ ...record, source: 'chat' }) },
   })
   invalidateModelCache = () => { adapter.invalidateModelCache() }
@@ -225,8 +248,11 @@ async function buildAgyRuntime(ctx: Context): Promise<AgyRuntime> {
   process.once('exit', () => {
     stats.flushSync()
     recentStore.flushSync()
+    // A surviving core would keep a listener (and a subscription's partially
+    // spent quota) alive with no way for the user to reach it through DSH.
+    clash.stop()
   })
-  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig }
+  return { store, sessions, adapter, stats, recentStore, modelVisibility, thinkingBudget, multimodalConfig, clash }
 }
 
 export { AGY_PROVIDER }

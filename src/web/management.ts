@@ -35,6 +35,7 @@ import type {
   AccountUsageView,
   AccountView,
   AgyRpcMethod,
+  ClashStatus,
   ModelView,
   MultimodalView,
   RangeBreakdown,
@@ -120,6 +121,18 @@ export interface AgyManagementOptions {
    * effect after a page reload.
    */
   notifyModelsChanged: () => void
+  /**
+   * The embedded proxy core (see `clash/manager.ts`).
+   *
+   * Duck-typed like `thinkingBudget`/`multimodal`: this module needs exactly
+   * these four operations and cannot reach the rest of the manager.
+   */
+  clash: {
+    status: () => Promise<ClashStatus>
+    configure: (patch: { enabled?: boolean; subscriptionUrl?: string; autoRotate?: boolean }) => void
+    select: (node: string) => Promise<void>
+    restart: () => Promise<void>
+  }
 }
 
 export interface AgyManagement {
@@ -166,6 +179,7 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
   const { store, sessions, stats, recentRequests, modelVisibility, listAllModels, invalidateModelCache, baseUrl, notifyModelsChanged } = options
   const thinkingBudget = options.thinkingBudget
   const multimodal = options.multimodal
+  const clash = options.clash
   const uiPrefs = options.uiPrefs ?? new UiPrefsStore()
 
   /** Authorizations issued by `auth.url`, keyed by raw state. */
@@ -653,6 +667,55 @@ export function createAgyManagement(options: AgyManagementOptions): AgyManagemen
         // message names the accepted range, so the caller can correct it.
         fail(error instanceof Error ? error.message : String(error))
       }
+    },
+
+    'clash.status': async () => clash.status(),
+
+    'clash.configure': async (payload) => {
+      const body = payload as { enabled?: unknown; subscriptionUrl?: unknown; autoRotate?: unknown } | undefined
+      if (body?.enabled !== undefined && typeof body.enabled !== 'boolean') fail('enabled must be a boolean')
+      if (body?.autoRotate !== undefined && typeof body.autoRotate !== 'boolean') fail('autoRotate must be a boolean')
+      if (body?.subscriptionUrl !== undefined && typeof body.subscriptionUrl !== 'string') fail('subscriptionUrl must be a string')
+      clash.configure({
+        ...(body?.enabled === undefined ? {} : { enabled: body.enabled as boolean }),
+        ...(body?.subscriptionUrl === undefined ? {} : { subscriptionUrl: (body.subscriptionUrl as string).trim() }),
+        ...(body?.autoRotate === undefined ? {} : { autoRotate: body.autoRotate as boolean }),
+      })
+      // Only the two settings that change WHAT the core runs justify a restart;
+      // toggling auto-rotation must not drop every live connection.
+      const needsRestart = body?.enabled !== undefined || body?.subscriptionUrl !== undefined
+      if (needsRestart) {
+        try {
+          // Apply immediately: a save that only persisted would leave the panel
+          // showing a state the core is not actually in.
+          await clash.restart()
+        } catch (error) {
+          // The settings are persisted on purpose (the user sees what they typed);
+          // the start failure is reported as its own message, not as a rejected payload.
+          fail(error instanceof Error ? error.message : String(error))
+        }
+      }
+      return clash.status()
+    },
+
+    'clash.select': async (payload) => {
+      const node = (payload as { node?: unknown } | undefined)?.node
+      if (typeof node !== 'string' || node === '') fail('node is required')
+      try {
+        await clash.select(node)
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+      return clash.status()
+    },
+
+    'clash.restart': async () => {
+      try {
+        await clash.restart()
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+      return clash.status()
     },
 
     'ui.prefs.get': async () => uiPrefs.get(),
