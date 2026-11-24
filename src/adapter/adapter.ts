@@ -342,20 +342,6 @@ export class AgyAdapter extends LlmAdapter {
    * sending text-only is the exact failure mode this path exists to prevent.
    */
   /**
-   * Whether the system prompt rides the first user turn instead of the
-   * dedicated `systemInstruction` slot.
-   *
-   * DEFAULT ON. Upstream risk control rejects the client-identity phrasing the
-   * host prompt carries when it arrives in that slot: a plain 400, whose body is
-   * then closed mid-flight, and undici's HTTP/1 parser asserts on a paused
-   * parser when the socket ends under it (upstream #5360), which crashes the
-   * whole host rather than failing the turn. Moving the same text into the first
-   * user turn keeps the instruction and never opens that path.
-   *
-   * `DSH_AGY_KEEP_SYSTEM_INSTRUCTION=1` restores the documented shape for a
-   * caller that prefers it (and accepts the 400-and-crash risk).
-   */
-  /**
    * What the account's own quota cache says about a "quota exhausted" 429.
    *
    * `spent` requires EVIDENCE: at least one live family window at or below the
@@ -381,10 +367,6 @@ export class AgyAdapter extends LlmAdapter {
     return live.some((entry) => (entry.remainingFraction ?? 0) > 0.2) ? 'available' : 'spent'
   }
 
-  private mergeSystemIntoUser(): boolean {
-    const raw = (process.env.DSH_AGY_KEEP_SYSTEM_INSTRUCTION ?? '').toLowerCase()
-    return raw !== '1' && raw !== 'true'
-  }
   private async resolveRequestImages(options: GenerateOptions): Promise<Map<string, AgyResolvedImage>> {
     const refs = collectImageRefs(options)
     const images = new Map<string, AgyResolvedImage>()
@@ -547,7 +529,6 @@ export class AgyAdapter extends LlmAdapter {
             : { tieredBudgetFor: this.options.tieredBudgetFor }),
           ...(images.size > 0 ? { images } : {}),
           ...(multimodalFiles.size > 0 ? { multimodalFiles } : {}),
-          ...(this.mergeSystemIntoUser() ? { mergeSystemIntoUser: true } : {}),
         })
         let response: Response
         try {
