@@ -480,6 +480,11 @@ export class AgySessionManager {
       delete (target as { coolingDownUntil?: number }).coolingDownUntil
       delete (target as { cooldownReason?: string }).cooldownReason
       delete (target as { cooldownSetAt?: string }).cooldownSetAt
+      // Family-scoped walls are the same kind of local guess, and they gate the
+      // pool even when no cooldown is set — leaving them behind made the button
+      // report success while the next request still said "temporarily blocked".
+      delete (target as { rateLimits?: unknown }).rateLimits
+      delete (target as { rateLimitResetTimes?: unknown }).rateLimitResetTimes
     })
   }
 
