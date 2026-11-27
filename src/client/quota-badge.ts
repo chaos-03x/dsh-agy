@@ -4,17 +4,19 @@
  * Shows the tightest of the active account's tracked windows, and opens the
  * window breakdown floating card on hover or click.
  *
- * Built with DSH native UI primitives (Button, Tag, StateDot, useAnchoredPosition,
+ * Built with DSH native UI primitives (Button, Tag, StateDot,
  * useDismissOnOutsidePointer) and semantic design tokens (--dsw-*).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
+// `react-dom` is shared into the shell's frozen module table
+// (`PLATFORM_MODULES`), so importing it here does NOT inline a second copy.
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import {
   Button,
   StateDot,
   Tag,
-  useAnchoredPosition,
   useDismissOnOutsidePointer,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -237,15 +239,8 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
   // Dismiss pinned popover on outside pointer
   useDismissOnOutsidePointer(rootRef, isPinned, setIsPinned, panelRef)
 
-  // Anchored position calculation for desktop placement
-  const anchored = useAnchoredPosition({
-    open: isOpen && !isMobile,
-    anchorRef: rootRef,
-    panelRef,
-    side: 'bottom',
-    gap: 6,
-    margin: 12,
-  })
+  // CSS Anchor Name for desktop placement
+  const anchorName = `--agy-badge-${useId().replaceAll(':', '')}`
 
   const handleMouseEnterBadge = () => {
     if (leaveTimerRef.current !== null) {
@@ -337,14 +332,10 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
       ref: panelRef,
       className: `agy-ui-popover ${isMobile ? 'mobile' : 'desktop'}`,
       style: !isMobile
-        ? (anchored === null
-            ? { visibility: 'hidden' as const }
-            : {
-                position: 'fixed' as const,
-                top: `${anchored.top}px`,
-                left: `${anchored.left}px`,
-                visibility: 'visible' as const,
-              })
+        ? {
+            position: 'fixed' as const,
+            positionAnchor: anchorName,
+          }
         : undefined,
       onMouseEnter: handleMouseEnterPopover,
       onMouseLeave: handleMouseLeavePopover,
@@ -507,24 +498,47 @@ export function AgyQuotaBadge({ rpc, t }: { rpc: AgyRpcClient, t: QuotaTranslate
     ),
   )
 
-  const popoverNode = isOpen
-    ? (isMobile
-        ? h(
-            'div',
-            {
-              className: 'agy-ui-popover-container mobile',
-              onClick: handleClose,
-            },
-            popoverContent,
-          )
-        : popoverContent)
+  /**
+   * The popover is PORTALED to `document.body`, for both layouts.
+   *
+   * WHY. The badge lives in `conversation.session.header.actions`, whose owning
+   * cluster (`.titleCluster` in the host's ConversationRoot CSS) is
+   * `overflow: clip` with a trailing `mask-image` fade — a clipping context
+   * that exists so overflowing header buttons cannot steal clicks. An inline
+   * popover is therefore clipped to the header's height and fades out near its
+   * right edge, which is exactly "clicked the badge, nothing appeared" (or a
+   * panel with its right side missing). A fixed-position box inside that
+   * ancestor is still clipped: `overflow` clips descendants regardless of
+   * `position: fixed` on a masked ancestor.
+   *
+   * Portaling also makes the mobile sheet honest: it was already
+   * `position: fixed; inset: 0`, but rendering it inside the header meant its
+   * backdrop covered only the header band.
+   *
+   * CSS anchors keep the popover attached to its trigger within layout-viewport
+   * size limits. Browser zoom and panning move it with the page.
+   */
+  const popoverNode = isOpen && typeof document !== 'undefined'
+    ? createPortal(
+        isMobile
+          ? h(
+              'div',
+              {
+                className: 'agy-ui-popover-container mobile',
+                onClick: handleClose,
+              },
+              popoverContent,
+            )
+          : popoverContent,
+        document.body,
+      )
     : null
 
   return h(
     'span',
     {
       ref: rootRef,
-      style: { position: 'relative', display: 'inline-flex', alignItems: 'center' },
+      style: { position: 'relative', display: 'inline-flex', alignItems: 'center', anchorName },
     },
     h(
       Button,

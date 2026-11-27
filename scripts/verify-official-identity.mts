@@ -23,7 +23,13 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 
-import { AGY_ENDPOINT_FALLBACKS, AGY_IDE_TYPE, AGY_PLATFORM_ENUM, AGY_VERSION_FALLBACK } from '../src/oauth/constants.ts'
+import {
+  AGY_CLI_VERSION_FALLBACK,
+  AGY_ENDPOINT_FALLBACKS,
+  AGY_IDE_TYPE,
+  AGY_PLATFORM_ENUM,
+  AGY_VERSION_FALLBACK,
+} from '../src/oauth/constants.ts'
 
 const record = JSON.parse(readFileSync(new URL('../docs/official-identity.json', import.meta.url), 'utf8')) as {
   version: {
@@ -33,6 +39,14 @@ const record = JSON.parse(readFileSync(new URL('../docs/official-identity.json',
     namespacesAreDisjoint: Record<string, string>
   }
   clientMetadata: { enums: Record<string, string[]>; ours: { ideType: { value: string }; platform: { value: string } } }
+  userAgentProfiles?: { default?: string }
+  version: {
+    claimedLine: string
+    installed: { value: string }
+    feed: { latest: string; url: string }
+    namespacesAreDisjoint: Record<string, string>
+    hubProfileFallback?: string
+  }
   endpoints: { baseUrls: string[]; knownDeviations?: { extraInOurs?: { host?: string }; missingFromOurs?: { host?: string } } }
   headers: { absentFromBothBinaries: { names: string[] }; presentInCli: Record<string, unknown> }
 }
@@ -56,21 +70,40 @@ function ok(message: string): void {
 
 console.log('--- compiled values vs the record ---')
 
-if (record.version.claimedLine !== 'cli') {
-  fail(`record claims "${record.version.claimedLine}", but this package's version line is the CLI's`)
-} else {
-  ok('claimed product line is the CLI')
-}
-
-const fallbackMinor = AGY_VERSION_FALLBACK.split('.').slice(0, 2).join('.')
-const cliMinor = record.version.feed.latest.split('.').slice(0, 2).join('.')
-if (fallbackMinor !== cliMinor) {
+// The compiled fallback belongs to the line the ACTIVE UA PROFILE draws from, not
+// to a single global "claimed product": the credentials are the CLI's while the
+// identity presented on the wire is switchable (see `ua-profile.ts`). So the
+// assertion is "the fallback matches the DEFAULT profile's line", which is what
+// the record's `userAgentProfiles.default` names.
+const defaultProfile = (record.userAgentProfiles?.default ?? 'electron')
+const fallbackLine = AGY_VERSION_FALLBACK.split('.')[0]
+// Each line's own feed entry, so a mismatch names the value it should have been.
+const lineFeed = defaultProfile === 'cli' ? record.version.feed.latest : record.version.hubProfileFallback
+if (typeof lineFeed !== 'string') {
   fail(
-    `AGY_VERSION_FALLBACK is ${AGY_VERSION_FALLBACK} but the record's CLI feed latest is ${record.version.feed.latest}; ` +
-      'these must share a minor, because the fallback must name a version that exists for the product we claim',
+    `record has no version to compare against for the default UA profile "${defaultProfile}"; ` +
+      'add `version.hubProfileFallback` (or `version.feed.latest` for the CLI profile)',
+  )
+} else if (fallbackLine !== lineFeed.split('.')[0]) {
+  fail(
+    `AGY_VERSION_FALLBACK is ${AGY_VERSION_FALLBACK} but the default profile "${defaultProfile}" draws from line ` +
+      `${lineFeed.split('.')[0]}.x (recorded value ${lineFeed}); the fallback must name a version on THAT line, ` +
+      'because a number from the other line is retired on the data plane AND drops the Gemini quota group',
   )
 } else {
-  ok(`AGY_VERSION_FALLBACK ${AGY_VERSION_FALLBACK} is on the CLI line (${cliMinor}.x)`)
+  ok(`AGY_VERSION_FALLBACK ${AGY_VERSION_FALLBACK} is on the default profile's line (${defaultProfile}, ${lineFeed.split('.')[0]}.x)`)
+}
+
+// The CLI line has its OWN floor, and it must name a CLI-line release: reusing
+// the hub floor here is what made the CLI profile emit `antigravity/cli/2.28.2`.
+const cliMajor = record.version.feed.latest.split('.')[0]
+if (AGY_CLI_VERSION_FALLBACK.split('.')[0] !== cliMajor) {
+  fail(
+    `AGY_CLI_VERSION_FALLBACK is ${AGY_CLI_VERSION_FALLBACK} but the CLI feed latest is ${record.version.feed.latest}; ` +
+      'the CLI shape must carry a CLI-line version or the data plane retires it',
+  )
+} else {
+  ok(`AGY_CLI_VERSION_FALLBACK ${AGY_CLI_VERSION_FALLBACK} is on the CLI line (${cliMajor}.x)`)
 }
 
 // The version pool must stay inside ONE namespace. This is the check that would
@@ -79,16 +112,19 @@ if (fallbackMinor !== cliMinor) {
 const pool = JSON.parse(
   readFileSync(new URL('../src/runtime/fingerprint-data.json', import.meta.url), 'utf8'),
 ) as { versionPool?: string[] }
-const major = record.version.feed.latest.split('.')[0]
+// The pool belongs to the DEFAULT profile's line, for the same reason the
+// fallback does. A pool spanning two lines advertises a version that does not
+// exist for the product named beside it.
+const major = (typeof lineFeed === 'string' ? lineFeed : AGY_VERSION_FALLBACK).split('.')[0]
 const offLine = (pool.versionPool ?? []).filter((v) => v.split('.')[0] !== major)
 if (offLine.length > 0) {
   fail(
-    `fingerprint-data.json versionPool mixes namespaces: ${offLine.join(', ')} are not CLI-line versions. ` +
+    `fingerprint-data.json versionPool mixes namespaces: ${offLine.join(', ')} are not ${major}.x versions. ` +
       `The IDE (${record.version.namespacesAreDisjoint['ide']}) and hub (${record.version.namespacesAreDisjoint['hub']}) ` +
-      'lines are different products, so a pool spanning them advertises a version that does not exist for the CLI.',
+      `lines are different products, so a pool spanning them advertises a version that does not exist for "${defaultProfile}".`,
   )
 } else {
-  ok(`versionPool is CLI-line only (${(pool.versionPool ?? []).join(', ')})`)
+  ok(`versionPool is ${major}.x only (${(pool.versionPool ?? []).join(', ')})`)
 }
 
 for (const [field, value] of [

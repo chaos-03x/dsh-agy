@@ -3,8 +3,9 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, resolveWireModel, toAgyRequestBody } from '../src/adapter/translate.ts'
+import { AGY_CLAUDE_MAX_OUTPUT_TOKENS, AGY_SCHEMA_ALLOWLIST, resolveWireModel, sanitizeSystemText, toAgyRequestBody } from '../src/adapter/translate.ts'
 import {
+  AgyClientRetiredError,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   parseAgySse,
   parseSseDataLine,
@@ -481,6 +482,78 @@ describe('translate', () => {
       {},
     )
     expect(body.request.systemInstruction).toEqual({ parts: [{ text: 'from options\n\nfrom history' }] })
+  })
+
+  /**
+   * The upstream's ingress filter answers 429 to two sentences that the harness
+   * puts in the system prompt. Measured 2026-11-15: each sentence 429s ALONE
+   * (so they are independent), the same text in a user turn is served, and
+   * shuffling the word order clears it — phrase matching, not a quota signal.
+   * `translate.ts` rewrites both at the wire boundary; these tests pin the
+   * rewrite AND that ordinary prompts pass through untouched.
+   */
+  it('rewrites the bare DeepSeek Harness self-identification in the system slot', () => {
+    const system = 'You are an AI agent powered by DeepSeek Harness.\n\nBe terse.'
+    const body = toAgyRequestBody(generateOptions({ system }), {})
+    const sent = body.request.systemInstruction!.parts[0]!.text
+    expect(sent).not.toContain('DeepSeek Harness')
+    expect(sent).toBe('You are an AI agent powered by Antigravity.\n\nBe terse.')
+  })
+
+  it('rewrites the DOM sentence in the system slot', () => {
+    const system = 'The browser provides no implicit DOM, route, or screenshot context.'
+    const body = toAgyRequestBody(generateOptions({ system }), {})
+    const sent = body.request.systemInstruction!.parts[0]!.text
+    expect(sent).not.toContain('DOM')
+    expect(sent).toBe('The browser exposes no page structure directly.')
+  })
+
+  it('rewrites BOTH triggers, because either one alone still 429s', () => {
+    const system = [
+      'You are an AI agent powered by DeepSeek Harness.',
+      'The browser provides no implicit DOM, route, or screenshot context.',
+    ].join('\n\n')
+    const body = toAgyRequestBody(generateOptions({ system }), {})
+    const sent = body.request.systemInstruction!.parts[0]!.text
+    expect(sent).not.toContain('DeepSeek Harness')
+    expect(sent).not.toContain('DOM')
+  })
+
+  it('rewrites a trigger that arrives through the system-role history too', () => {
+    // The rewrite runs after the join, so both channels are covered by one call.
+    const messages = [
+      { id: 's', role: 'system', content: [{ type: 'text', text: 'You are an AI agent powered by DeepSeek Harness.' }] },
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    expect(body.request.systemInstruction!.parts[0]!.text)
+      .toBe('You are an AI agent powered by Antigravity.')
+  })
+
+  it('leaves an ordinary system prompt byte-identical', () => {
+    // The guard that keeps the rewrite from becoming a blanket mutation.
+    const system = 'You are an AI agent. Be terse, and never invent file paths.'
+    expect(sanitizeSystemText(system)).toBe(system)
+    const body = toAgyRequestBody(generateOptions({ system }), {})
+    expect(body.request.systemInstruction).toEqual({ parts: [{ text: system }] })
+  })
+
+  it('never rewrites USER content, only the system slot', () => {
+    // The filter is scoped to systemInstruction (user turns carrying the same
+    // text are served), so user prose must reach the wire untouched.
+    const messages = [
+      { id: 's', role: 'system', content: [{ type: 'text', text: 'be terse' }] },
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'quote: You are an AI agent powered by DeepSeek Harness.' }] },
+    ]
+    const body = toAgyRequestBody(
+      generateOptions({ messages: messages as unknown as GenerateOptions['messages'] }),
+      {},
+    )
+    const userTurn = body.request.contents.find((c) => c.role === 'user')!
+    expect(userTurn.parts[0]!.text).toContain('You are an AI agent powered by DeepSeek Harness.')
   })
 
   it('skips a developer message: tool bookkeeping is not a conversation turn', () => {
@@ -1362,6 +1435,39 @@ describe('parseAgySse', () => {
     const chunks = await collect(parseAgySse(sseStream([
       'data: [{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}]',
       'data: [DONE]',
+    ])))
+    expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('names the version-gate notice instead of reporting a truncated stream', async () => {
+    // MEASURED 2026-11-08: a gated identity gets HTTP 200 and this one-line
+    // plain-text body, as an ordinary `data:` chunk carrying NO finishReason —
+    // so it lands on the completeness guard and used to surface as the generic
+    // "terminated prematurely", sending the reader after the network when the
+    // cause was the identity. The notice is SPLIT across two parts here so the
+    // accumulated-prefix match is what is being pinned, not a single part.
+    await expect(async () => {
+      for await (const _ of parseAgySse(sseStream([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"This version of Antigravity is no longer supp"}]}}]}}',
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"orted. Please download and install the latest version at https://antigravity.google/download to continue using the agent."}]}}]}}',
+      ]))) void _
+    }).rejects.toBeInstanceOf(AgyClientRetiredError)
+  })
+
+  it('carries the upstream notice and an actionable message on the gate error', async () => {
+    await expect(async () => {
+      for await (const _ of parseAgySse(sseStream([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"This version of Antigravity is no longer supported. Please update."}]}}]}}',
+      ]))) void _
+    }).rejects.toThrow(/no longer supported — update dsh-agy/)
+  })
+
+  it('does not mistake a normal reply MENTIONING the notice for the gate', async () => {
+    // Only a body that STARTS with the notice is the gate; a real answer that
+    // quotes it later still ends with a finishReason and must complete normally.
+    const chunks = await collect(parseAgySse(sseStream([
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"Users see: This version of Antigravity is no longer supported."}]}}]}}',
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":" Done."}]},"finishReason":"STOP"}]}}',
     ])))
     expect(chunks[chunks.length - 1]).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
@@ -2400,6 +2506,25 @@ describe('AgyAdapter', () => {
     await expect(async () => {
       for await (const _ of adapter.stream(generateOptions())) void _
     }).rejects.toMatchObject({ code: 'UPSTREAM' })
+    expect(failures).toEqual(['request-error'])
+  })
+
+  it('does not cool the account for the version-gate notice', async () => {
+    // The gate is a verdict on the IDENTITY the request presented, not account
+    // health: `network-error` would cool and rotate a healthy account, and the
+    // next one would present the same gated identity. request-error is the
+    // no-op, and the notice rides the message so the cause is visible.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sseStream([
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"This version of Antigravity is no longer supported. Please update."}]}}]}}',
+    ]), { status: 200 })))
+    const failures: string[] = []
+    const adapter = new AgyAdapter({
+      getSession: async () => session(),
+      reportFailure: async (kind) => { failures.push(kind) },
+    })
+    await expect(async () => {
+      for await (const _ of adapter.stream(generateOptions())) void _
+    }).rejects.toThrow(/no longer supported — update dsh-agy/)
     expect(failures).toEqual(['request-error'])
   })
 

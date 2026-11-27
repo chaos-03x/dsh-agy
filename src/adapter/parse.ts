@@ -123,6 +123,39 @@ export class UnmappedFinishReasonError extends Error {
 }
 
 /**
+ * The upstream's "this client is too old" notice, recognised from the text it
+ * serves instead of a generation.
+ *
+ * MEASURED (2026-11-08): the data plane answers a gated identity with HTTP 200
+ * and a one-line plain-text body —
+ *
+ *   This version of Antigravity is no longer supported. Please download and
+ *   install the latest version at https://antigravity.google/download ...
+ *
+ * — as an ordinary `data:` chunk carrying NO `finishReason`. Without this
+ * classification the turn fails as "prematurely terminated" (the completeness
+ * guard below), which reads as a broken stream and sends the reader hunting the
+ * network; the real cause is the identity the request presented (see
+ * `agyCliUserAgent`).
+ */
+export class AgyClientRetiredError extends Error {
+  constructor(readonly notice: string) {
+    super(
+      'agy refused the turn: the upstream reports this client version is no longer supported '
+      + `— update dsh-agy (${notice})`,
+    )
+    this.name = 'AgyClientRetiredError'
+  }
+}
+
+/**
+ * Text the retirement notice starts with. Matched on the accumulated stream
+ * text, not a single chunk, because the notice is one part on a short stream
+ * but nothing guarantees the split.
+ */
+const CLIENT_RETIRED_PREFIX = 'This version of Antigravity is no longer supported'
+
+/**
  * Thrown when the SSE body produces no bytes for longer than the idle timeout.
  *
  * The streaming dispatcher deliberately runs with `bodyTimeout: 0` (a reasoning
@@ -282,6 +315,12 @@ export async function* parseAgySse(
   let sawFinishReason = false
   let sawUsage = false
   let lastUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number } | null = null
+  /**
+   * Text seen so far, capped, so the retirement notice can be recognised even
+   * when it is split across parts. The notice is the whole body on a gated
+   * turn, so a small prefix window is enough and keeps this O(1) per chunk.
+   */
+  let textPrefix = ''
 
   interface OpenBlock {
     kind: 'text' | 'reasoning' | 'tool-call'
@@ -410,6 +449,11 @@ export async function* parseAgySse(
           out.push(...ensureBlock('text'))
           open!.text += part.text
           out.push({ type: 'text-delta', index: blockIndex, text: part.text })
+          // Buffer a bounded prefix so a split notice is still recognised. The
+          // notice's own text is well under this window, and a real answer that
+          // merely contains the sentence later is not the gate — the gate is a
+          // body that STARTS with it.
+          if (textPrefix.length <= CLIENT_RETIRED_PREFIX.length) textPrefix += part.text
         } else if (part.text !== undefined && part.thought === true) {
           out.push(...ensureBlock('reasoning'))
           open!.text += part.text
@@ -524,6 +568,13 @@ export async function* parseAgySse(
     // the default `stop` here presented truncated replies as successful
     // (issue #85). Either signal alone completes the stream.
     if (!sawDone && !sawFinishReason) {
+      // The retirement notice reaches this branch unchanged (HTTP 200, text, no
+      // finishReason), so name it rather than reporting a truncated stream: the
+      // HTTP status gave no hint, and "terminated prematurely" sent the reader
+      // after the network when the cause was the presented identity.
+      if (textPrefix.trimStart().startsWith(CLIENT_RETIRED_PREFIX)) {
+        throw new AgyClientRetiredError(textPrefix.trim())
+      }
       throw new Error('agy stream terminated prematurely without [DONE] or finishReason')
     }
     const closed = closeBlock()

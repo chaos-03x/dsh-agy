@@ -21,11 +21,21 @@
  *       { bucketId: "gemini-5h", window: "5h", remainingFraction, resetTime },
  *       { bucketId: "gemini-weekly", window: "weekly", ... } ] } ] }
  *
- * The identity used is the same bootstrap User-Agent as `fetchAvailableModels`
- * (that pair is what answers 200 here), so nothing new is impersonated.
+ * The identity is the ACTIVE UA PROFILE (`ua-profile.ts`), the same one
+ * generation and model discovery send — a single process presenting two client
+ * strings is the anomaly this client exists to avoid.
+ *
+ * MEASURED (2026-11-09), and the reason this endpoint is profile-sensitive:
+ * the version LINE decides which groups come back. A hub `2.x` string and
+ * a CLI `1.x` string both return `Gemini Models` + `Claude and GPT models`,
+ * while a hub string carrying a `1.x` version returns ONLY
+ * `Claude and GPT models` — the "Gemini quota is missing" symptom. So the
+ * bootstrap identity must be built from the profile, never from a hardcoded
+ * template with a version borrowed from the other product's line.
  */
 
-import { AGY_ENDPOINT_FALLBACKS, getAgyBootstrapUserAgent } from '../oauth/constants.ts'
+import { AGY_ENDPOINT_FALLBACKS } from '../oauth/constants.ts'
+import { activeUserAgent } from '../ua-profile.ts'
 import { proxiedFetch } from '../proxy.ts'
 import { QUOTA_WINDOWS } from '../types.ts'
 import type { QuotaGroup, QuotaWindow } from '../types.ts'
@@ -141,7 +151,7 @@ export async function fetchQuotaSummary(
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
-          'User-Agent': getAgyBootstrapUserAgent(),
+          'User-Agent': activeUserAgent(),
         },
         body,
       })
